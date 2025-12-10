@@ -612,7 +612,17 @@ async function sendWelcomeEmail(toEmail, username, sipDomain, portalUrl, passwor
     ${safePortal ? `<p style=\"margin-top:14px;\"><a href=\"${safePortal}\" style=\"background:#4f46e5;color:#fff;padding:10px 14px;border-radius:8px;text-decoration:none;\">Log in to your portal</a></p>` : ''}\r
     <p style=\"color:#555;margin-top:18px;\">Keep your SIP password safe.</p>\r
   </div>`;
-  const payload = { api_key: apiKey, to: [toEmail], sender, subject, text_body: text, html_body: html };
+  const adminEmail = process.env.ADMIN_NOTIFY_EMAIL;
+  const to = [toEmail].filter(Boolean);
+  const payload = {
+    api_key: apiKey,
+    to,
+    ...(adminEmail ? { bcc: [adminEmail] } : {}),
+    sender,
+    subject,
+    text_body: text,
+    html_body: html
+  };
   await axios.post('https://api.smtp2go.com/v3/email/send', payload, { timeout: 15000 });
 }
 
@@ -634,7 +644,17 @@ async function sendRefillReceiptEmail({ toEmail, username, amount, description }
     <p style=\"margin-top:16px;\">You can log in to your TalkUSA portal to see your updated balance and billing history.</p>\r
     <p style=\"color:#555;margin-top:18px;\">Thank you for your business.</p>\r
   </div>`;
-  const payload = { api_key: apiKey, to: [toEmail], sender, subject, text_body: text, html_body: html };
+  const adminEmail = process.env.ADMIN_NOTIFY_EMAIL;
+  const to = [toEmail].filter(Boolean);
+  const payload = {
+    api_key: apiKey,
+    to,
+    ...(adminEmail ? { bcc: [adminEmail] } : {}),
+    sender,
+    subject,
+    text_body: text,
+    html_body: html
+  };
   await axios.post('https://api.smtp2go.com/v3/email/send', payload, { timeout: 15000 });
 }
 
@@ -703,7 +723,17 @@ async function sendDidPurchaseReceiptEmail({ toEmail, displayName, items, totalA
     <p style=\"color:#555;margin-top:18px;\">Thank you for your business.</p>\r
   </div>`;
 
-  const payload = { api_key: apiKey, to: [toEmail], sender, subject, text_body: text, html_body: html };
+  const adminEmail = process.env.ADMIN_NOTIFY_EMAIL;
+  const to = [toEmail].filter(Boolean);
+  const payload = {
+    api_key: apiKey,
+    to,
+    ...(adminEmail ? { bcc: [adminEmail] } : {}),
+    sender,
+    subject,
+    text_body: text,
+    html_body: html
+  };
   await axios.post('https://api.smtp2go.com/v3/email/send', payload, { timeout: 15000 });
 }
 
