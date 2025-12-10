@@ -15,11 +15,14 @@
     .footer-links a:hover{color:#ffffff;text-decoration:underline}
     header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:#4f46e5;border-bottom:1px solid #4338ca;color:#fff}
     .brand{font-weight:700}
+    .header-right{display:flex;align-items:center;gap:12px;font-size:14px}
+    .header-balance{font-size:14px;color:#bbf7d0}
     .wrap{display:flex;height:calc(100vh - 54px)}
     aside{width:220px;border-right:1px solid #1e3a5f;background:linear-gradient(180deg,#0f172a 0%,#1e3a5f 100%)}
     aside a{display:block;padding:14px 18px;color:#93c5fd;text-decoration:none;border-bottom:1px solid #1e40af;transition:all 0.2s}
     aside a:hover{background:#1e40af;color:#fff}
     aside a.active{background:#eff6ff;color:#1e3a8a;font-weight:600}
+    .sidebar-user{padding:12px 18px;color:#9ca3af;font-size:12px;border-top:1px solid #1e3a8a;background:rgba(15,23,42,0.85)}
     main{flex:1;overflow:auto;padding:16px}
     h2{margin:8px 0 12px 0}
     table{width:100%;border-collapse:collapse}
@@ -70,7 +73,12 @@
 <body>
   <header>
     <div class="brand">TalkUSA</div>
-    <div>Signed in as <%= username %> · <form style="display:inline" method="post" action="/logout"><button type="submit">Logout</button></form></div>
+    <div class="header-right">
+      <span>Signed in as <strong><%= username %></strong></span>
+      <span id="currentBalance" class="header-balance"></span>
+      <button id="addFundBtn" style="background:#059669">➕ Add Funds</button>
+      <form style="display:inline" method="post" action="/logout"><button type="submit">Logout</button></form>
+    </div>
   </header>
   <div class="wrap">
     <aside>
@@ -81,6 +89,7 @@
       <a href="#trunk" id="tab-trunk">↪️ Call Forwarding</a>
       <a href="#cdr" id="tab-cdr">📊 Call History</a>
       <a href="#billing" id="tab-billing">💳 Billing History</a>
+      <div class="sidebar-user">Signed in as <strong><%= username %></strong></div>
     </aside>
     <main>
       <section id="view-profile">
@@ -192,10 +201,6 @@
       </section>
       <section id="view-billing" style="display:none">
         <h2>Billing History</h2>
-        <div class="toolbar">
-          <button id="addFundBtn" style="background:#059669">➕ Add Funds</button>
-          <span id="currentBalance" class="muted" style="margin-left:12px"></span>
-        </div>
         <table id="billing-table" style="display:none">
           <thead><tr><th>Date</th><th>Amount</th><th>Description</th><th>Status</th></tr></thead>
           <tbody></tbody>
@@ -321,6 +326,10 @@
         if (j.success){
           const body = $('#profile-table tbody'); body.innerHTML = '';
           const balanceDisplay = d.balance !== null && d.balance !== undefined ? `$${Number(d.balance).toFixed(2)}` : 'Loading...';
+          // Update header balance if element exists
+          if (d.balance !== null && d.balance !== undefined && $('#currentBalance')) {
+            $('#currentBalance').innerHTML = `Current Balance: <strong style="color:#bbf7d0">$${Number(d.balance).toFixed(2)}</strong>`;
+          }
           const callLimitDisplay = d.callLimit !== null && d.callLimit !== undefined ? String(d.callLimit) : '0';
           const cpsLimitDisplay = d.cpsLimit !== null && d.cpsLimit !== undefined ? String(d.cpsLimit) : '0';
           const fields = [['Name', d.name||''],['Email', d.email||''],['Phone', d.phone||''],['Username', d.username||''],['SIP Domain', d.sipDomain||new URL(location.href).hostname],['Balance', balanceDisplay],['Channel Limit', callLimitDisplay],['CPS Limit', cpsLimitDisplay]];
@@ -848,8 +857,8 @@
         billingData = j.data || [];
         const balance = j.balance;
         
-        // Update balance display
-        if (balance !== undefined && balance !== null) {
+        // Update balance display in header if element exists
+        if (balance !== undefined && balance !== null && $('#currentBalance')) {
           $('#currentBalance').innerHTML = `Current Balance: <strong style="color:#059669">$${Number(balance).toFixed(2)}</strong>`;
         }
         
