@@ -16,7 +16,7 @@
     header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:#4f46e5;border-bottom:1px solid #4338ca;color:#fff}
     .brand{font-weight:700}
     .header-right{display:flex;align-items:center;gap:12px;font-size:14px}
-    .header-balance{font-size:14px;color:#bbf7d0}
+.header-balance{font-size:14px;color:#e5e7eb}
     .wrap{display:flex;height:calc(100vh - 54px)}
     aside{width:220px;border-right:1px solid #1e3a5f;background:linear-gradient(180deg,#0f172a 0%,#1e3a5f 100%)}
     aside a{display:block;padding:14px 18px;color:#93c5fd;text-decoration:none;border-bottom:1px solid #1e40af;transition:all 0.2s}
@@ -331,7 +331,7 @@
           const balanceDisplay = d.balance !== null && d.balance !== undefined ? `$${Number(d.balance).toFixed(2)}` : 'Loading...';
           // Update header balance if element exists
           if (d.balance !== null && d.balance !== undefined && $('#currentBalance')) {
-            $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#059669\">$${Number(d.balance).toFixed(2)}</strong>`;
+$('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15\">$${Number(d.balance).toFixed(2)}</strong>`;
           }
           const callLimitDisplay = d.callLimit !== null && d.callLimit !== undefined ? String(d.callLimit) : '0';
           const cpsLimitDisplay = d.cpsLimit !== null && d.cpsLimit !== undefined ? String(d.cpsLimit) : '0';
@@ -887,7 +887,7 @@
         
         // Update balance display in header if element exists
         if (balance !== undefined && balance !== null && $('#currentBalance')) {
-          $('#currentBalance').innerHTML = `Current Balance: <strong style="color:#059669">$${Number(balance).toFixed(2)}</strong>`;
+$('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15\">$${Number(balance).toFixed(2)}</strong>`;
         }
         
         const tbody = $('#billing-table tbody');
