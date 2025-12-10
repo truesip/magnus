@@ -991,6 +991,8 @@ app.get('/api/me/billing-history', requireAuth, async (req, res) => {
       [userId]
     );
 
+    if (DEBUG) console.log('[billing.history.rows]', { userId, count: rows.length, sample: rows[0] || null });
+
     // Also fetch current balance from MagnusBilling
     let balance = null;
     try {
