@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TalkUSA - Enterprise-Grade Connectivity. Small Business Pricing.</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            color: #1f2937;
+            line-height: 1.6;
+        }
+
+        /* Navigation */
+        nav {
+            background: #fff;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+        }
+
+        .nav-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 20px;
+        }
+
+        .logo {
+            font-size: 24px;
+            font-weight: 700;
+            color: #4f46e5;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 32px;
+            list-style: none;
+        }
+
+        .nav-links a {
+            color: #4b5563;
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+
+        .nav-links a:hover {
+            color: #4f46e5;
+        }
+
+        .nav-cta {
+            background: #4f46e5;
+            color: #fff;
+            padding: 10px 24px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+
+        .nav-cta:hover {
+            background: #4338ca;
+        }
+
+        /* Hero Section */
+        .hero {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+            padding: 80px 20px;
+            text-align: center;
+        }
+
+        .hero-container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        .hero h1 {
+            font-size: 48px;
+            margin-bottom: 16px;
+            font-weight: 700;
+        }
+
+        .hero p {
+            font-size: 20px;
+            margin-bottom: 32px;
+            opacity: 0.95;
+        }
+
+        .hero-cta {
+            display: flex;
+            gap: 16px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn-primary {
+            background: #fff;
+            color: #4f46e5;
+            padding: 14px 32px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 16px;
+            transition: transform 0.2s, box-shadow 0.2s;
+            display: inline-block;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: #fff;
+            border: 2px solid #fff;
+            padding: 14px 32px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 16px;
+            transition: background 0.2s;
+            display: inline-block;
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255,255,255,0.1);
+        }
+
+        /* Section Styles */
+        section {
+            padding: 80px 20px;
+        }
+
+        .section-light {
+            background: #f9fafb;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .section-title {
+            text-align: center;
+            font-size: 36px;
+            font-weight: 700;
+            margin-bottom: 48px;
+            color: #1f2937;
+        }
+
+        /* Value Proposition Grid */
+        .value-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 32px;
+        }
+
+        .value-card {
+            background: #fff;
+            padding: 32px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+            text-align: center;
+        }
+
+        .value-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        .value-card h3 {
+            font-size: 22px;
+            margin-bottom: 12px;
+            color: #4f46e5;
+        }
+
+        .value-card p {
+            color: #6b7280;
+            font-size: 15px;
+        }
+
+        /* Services Section */
+        .service-item {
+            margin-bottom: 48px;
+        }
+
+        .service-item h3 {
+            font-size: 28px;
+            color: #4f46e5;
+            margin-bottom: 16px;
+        }
+
+        .service-features {
+            display: grid;
+            gap: 16px;
+            margin-top: 16px;
+        }
+
+        .service-feature {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+        }
+
+        .service-feature strong {
+            color: #1f2937;
+            min-width: 180px;
+        }
+
+        .service-feature span {
+            color: #6b7280;
+        }
+
+        /* Pricing Table */
+        .pricing-table {
+            background: #fff;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+            margin: 32px 0;
+        }
+
+        .pricing-table table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .pricing-table thead {
+            background: #4f46e5;
+            color: #fff;
+        }
+
+        .pricing-table th {
+            padding: 16px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 15px;
+        }
+
+        .pricing-table td {
+            padding: 16px;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .pricing-table tbody tr:hover {
+            background: #f9fafb;
+        }
+
+        .pricing-note {
+            background: #eef2ff;
+            border-left: 4px solid #4f46e5;
+            padding: 16px;
+            margin-top: 16px;
+            border-radius: 4px;
+            font-size: 14px;
+            color: #4b5563;
+        }
+
+        /* About Section */
+        .about-content {
+            max-width: 800px;
+            margin: 0 auto;
+            text-align: center;
+            font-size: 18px;
+            color: #4b5563;
+            line-height: 1.8;
+        }
+
+        /* Footer */
+        footer {
+            background: #1f2937;
+            color: #e5e7eb;
+            padding: 48px 20px;
+        }
+
+        .footer-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            text-align: center;
+        }
+
+        .footer-brand {
+            font-size: 24px;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 8px;
+        }
+
+        .footer-tagline {
+            color: #9ca3af;
+            margin-bottom: 32px;
+        }
+
+        .footer-contact {
+            margin-top: 24px;
+        }
+
+        .footer-contact h3 {
+            color: #fff;
+            margin-bottom: 16px;
+            font-size: 20px;
+        }
+
+        .footer-contact p {
+            margin: 8px 0;
+            color: #d1d5db;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .nav-links {
+                display: none;
+            }
+
+            .hero h1 {
+                font-size: 32px;
+            }
+
+            .hero p {
+                font-size: 16px;
+            }
+
+            .section-title {
+                font-size: 28px;
+            }
+
+            .pricing-table {
+                overflow-x: auto;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Navigation -->
+    <nav>
+        <div class="nav-container">
+            <div class="logo">TalkUSA.NET</div>
+            <ul class="nav-links">
+                <li><a href="#home">Home</a></li>
+                <li><a href="#services">Services</a></li>
+                <li><a href="#pricing">Pricing</a></li>
+                <li><a href="#about">About Us</a></li>
+                <li><a href="#contact">Contact</a></li>
+            </ul>
+            <div style="display:flex;gap:12px;align-items:center">
+                <a href="/login" style="color:#4b5563;text-decoration:none;font-weight:500">Login</a>
+                <a href="/signup" class="nav-cta">Get Started</a>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Hero Section -->
+    <section class="hero" id="home">
+        <div class="hero-container">
+            <h1>Enterprise-Grade Connectivity. Small Business Pricing.</h1>
+            <p>The simplified SIP Trunking and Virtual Number solution for modern businesses. Connect globally with crystal-clear voice quality starting at just $0.01 per minute.</p>
+            <div class="hero-cta">
+                <a href="#pricing" class="btn-primary">View Our Plans</a>
+                <a href="#contact" class="btn-secondary">Talk to Sales</a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Value Proposition -->
+    <section class="section-light">
+        <div class="container">
+            <h2 class="section-title">Why Choose TalkUSA?</h2>
+            <div class="value-grid">
+                <div class="value-card">
+                    <div class="value-icon">📞</div>
+                    <h3>Crystal Clear Quality</h3>
+                    <p>Premium Tier-1 routes ensure your business calls are always crisp and reliable.</p>
+                </div>
+                <div class="value-card">
+                    <div class="value-icon">💰</div>
+                    <h3>No Hidden Fees</h3>
+                    <p>What you see is what you get. Simple per-minute billing and transparent monthly rates.</p>
+                </div>
+                <div class="value-card">
+                    <div class="value-icon">📈</div>
+                    <h3>Instant Scalability</h3>
+                    <p>Add SIP channels or virtual numbers instantly as your business grows.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Services Section -->
+    <section id="services">
+        <div class="container">
+            <h2 class="section-title">Our Services</h2>
+            
+            <div class="service-item">
+                <h3>SIP Trunking</h3>
+                <div class="service-features">
+                    <div class="service-feature">
+                        <strong>Seamless Integration:</strong>
+                        <span>Connect your existing IP-PBX to the world. TalkUSA provides a robust SIP trunking solution compatible with major phone systems (3CX, Asterisk, Avaya, and more).</span>
+                    </div>
+                    <div class="service-feature">
+                        <strong>Pay-As-You-Go Efficiency:</strong>
+                        <span>Stop paying for channels you don't use. Our elastic SIP trunks allow for unlimited concurrent calls while you only pay for the minutes you talk.</span>
+                    </div>
+                    <div class="service-feature">
+                        <strong>Reliability:</strong>
+                        <span>Redundant network architecture ensures your business stays online.</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="service-item">
+                <h3>Virtual Numbers (DID)</h3>
+                <div class="service-features">
+                    <div class="service-feature">
+                        <strong>Local Presence, Everywhere:</strong>
+                        <span>Establish a local footprint in cities across the USA without opening a physical office. Local numbers start at just $4.99/mo.</span>
+                    </div>
+                    <div class="service-feature">
+                        <strong>Toll-Free Credibility:</strong>
+                        <span>Give your customers a free way to reach you and boost your brand's professional image. USA/CA Toll-free numbers start at $8.99/mo.</span>
+                    </div>
+                    <div class="service-feature">
+                        <strong>Inbound & Outbound:</strong>
+                        <span>Full two-way voice capabilities for all your virtual numbers.</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Pricing Section -->
+    <section class="section-light" id="pricing">
+        <div class="container">
+            <h2 class="section-title">Transparent Pricing</h2>
+            <div class="pricing-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Service</th>
+                            <th>Rate</th>
+                            <th>Details</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Outbound Calling</strong></td>
+                            <td><strong>$0.01 / min</strong></td>
+                            <td>Flat rate across USA & Canada. High-quality termination.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Inbound Calling</strong></td>
+                            <td><strong>$0.01 / min</strong></td>
+                            <td>Reliable inbound routing for your support and sales teams.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Local Numbers</strong></td>
+                            <td><strong>From $4.99 / mo</strong></td>
+                            <td>Choose from thousands of area codes. Instant activation.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Toll-Free Numbers</strong></td>
+                            <td><strong>From $8.99 / mo</strong></td>
+                            <td>800, 888, 877 and more. Covers USA & Canada.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="pricing-note">
+                <strong>Note:</strong> Volume discounts available for high-traffic call centers. Contact support for a custom quote.
+            </div>
+        </div>
+    </section>
+
+    <!-- About Section -->
+    <section id="about">
+        <div class="container">
+            <h2 class="section-title">About TalkUSA</h2>
+            <div class="about-content">
+                <p>Based in Albuquerque, New Mexico, TalkUSA.NET is dedicated to breaking down the barriers of complex telecommunications. We believe that professional voice services should be accessible, affordable, and easy to manage. Whether you are a startup needing a single virtual number or a call center requiring robust SIP trunking, our network is built to support your conversation.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer id="contact">
+        <div class="footer-container">
+            <div class="footer-brand">TalkUSA.NET</div>
+            <div class="footer-tagline">Connecting your business to the world.</div>
+            
+            <div class="footer-contact">
+                <h3>Contact Us</h3>
+                <p>📍 1209 Mountain Road PL NE, Albuquerque, NM 87110, USA</p>
+                <p>📧 support@talkusa.net</p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>

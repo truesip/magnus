@@ -1,0 +1,91 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login - TalkUSA</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f6f7fb;min-height:100vh;display:flex;flex-direction:column}
+    /* Navigation */
+    nav{background:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.1);position:sticky;top:0;z-index:1000}
+    .nav-container{max-width:1200px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;padding:16px 20px}
+    .logo{font-size:24px;font-weight:700;color:#4f46e5;text-decoration:none}
+    .nav-links{display:flex;gap:32px;list-style:none}
+    .nav-links a{color:#4b5563;text-decoration:none;font-weight:500;transition:color 0.2s}
+    .nav-links a:hover{color:#4f46e5}
+    .nav-cta{background:#4f46e5;color:#fff !important;padding:10px 24px;border-radius:8px;text-decoration:none;font-weight:600;transition:background 0.2s}
+    .nav-cta:hover{background:#4338ca}
+    @media (max-width:768px){.nav-links{display:none}}
+    /* Footer */
+    .site-footer{background:#1f2937;color:#e5e7eb;padding:48px 20px;text-align:center;margin-top:auto}
+    .footer-brand{font-size:24px;font-weight:700;color:#fff;margin-bottom:8px}
+    .footer-tagline{color:#9ca3af;margin-bottom:32px}
+    .footer-contact{margin-top:24px}
+    .footer-contact h3{color:#fff;margin-bottom:16px;font-size:20px}
+    .footer-contact p{margin:8px 0;color:#d1d5db}
+    /* Main */
+    .main-content{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px}
+    .card{background:#fff;border:1px solid #e5e7ef;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.06);padding:24px;max-width:380px;width:calc(100% - 24px)}
+    h1{margin:0 0 8px 0;font-size:20px;text-align:center}
+    .field{margin:10px auto;max-width:85%}
+    label{display:block;font-size:12px;color:#555;margin-bottom:6px}
+    input{width:100%;padding:12px 14px;border:1px solid #d7d9e5;border-radius:8px;font-size:14px;box-sizing:border-box}
+    .btn{width:85%;margin:12px auto 0 auto;padding:12px 14px;background:#4f46e5;color:#fff;border:none;border-radius:8px;font-weight:600;display:block;cursor:pointer}
+    .btn:hover{background:#4338ca}
+    .error{background:#fde8e8;border:1px solid #f7baba;color:#7a1d1d;border-radius:8px;padding:10px 12px;font-size:13px;margin-bottom:10px}
+    .hint{font-size:12px;color:#666;margin-top:8px;text-align:center}
+  </style>
+</head>
+<body>
+  <!-- Navigation -->
+  <nav>
+    <div class="nav-container">
+      <a href="/" class="logo">TalkUSA.NET</a>
+      <ul class="nav-links">
+        <li><a href="/#home">Home</a></li>
+        <li><a href="/#services">Services</a></li>
+        <li><a href="/#pricing">Pricing</a></li>
+        <li><a href="/#about">About Us</a></li>
+        <li><a href="/#contact">Contact</a></li>
+      </ul>
+      <div style="display:flex;gap:12px;align-items:center">
+        <a href="/login" style="color:#4b5563;text-decoration:none;font-weight:500">Login</a>
+        <a href="/signup" class="nav-cta">Get Started</a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="main-content">
+  <div class="card">
+    <h1>Login</h1>
+    <% if (error) { %>
+      <div class="error"><%= error %></div>
+    <% } %>
+    <form method="post" action="/login">
+      <div class="field">
+        <label>Email or Username</label>
+        <input type="text" name="email" placeholder="you@example.com or username" required>
+      </div>
+      <div class="field">
+        <label>Password</label>
+        <input type="password" name="password" required>
+      </div>
+      <button class="btn" type="submit">Sign in</button>
+    </form>
+    <div class="hint">Don't have an account? <a href="/signup">Sign up</a></div>
+  </div>
+  </div>
+
+  <!-- Footer -->
+  <footer class="site-footer">
+    <div class="footer-brand">TalkUSA.NET</div>
+    <div class="footer-tagline">Connecting your business to the world.</div>
+    <div class="footer-contact">
+      <h3>Contact Us</h3>
+      <p>📍 1209 Mountain Road PL NE, Albuquerque, NM 87110, USA</p>
+      <p>📧 support@talkusa.net</p>
+    </div>
+  </footer>
+</body>
+</html>

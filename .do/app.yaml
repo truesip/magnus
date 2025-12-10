@@ -1,0 +1,38 @@
+name: magnusbilling-signup
+region: nyc
+services:
+  - name: web
+    github:
+      repo: your-github-username/your-repo-name
+      branch: main
+      deploy_on_push: true
+    environment_slug: node-js
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    http_port: 8080
+    routes:
+      - path: /
+    health_check:
+      http_path: /health
+    envs:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "8080"
+- key: MAGNUSBILLING_URL
+        value: https://sip.dialerone.net/mbilling
+        type: SECRET
+      - key: MAGNUSBILLING_API_KEY
+        value: your_api_key_here
+        type: SECRET
+      - key: MAGNUSBILLING_API_SECRET
+        value: your_api_secret_here
+        type: SECRET
+      - key: MAGNUSBILLING_TLS_SERVERNAME
+        value: sip.dialerone.net
+      - key: DEFAULT_GROUP_ID
+        value: "3"
+      - key: DEFAULT_PLAN_ID
+        value: "1"
+      - key: MAGNUSBILLING_HOST_HEADER
+        value: sip.dialerone.net

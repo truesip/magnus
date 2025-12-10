@@ -1,0 +1,1431 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#f8fafc;color:#0f172a;min-height:100vh;display:flex;flex-direction:column}
+    .site-footer{background:#1f2937;color:#e5e7eb;padding:24px 20px;text-align:center}
+    .footer-brand{font-size:18px;font-weight:700;color:#fff;margin-bottom:4px}
+    .footer-tagline{color:#9ca3af;font-size:12px;margin-bottom:16px}
+    .footer-contact p{margin:4px 0;color:#d1d5db;font-size:12px}
+    header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:#4f46e5;border-bottom:1px solid #4338ca;color:#fff}
+    .brand{font-weight:700}
+    .wrap{display:flex;height:calc(100vh - 54px)}
+    aside{width:220px;border-right:1px solid #1e3a5f;background:linear-gradient(180deg,#0f172a 0%,#1e3a5f 100%)}
+    aside a{display:block;padding:14px 18px;color:#93c5fd;text-decoration:none;border-bottom:1px solid #1e40af;transition:all 0.2s}
+    aside a:hover{background:#1e40af;color:#fff}
+    aside a.active{background:#eff6ff;color:#1e3a8a;font-weight:600}
+    main{flex:1;overflow:auto;padding:16px}
+    h2{margin:8px 0 12px 0}
+    table{width:100%;border-collapse:collapse}
+    th,td{border-bottom:1px solid #e5e7eb;padding:8px 6px;text-align:left;font-size:13px}
+    .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+    input,select{border:1px solid #d1d5db;border-radius:8px;padding:8px 10px}
+    .cid-input{max-width:140px}
+    button{background:#4f46e5;color:#fff;border:none;border-radius:8px;padding:8px 12px;cursor:pointer;transition:all 0.15s ease}
+    button:hover{background:#4338ca}
+    button:active{background:#3730a3;transform:scale(0.97)}
+    button.btn-clicked{animation:btnClick 0.3s ease}
+    button[disabled]{opacity:.5;cursor:not-allowed}
+    .muted{color:#6b7280;font-size:12px}
+    pre{background:#0b1220;color:#e2e8f0;padding:8px;border-radius:8px;overflow:auto}
+    .balance-value{font-size:18px;font-weight:600;color:#059669}
+    .status-indicator{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+    .status-ok{background:#10b981}
+    .status-unreachable{background:#ef4444}
+    .status-unknown{background:#6b7280}
+    .direction-icon{color:#4f46e5;font-weight:600;font-size:16px}
+    .toast{position:fixed;top:20px;right:20px;background:#10b981;color:#fff;padding:12px 20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);z-index:9999;animation:slideIn 0.3s ease-out}
+    @keyframes slideIn{from{transform:translateX(400px);opacity:0}to{transform:translateX(0);opacity:1}}
+    @keyframes btnClick{0%{transform:scale(1)}50%{transform:scale(0.95);background:#3730a3}100%{transform:scale(1)}}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">TalkUSA</div>
+    <div>Signed in as <%= username %> · <form style="display:inline" method="post" action="/logout"><button type="submit">Logout</button></form></div>
+  </header>
+  <div class="wrap">
+    <aside>
+      <a href="#profile" id="tab-profile" class="active">👤 Profile</a>
+      <a href="#sip" id="tab-sip">📞 SIP Account</a>
+      <a href="#mydids" id="tab-mydids">📱 My Numbers</a>
+      <a href="#buydid" id="tab-buydid">🛒 Buy Numbers</a>
+      <a href="#trunk" id="tab-trunk">↪️ Call Forwarding</a>
+      <a href="#cdr" id="tab-cdr">📊 Call History</a>
+      <a href="#billing" id="tab-billing">💳 Billing History</a>
+    </aside>
+    <main>
+      <section id="view-profile">
+        <h2>Profile</h2>
+        <table id="profile-table" style="display:none"><tbody></tbody></table>
+        <div class="toolbar">
+          <button id="deleteAccountBtn" disabled title="Deleting the primary signup user is disabled">Delete Account</button>
+        </div>
+        <div id="profile-empty" class="muted">Loading…</div>
+      </section>
+      <section id="view-sip" style="display:none">
+        <h2>SIP Account</h2>
+        <div class="toolbar">
+          <button id="createSipBtn" style="background:#4f46e5">➕ Create SIP Account</button>
+          <input type="text" id="sipSearch" placeholder="Search by username or CallerID..." style="width:220px;margin-left:auto">
+          <button id="sipSearchBtn">Search</button>
+          <button id="sipClearBtn" style="background:#6b7280">Clear</button>
+        </div>
+        <table id="sip-table" style="display:none">
+          <thead><tr><th>Status</th><th>User</th><th>Password</th><th>Domain</th><th>CallerID</th><th>Direction</th><th>Actions</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="toolbar" id="sip-pager" style="display:none">
+          <button id="sipPrev">Prev</button>
+          <span id="sipPageInfo" class="muted"></span>
+          <button id="sipNext">Next</button>
+        </div>
+        <div id="sip-empty" class="muted">Loading…</div>
+      </section>
+      <section id="view-cdr" style="display:none">
+        <h2>Call History</h2>
+        <div class="toolbar">
+          <label>From <input type="date" id="from"></label>
+          <label>To <input type="date" id="to"></label>
+          <select id="cdrFilter" style="margin-left:10px">
+            <option value="all">All Calls</option>
+            <option value="inbound">Inbound Only</option>
+            <option value="outbound">Outbound Only</option>
+          </select>
+          <button id="loadCdr">Load</button>
+        </div>
+        <table id="cdr-table" style="display:none">
+          <thead><tr><th>Direction</th><th>Date/Time</th><th>From</th><th>To</th><th>Duration</th><th>Cost</th><th>Status</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="toolbar" id="cdr-pager" style="display:none">
+          <button id="cdrPrev">Prev</button>
+          <span id="cdrPageInfo" class="muted"></span>
+          <button id="cdrNext">Next</button>
+        </div>
+        <div id="cdr-empty" class="muted">Loading…</div>
+      </section>
+      <section id="view-trunk" style="display:none">
+        <h2>Call Forwarding</h2>
+        <div class="toolbar">
+          <button id="createTrunkBtn" style="background:#f59e0b">➕ Create Trunk</button>
+          <input type="text" id="trunkSearch" placeholder="Search by name or destination..." style="width:220px;margin-left:auto">
+          <button id="trunkSearchBtn">Search</button>
+          <button id="trunkClearBtn" style="background:#6b7280">Clear</button>
+        </div>
+        <table id="trunk-table" style="display:none">
+          <thead><tr><th>Name</th><th>PSTN Destination</th><th>Description</th><th>Capacity</th><th>Actions</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="toolbar" id="trunk-pager" style="display:none">
+          <button id="trunkPrev">Prev</button>
+          <span id="trunkPageInfo" class="muted"></span>
+          <button id="trunkNext">Next</button>
+        </div>
+        <div id="trunk-empty" class="muted">Loading…</div>
+      </section>
+      <section id="view-buydid" style="display:none">
+        <h2>Buy Numbers</h2>
+        <div class="toolbar">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="checkbox" id="buyTollfree"> <span>🆓 Toll-Free</span>
+          </label>
+          <select id="buyCountry"><option value="">Select Country...</option></select>
+          <select id="buyRegion" disabled><option value="">Select State/Region...</option></select>
+          <select id="buyCity" disabled><option value="">Select City...</option></select>
+          <button id="searchDids">Search Numbers</button>
+        </div>
+        <div id="did-results" style="margin-top:12px">
+          <div id="did-groups-info" class="muted"></div>
+          <table id="available-dids-table" style="display:none">
+            <thead><tr><th>Number</th><th>Type</th><th>Monthly</th><th>Setup</th><th>Action</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <div id="available-dids-empty" class="muted"></div>
+        </div>
+      </section>
+      <section id="view-mydids" style="display:none">
+        <h2>My Numbers</h2>
+        <div class="toolbar">
+          <input type="text" id="mydidsSearch" placeholder="Search by number or location..." style="width:220px">
+          <button id="mydidsSearchBtn">Search</button>
+          <button id="mydidsClearBtn" style="background:#6b7280">Clear</button>
+        </div>
+        <table id="mydids-table" style="display:none">
+<thead><tr><th>Number</th><th>Location</th><th>Status</th><th>Features</th><th>Monthly</th><th>Call Forwarding</th><th>Actions</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="toolbar" id="mydids-pager" style="display:none">
+          <button id="mydidsPrev">Prev</button>
+          <span id="mydidsPageInfo" class="muted"></span>
+          <button id="mydidsNext">Next</button>
+        </div>
+        <div id="mydids-empty" class="muted">Loading…</div>
+      </section>
+      <section id="view-billing" style="display:none">
+        <h2>Billing History</h2>
+        <div class="toolbar">
+          <button id="addFundBtn" style="background:#059669">➕ Add Funds</button>
+          <span id="currentBalance" class="muted" style="margin-left:12px"></span>
+        </div>
+        <table id="billing-table" style="display:none">
+          <thead><tr><th>Date</th><th>Amount</th><th>Description</th><th>Status</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="toolbar" id="billing-pager" style="display:none">
+          <button id="billingPrev">Prev</button>
+          <span id="billingPageInfo" class="muted"></span>
+          <button id="billingNext">Next</button>
+        </div>
+        <div id="billing-empty" class="muted">Loading…</div>
+      </section>
+    </main>
+    <!-- Add Fund Modal -->
+    <div id="addFundModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
+      <div style="background:#fff;padding:24px;border-radius:12px;width:360px;max-width:90%">
+        <h3 style="margin:0 0 16px 0">💳 Add Funds</h3>
+        <div style="margin-bottom:12px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Amount ($)</label>
+          <input id="fundAmount" type="number" min="1" step="0.01" placeholder="Enter amount" style="width:100%;box-sizing:border-box">
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button id="cancelFundBtn" style="background:#6b7280">Cancel</button>
+          <button id="confirmFundBtn" style="background:#059669">Add Funds</button>
+        </div>
+      </div>
+    </div>
+    <!-- SIP Account Modal -->
+    <div id="sipModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
+      <div style="background:#fff;padding:24px;border-radius:12px;width:380px;max-width:90%">
+        <h3 style="margin:0 0 16px 0">📞 Create SIP Account</h3>
+        <div style="margin-bottom:12px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">SIP Username *</label>
+          <input id="newSipUser" type="text" placeholder="e.g. john_doe" style="width:100%;box-sizing:border-box">
+        </div>
+        <div style="margin-bottom:12px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Password *</label>
+          <input id="newSipPass" type="password" placeholder="Enter a secure password" style="width:100%;box-sizing:border-box">
+        </div>
+        <div style="margin-bottom:16px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Caller ID * <span class="muted">(numbers only, max 11 digits)</span></label>
+          <input id="newSipCID" type="text" placeholder="e.g. 12025551234" inputmode="numeric" pattern="\d{1,11}" style="width:100%;box-sizing:border-box">
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button id="cancelSipBtn" style="background:#6b7280">Cancel</button>
+          <button id="confirmSipBtn" style="background:#4f46e5">Create Account</button>
+        </div>
+      </div>
+    </div>
+    <!-- Trunk Modal -->
+    <div id="trunkModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
+      <div style="background:#fff;padding:24px;border-radius:12px;width:400px;max-width:90%">
+        <h3 style="margin:0 0 16px 0" id="trunkModalTitle">↪️ Create Call Forwarding Trunk</h3>
+        <div style="margin-bottom:12px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Trunk Name *</label>
+          <input id="newTrunkName" type="text" placeholder="e.g. Office Forward" style="width:100%;box-sizing:border-box">
+        </div>
+        <div style="margin-bottom:12px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">PSTN Number * <span class="muted">(10-11 digits)</span></label>
+          <input id="newTrunkDst" type="tel" placeholder="e.g. 12125551234" inputmode="tel" pattern="\d{10,11}" style="width:100%;box-sizing:border-box">
+        </div>
+        <div style="margin-bottom:12px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Description</label>
+          <input id="newTrunkDesc" type="text" placeholder="Optional description" style="width:100%;box-sizing:border-box">
+        </div>
+        <div style="margin-bottom:16px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Capacity <span class="muted">(concurrent calls)</span></label>
+          <input id="newTrunkCapacity" type="number" placeholder="Leave empty for unlimited" min="1" style="width:100%;box-sizing:border-box">
+        </div>
+        <input type="hidden" id="editTrunkId">
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button id="cancelTrunkBtn" style="background:#6b7280">Cancel</button>
+          <button id="confirmTrunkBtn" style="background:#f59e0b">Create Trunk</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const LOCAL_DID_MARKUP = parseFloat('<%= typeof localDidMarkup !== "undefined" ? localDidMarkup : 10.20 %>') || 0;
+    const TOLLFREE_DID_MARKUP = parseFloat('<%= typeof tollfreeDidMarkup !== "undefined" ? tollfreeDidMarkup : 25.20 %>') || 0;
+    const $ = (s)=>document.querySelector(s);
+    const tabs = {profile:$('#tab-profile'), sip:$('#tab-sip'), trunk:$('#tab-trunk'), billing:$('#tab-billing'), buydid:$('#tab-buydid'), mydids:$('#tab-mydids'), cdr:$('#tab-cdr')};
+    const views = {profile:$('#view-profile'), sip:$('#view-sip'), trunk:$('#view-trunk'), billing:$('#view-billing'), buydid:$('#view-buydid'), mydids:$('#view-mydids'), cdr:$('#view-cdr')};
+    function activate(name){
+      Object.keys(tabs).forEach(k=>{ tabs[k].classList.toggle('active',k===name); views[k].style.display = (k===name?'block':'none'); });
+    }
+    tabs.profile.addEventListener('click',e=>{e.preventDefault();activate('profile');loadProfile();});
+    tabs.sip.addEventListener('click',e=>{e.preventDefault();activate('sip');sipPage=0;loadSip();});
+    tabs.trunk.addEventListener('click',e=>{e.preventDefault();activate('trunk');trunkPage=0;loadTrunks();});
+    tabs.billing.addEventListener('click',e=>{e.preventDefault();activate('billing');billingPage=0;loadBillingHistory();});
+    tabs.buydid.addEventListener('click',e=>{e.preventDefault();activate('buydid');loadCountries();});
+    tabs.mydids.addEventListener('click',e=>{e.preventDefault();activate('mydids');mydidsPage=0;loadMyDids();});
+    tabs.cdr.addEventListener('click',e=>{e.preventDefault();activate('cdr');cdrPage=0;loadCdr();});
+
+    function grabRows(payload){
+      const d = (payload && typeof payload === 'object') ? (payload.data ?? payload) : payload;
+      if (Array.isArray(d)) return d;
+      if (d && Array.isArray(d.items)) return d.items;
+      if (d && Array.isArray(d.rows)) return d.rows;
+      if (payload && Array.isArray(payload.rows)) return payload.rows;
+      if (Array.isArray(payload)) return payload;
+      return [];
+    }
+
+    async function loadProfile(){
+      try{
+        const r = await fetch('/api/me/profile'); const j = await r.json();
+        const d = j?.data || {};
+        if (j.success){
+          const body = $('#profile-table tbody'); body.innerHTML = '';
+          const balanceDisplay = d.balance !== null && d.balance !== undefined ? `$${Number(d.balance).toFixed(2)}` : 'Loading...';
+          const callLimitDisplay = d.callLimit !== null && d.callLimit !== undefined ? String(d.callLimit) : '0';
+          const cpsLimitDisplay = d.cpsLimit !== null && d.cpsLimit !== undefined ? String(d.cpsLimit) : '0';
+          const fields = [['Name', d.name||''],['Email', d.email||''],['Phone', d.phone||''],['Username', d.username||''],['SIP Domain', d.sipDomain||new URL(location.href).hostname],['Balance', balanceDisplay],['Channel Limit', callLimitDisplay],['CPS Limit', cpsLimitDisplay]];
+          for (const [k,v] of fields){ const tr=document.createElement('tr'); tr.innerHTML = `<th>${escapeHtml(k)}</th><td>${escapeHtml(String(v||''))}</td>`; body.appendChild(tr); }
+          $('#profile-empty').style.display='none'; $('#profile-table').style.display='table';
+        } else { $('#profile-empty').textContent='No profile'; }
+      }catch{ $('#profile-empty').textContent='Failed to load profile'; }
+    }
+    let sipPage = 0; const sipPageSize = 20;
+    let sipSearchQuery = '';
+    let allSipData = []; // Cache SIP data for current page (used for search within the page)
+    let sipTotal = 0;    // Total SIP accounts for this user (from server)
+    
+    async function loadSip(){
+      try{
+        const r = await fetch(`/api/me/sip-users?page=${sipPage}&pageSize=${sipPageSize}`);
+        const j = await r.json();
+        console.log('[loadSip] API response:', j);
+        const payloadData = j && typeof j === 'object' ? (j.data || {}) : {};
+        const rows = grabRows(j);
+        console.log('[loadSip] Extracted rows:', rows.length, rows.length > 0 ? rows[0] : null);
+        sipTotal = typeof payloadData.total === 'number' ? payloadData.total : rows.length;
+        allSipData = rows; // Cache current page rows for search
+        renderSipTable(rows);
+      }catch(e){ console.error('[loadSip] error:', e); $('#sip-empty').textContent='Failed to load SIP accounts'; }
+    }
+    
+    function renderSipTable(rows) {
+      // Apply search filter if query exists
+      let filteredRows = rows;
+      if (sipSearchQuery) {
+        const q = sipSearchQuery.toLowerCase();
+        filteredRows = rows.filter(row => {
+          const user = (row.username||row.name||row.sipuser||'').toLowerCase();
+          const cid = (row.callerid||row.cid||row.calleridname||'').toLowerCase();
+          return user.includes(q) || cid.includes(q);
+        });
+      }
+      
+      const tbody = $('#sip-table tbody'); tbody.innerHTML='';
+      const domain = 'sip.dialerone.net';
+      filteredRows.forEach(row=>{
+        const id = row.id || row.id_sip || row.idUser || row.id_user || row.idsip;
+        const user = row.username||row.name||row.sipuser||''; const cid=row.callerid||row.cid||row.calleridname||'';
+        const pwd = row.secret || row.password || '';
+        const lineStatus = String(row.lineStatus || row.linestatus || row.status || 'UNKNOWN');
+        // Determine status class based on lineStatus
+        let statusClass = 'status-unknown', statusText = 'Unknown';
+        if (lineStatus.toUpperCase().startsWith('OK')) {
+          statusClass = 'status-ok'; statusText = 'Online';
+        } else if (lineStatus.toUpperCase().includes('UNREACHABLE')) {
+          statusClass = 'status-unreachable'; statusText = 'Offline';
+        }
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td><span class=\"status-indicator ${statusClass}\" title=\"${escapeHtml(lineStatus)}\"></span>${escapeHtml(statusText)}</td>`+
+                       `<td>${escapeHtml(user)}</td>`+
+                       `<td>${escapeHtml(pwd)}</td>`+
+                       `<td>${escapeHtml(domain)}</td>`+
+                       `<td><input data-id=\"${escapeHtml(String(id||''))}\" class=\"cid-input\" value=\"${escapeHtml(cid)}\"></td>`+
+                       `<td><span class=\"direction-icon\" title=\"Inbound & Outbound calls enabled\">↕</span></td>`+
+                       `<td><button data-id=\"${escapeHtml(String(id||''))}\" class=\"save-cid\">Save</button> <button data-id=\"${escapeHtml(String(id||''))}\" class=\"del-sip\">Delete</button></td>`;
+        tbody.appendChild(tr);
+      });
+      if (filteredRows.length){ 
+        $('#sip-empty').style.display='none'; 
+        $('#sip-table').style.display='table'; 
+        $('#sip-pager').style.display='flex'; 
+        const rawTotal = sipSearchQuery ? filteredRows.length : sipTotal;
+        const totalPages = rawTotal > 0 ? Math.ceil(rawTotal / sipPageSize) : 1;
+        $('#sipPageInfo').textContent = sipSearchQuery
+          ? `${filteredRows.length} result(s)`
+          : `Page ${sipPage+1} of ${totalPages}`; 
+      } else { 
+        $('#sip-table').style.display='none';
+        $('#sip-pager').style.display='none';
+        $('#sip-empty').style.display='block';
+        $('#sip-empty').textContent = sipSearchQuery ? 'No SIP accounts match your search' : 'No SIP accounts yet - click the button above to create one'; 
+      }
+    }
+    
+    // SIP Search handlers
+    $('#sipSearchBtn').addEventListener('click', () => {
+      sipSearchQuery = $('#sipSearch').value.trim();
+      renderSipTable(allSipData);
+    });
+    
+    $('#sipClearBtn').addEventListener('click', () => {
+      sipSearchQuery = '';
+      $('#sipSearch').value = '';
+      renderSipTable(allSipData);
+    });
+    
+    // Search on Enter key
+    $('#sipSearch').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        sipSearchQuery = $('#sipSearch').value.trim();
+        renderSipTable(allSipData);
+      }
+    });
+    function defaultRange(){
+      const now = new Date(); const to = now.toISOString().slice(0,10); const d7 = new Date(now.getTime()-6*86400000); const from = d7.toISOString().slice(0,10); return {from,to};
+    }
+    let cdrPage = 0; const cdrPageSize = 20;
+    let cdrMyNumbers = []; // Cache of user's DID numbers for inbound detection
+    
+    async function loadCdr(){
+      const from = $('#from').value; const to = $('#to').value;
+      const filter = $('#cdrFilter').value;
+      const q = new URLSearchParams({from,to,page:String(cdrPage),pageSize:String(cdrPageSize)});
+      try{
+        // Fetch CDRs and user's DIDs in parallel
+        const [cdrRes, didsRes] = await Promise.all([
+          fetch('/api/me/cdr?'+q.toString()),
+          cdrMyNumbers.length === 0 ? fetch('/api/me/didww/dids') : Promise.resolve(null)
+        ]);
+        const j = await cdrRes.json();
+        if (didsRes) {
+          const didsJson = await didsRes.json();
+          cdrMyNumbers = (didsJson.data || []).map(d => d.attributes?.number || '').filter(Boolean);
+        }
+        
+        let rows = grabRows(j);
+        const tbody = $('#cdr-table tbody'); tbody.innerHTML='';
+        
+        // Process rows with direction detection
+        const processedRows = rows.map(c => {
+          const when = c.starttime || c.creationdate || c.date || '';
+          const cid = c.callerid || c.cid || c.src || '';
+          const dst = c.calledstation || c.dst || c.extension || '';
+          const dur = c.sessiontime || c.billseconds || c.duration || 0;
+          const cost = c.sessionbill || c.cost || 0;
+          const disp = c.terminatecauseid || c.disposition || '';
+          // Detect direction: inbound if destination matches one of user's DIDs or trunk DSTs
+          const dstClean = String(dst).replace(/\D/g, '');
+          const cidClean = String(cid).replace(/\D/g, '');
+          const isInbound = cdrMyNumbers.some(num => dstClean.includes(num.replace(/\D/g, '')) || cidClean.includes(num.replace(/\D/g, '')));
+          return { when, cid, dst, dur, cost, disp, isInbound };
+        });
+        
+        // Apply filter
+        const filteredRows = filter === 'all' ? processedRows :
+          filter === 'inbound' ? processedRows.filter(r => r.isInbound) :
+          processedRows.filter(r => !r.isInbound);
+        
+        filteredRows.forEach(c => {
+          const dirIcon = c.isInbound ? 
+            '<span style="color:#22c55e" title="Inbound">↓</span>' : 
+            '<span style="color:#3b82f6" title="Outbound">↑</span>';
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${dirIcon}</td><td>${escapeHtml(String(c.when))}</td><td>${escapeHtml(String(c.cid))}</td><td>${escapeHtml(String(c.dst))}</td><td>${escapeHtml(String(c.dur))}s</td><td>$${escapeHtml(String(c.cost))}</td><td>${escapeHtml(String(c.disp))}</td>`;
+          tbody.appendChild(tr);
+        });
+        if (filteredRows.length){ $('#cdr-empty').style.display='none'; $('#cdr-table').style.display='table'; $('#cdr-pager').style.display='flex'; $('#cdrPageInfo').textContent = `Page ${cdrPage+1}`; } else { $('#cdr-empty').textContent = filter === 'all' ? 'No CDR in range' : `No ${filter} calls in range`; }
+      }catch(e){ console.error('[loadCdr]', e); $('#cdr-empty').textContent='Failed to load CDR'; }
+    }
+    function escapeHtml(s){ return String(s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+    function copyBtn(val){ const v = String(val||''); if (!v) return ''; return `<button class=\"copy\" data-val=\"${escapeHtml(v)}\">Copy</button>`; }
+    function showToast(msg, type='success'){
+      const toast = document.createElement('div');
+      toast.className = 'toast';
+      toast.textContent = msg;
+      if (type === 'error') toast.style.background = '#ef4444';
+      document.body.appendChild(toast);
+      setTimeout(()=>{ toast.remove(); }, 3000);
+    }
+    function animateButton(btn){
+      btn.classList.add('btn-clicked');
+      setTimeout(()=>{ btn.classList.remove('btn-clicked'); }, 300);
+    }
+    // Global button click animation
+    document.addEventListener('click', (e)=>{
+      if (e.target && e.target.tagName === 'BUTTON') animateButton(e.target);
+    });
+    // init
+    const rng = defaultRange(); $('#from').value = rng.from; $('#to').value = rng.to;
+    loadProfile(); loadSip(); loadCdr();
+    $('#loadCdr').addEventListener('click', e=>{ e.preventDefault(); cdrPage=0; loadCdr(); });
+    document.getElementById('cdrPrev').addEventListener('click', ()=>{ if (cdrPage>0) { cdrPage--; loadCdr(); } });
+    document.getElementById('cdrNext').addEventListener('click', ()=>{ cdrPage++; loadCdr(); });
+    document.getElementById('sipPrev').addEventListener('click', ()=>{ if (sipPage>0){ sipPage--; loadSip(); } });
+    document.getElementById('sipNext').addEventListener('click', ()=>{
+      const totalPages = sipTotal > 0 ? Math.ceil(sipTotal / sipPageSize) : 1;
+      if ((sipPage + 1) < totalPages) {
+        sipPage++;
+        loadSip();
+      }
+    });
+    
+    // SIP Modal handlers
+    $('#createSipBtn').addEventListener('click', () => {
+      $('#sipModal').style.display = 'flex';
+      $('#newSipUser').value = '';
+      $('#newSipPass').value = '';
+      $('#newSipCID').value = '';
+      $('#newSipUser').focus();
+    });
+    
+    $('#cancelSipBtn').addEventListener('click', () => {
+      $('#sipModal').style.display = 'none';
+    });
+    
+    $('#sipModal').addEventListener('click', (e) => {
+      if (e.target === $('#sipModal')) {
+        $('#sipModal').style.display = 'none';
+      }
+    });
+    
+    $('#confirmSipBtn').addEventListener('click', async ()=>{
+      const sipUser=$('#newSipUser').value.trim(); const password=$('#newSipPass').value; const callerid=$('#newSipCID').value.trim();
+      if (!sipUser || !password) return alert('SIP username and password required');
+      if (!/^\d{1,11}$/.test(callerid)) return alert('CallerID must be numbers only, maximum 11 digits');
+      
+      $('#confirmSipBtn').disabled = true;
+      $('#confirmSipBtn').textContent = 'Creating...';
+      
+      // Check availability before creating
+      try {
+        const a = await fetch(`/api/me/sip-users/availability?sipUser=${encodeURIComponent(sipUser)}`);
+        const aj = await a.json();
+        if (!aj.success) { alert(aj.message||'Availability check failed'); return; }
+        if (!aj.available) { alert('SIP username already exists. Choose another.'); return; }
+      } catch (e) { alert('Availability check failed'); return; } finally {
+        $('#confirmSipBtn').disabled = false;
+        $('#confirmSipBtn').textContent = 'Create Account';
+      }
+      
+      $('#confirmSipBtn').disabled = true;
+      $('#confirmSipBtn').textContent = 'Creating...';
+      
+      try {
+        const r = await fetch('/api/me/sip-users', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ sipUser, password, callerid }) });
+        const j = await r.json(); 
+        if (!j.success) { alert(j.message||'Create failed'); return; }
+        showToast(`SIP account "${sipUser}" created successfully!`);
+        $('#sipModal').style.display = 'none';
+        loadSip(); loadProfile();
+      } catch (e) {
+        alert('Failed to create SIP account');
+      } finally {
+        $('#confirmSipBtn').disabled = false;
+        $('#confirmSipBtn').textContent = 'Create Account';
+      }
+    });
+    document.addEventListener('click', async (ev)=>{
+      if (ev.target && ev.target.classList.contains('save-cid')){
+        const id = ev.target.getAttribute('data-id'); const input = document.querySelector(`input.cid-input[data-id="${CSS.escape(id)}"]`);
+        const callerid = input.value.trim();
+        if (!/^\d{1,11}$/.test(callerid)) { alert('CallerID must be numbers only, maximum 11 digits'); return; }
+        const r = await fetch(`/api/me/sip-users/${encodeURIComponent(id)}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ callerid }) });
+        const j = await r.json(); 
+        if (!j.success) return alert(j.message||'Update failed');
+        showToast('CallerID updated successfully!');
+        loadSip();
+      } else if (ev.target && ev.target.classList.contains('del-sip')){
+        const id = ev.target.getAttribute('data-id'); if (!confirm('Delete this SIP account?')) return;
+        const r = await fetch(`/api/me/sip-users/${encodeURIComponent(id)}`, { method:'DELETE' }); 
+        const j = await r.json(); 
+        if (!j.success) return alert(j.message||'Delete failed');
+        showToast('SIP account deleted successfully!');
+        loadSip();
+      } else if (ev.target && ev.target.classList.contains('copy')){
+        const v = ev.target.getAttribute('data-val')||''; try { await navigator.clipboard.writeText(v); } catch {}
+      }
+    });
+
+    // Trunk Management
+    let trunksData = [];
+    let trunkPage = 0; const trunkPageSize = 10;
+    let trunkSearchQuery = '';
+    
+    async function loadTrunks() {
+      try {
+        const r = await fetch('/api/me/didww/trunks');
+        const j = await r.json();
+        
+        if (!j.success) {
+          $('#trunk-empty').textContent = j.message || 'Failed to load trunks';
+          return;
+        }
+        trunksData = j.data || [];
+        renderTrunksTable();
+      } catch (e) {
+        console.error('[loadTrunks] error:', e);
+        $('#trunk-empty').textContent = 'Failed to load trunks';
+        $('#trunk-empty').style.display = 'block';
+        $('#trunk-table').style.display = 'none';
+        $('#trunk-pager').style.display = 'none';
+      }
+    }
+    
+    function renderTrunksTable() {
+      // Apply search filter
+      let filteredData = trunksData;
+      if (trunkSearchQuery) {
+        const q = trunkSearchQuery.toLowerCase();
+        filteredData = trunksData.filter(trunk => {
+          const attrs = trunk.attributes || {};
+          const conf = attrs.configuration?.attributes || attrs.configuration || {};
+          const name = (attrs.name || '').toLowerCase();
+          const dst = (conf.dst || '').toLowerCase();
+          const desc = (attrs.description || '').toLowerCase();
+          return name.includes(q) || dst.includes(q) || desc.includes(q);
+        });
+      }
+      
+      const tbody = $('#trunk-table tbody');
+      tbody.innerHTML = '';
+      
+      // Paginate
+      const start = trunkPage * trunkPageSize;
+      const paginated = filteredData.slice(start, start + trunkPageSize);
+      const totalPages = Math.ceil(filteredData.length / trunkPageSize) || 1;
+      
+      if (filteredData.length === 0) {
+        $('#trunk-empty').textContent = trunkSearchQuery ? 'No trunks match your search' : 'No trunks created yet - click the button above to create one';
+        $('#trunk-empty').style.display = 'block';
+        $('#trunk-table').style.display = 'none';
+        $('#trunk-pager').style.display = 'none';
+      } else {
+        $('#trunk-empty').style.display = 'none';
+        $('#trunk-table').style.display = 'table';
+        $('#trunk-pager').style.display = 'flex';
+        $('#trunkPageInfo').textContent = trunkSearchQuery ? `${filteredData.length} result(s)` : `Page ${trunkPage + 1} of ${totalPages}`;
+        paginated.forEach(trunk => {
+          const attrs = trunk.attributes || {};
+          const conf = attrs.configuration?.attributes || attrs.configuration || {};
+          const dst = conf.dst || '';
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${escapeHtml(attrs.name || '')}</td>`+
+                        `<td>${escapeHtml(dst)}</td>`+
+                        `<td>${escapeHtml(attrs.description || '')}</td>`+
+                        `<td>${escapeHtml(attrs.capacity_limit || 'Unlimited')}</td>`+
+                        `<td><button class="edit-trunk" data-id="${escapeHtml(trunk.id)}" data-name="${escapeHtml(attrs.name || '')}" data-dst="${escapeHtml(dst)}" data-desc="${escapeHtml(attrs.description || '')}" data-cap="${escapeHtml(attrs.capacity_limit || '')}">Edit</button> <button class="del-trunk" data-id="${escapeHtml(trunk.id)}">Delete</button></td>`;
+          tbody.appendChild(tr);
+        });
+      }
+    }
+    
+    // Trunk search handlers
+    $('#trunkSearchBtn').addEventListener('click', () => {
+      trunkSearchQuery = $('#trunkSearch').value.trim();
+      trunkPage = 0;
+      renderTrunksTable();
+    });
+    
+    $('#trunkClearBtn').addEventListener('click', () => {
+      trunkSearchQuery = '';
+      $('#trunkSearch').value = '';
+      trunkPage = 0;
+      renderTrunksTable();
+    });
+    
+    $('#trunkSearch').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        trunkSearchQuery = $('#trunkSearch').value.trim();
+        trunkPage = 0;
+        renderTrunksTable();
+      }
+    });
+    
+    // Trunk pagination
+    document.getElementById('trunkPrev').addEventListener('click', () => { if (trunkPage > 0) { trunkPage--; renderTrunksTable(); } });
+    document.getElementById('trunkNext').addEventListener('click', () => { 
+      const filteredLen = trunkSearchQuery ? trunksData.filter(t => {
+        const attrs = t.attributes || {};
+        const conf = attrs.configuration?.attributes || attrs.configuration || {};
+        const q = trunkSearchQuery.toLowerCase();
+        return (attrs.name || '').toLowerCase().includes(q) || (conf.dst || '').toLowerCase().includes(q);
+      }).length : trunksData.length;
+      if ((trunkPage + 1) * trunkPageSize < filteredLen) { trunkPage++; renderTrunksTable(); }
+    });
+
+    // Trunk Modal handlers
+    let trunkEditMode = false;
+    
+    $('#createTrunkBtn').addEventListener('click', () => {
+      trunkEditMode = false;
+      $('#trunkModalTitle').textContent = '↪️ Create Call Forwarding Trunk';
+      $('#confirmTrunkBtn').textContent = 'Create Trunk';
+      $('#editTrunkId').value = '';
+      $('#newTrunkName').value = '';
+      $('#newTrunkDst').value = '';
+      $('#newTrunkDesc').value = '';
+      $('#newTrunkCapacity').value = '';
+      $('#trunkModal').style.display = 'flex';
+      $('#newTrunkName').focus();
+    });
+    
+    $('#cancelTrunkBtn').addEventListener('click', () => {
+      $('#trunkModal').style.display = 'none';
+    });
+    
+    $('#trunkModal').addEventListener('click', (e) => {
+      if (e.target === $('#trunkModal')) {
+        $('#trunkModal').style.display = 'none';
+      }
+    });
+    
+    // Edit trunk - open modal with data
+    document.addEventListener('click', async (ev) => {
+      if (ev.target && ev.target.classList.contains('edit-trunk')) {
+        trunkEditMode = true;
+        const btn = ev.target;
+        $('#trunkModalTitle').textContent = '↪️ Edit Call Forwarding Trunk';
+        $('#confirmTrunkBtn').textContent = 'Save Changes';
+        $('#editTrunkId').value = btn.getAttribute('data-id');
+        $('#newTrunkName').value = btn.getAttribute('data-name') || '';
+        $('#newTrunkDst').value = btn.getAttribute('data-dst') || '';
+        $('#newTrunkDesc').value = btn.getAttribute('data-desc') || '';
+        $('#newTrunkCapacity').value = btn.getAttribute('data-cap') || '';
+        $('#trunkModal').style.display = 'flex';
+        $('#newTrunkName').focus();
+      }
+    });
+    
+    // Create or update trunk
+    $('#confirmTrunkBtn').addEventListener('click', async () => {
+      const name = $('#newTrunkName').value.trim();
+      const dst = $('#newTrunkDst').value.trim();
+      const description = $('#newTrunkDesc').value.trim();
+      const capacity_limit = $('#newTrunkCapacity').value.trim();
+      const editId = $('#editTrunkId').value;
+      
+      if (!name) return alert('Trunk name is required');
+      if (!dst) return alert('PSTN destination number is required');
+      if (!/^\d{10,11}$/.test(dst)) return alert('PSTN number must be 10-11 digits only');
+      
+      $('#confirmTrunkBtn').disabled = true;
+      $('#confirmTrunkBtn').textContent = trunkEditMode ? 'Saving...' : 'Creating...';
+
+      try {
+        const payload = { name, dst, description };
+        if (capacity_limit) payload.capacity_limit = parseInt(capacity_limit, 10);
+        else if (trunkEditMode) payload.capacity_limit = null;
+        
+        let r;
+        if (trunkEditMode && editId) {
+          r = await fetch(`/api/me/didww/trunks/${encodeURIComponent(editId)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+        } else {
+          r = await fetch('/api/me/didww/trunks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+        }
+        const j = await r.json();
+        if (!j.success) { alert(j.message || (trunkEditMode ? 'Update failed' : 'Create trunk failed')); return; }
+        showToast(trunkEditMode ? 'Trunk updated successfully!' : `Trunk "${name}" created successfully!`);
+        $('#trunkModal').style.display = 'none';
+        loadTrunks();
+      } catch (e) {
+        console.error('[trunk] error:', e);
+        alert(trunkEditMode ? 'Failed to update trunk' : 'Failed to create trunk');
+      } finally {
+        $('#confirmTrunkBtn').disabled = false;
+        $('#confirmTrunkBtn').textContent = trunkEditMode ? 'Save Changes' : 'Create Trunk';
+      }
+    });
+
+    // Delete trunk
+    document.addEventListener('click', async (ev) => {
+      if (ev.target && ev.target.classList.contains('del-trunk')) {
+        const id = ev.target.getAttribute('data-id');
+        if (!confirm('Delete this trunk?')) return;
+        try {
+          const r = await fetch(`/api/me/didww/trunks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          const j = await r.json();
+          if (!j.success) return alert(j.message || 'Delete failed');
+          showToast('Trunk deleted successfully!');
+          loadTrunks();
+        } catch (e) {
+          console.error('[deleteTrunk] error:', e);
+          alert('Failed to delete trunk');
+        }
+      }
+    });
+
+
+    // ========== Billing History ==========
+    let billingPage = 0; const billingPageSize = 20;
+    let billingData = [];
+    
+    async function loadBillingHistory() {
+      try {
+        const r = await fetch(`/api/me/billing-history?page=${billingPage}&pageSize=${billingPageSize}`);
+        const j = await r.json();
+        billingData = j.data || [];
+        const balance = j.balance;
+        
+        // Update balance display
+        if (balance !== undefined && balance !== null) {
+          $('#currentBalance').innerHTML = `Current Balance: <strong style="color:#059669">$${Number(balance).toFixed(2)}</strong>`;
+        }
+        
+        const tbody = $('#billing-table tbody');
+        tbody.innerHTML = '';
+        
+        if (billingData.length === 0) {
+          $('#billing-empty').textContent = 'No billing history yet.';
+          $('#billing-empty').style.display = 'block';
+          $('#billing-table').style.display = 'none';
+          $('#billing-pager').style.display = 'none';
+          return;
+        }
+        
+        billingData.forEach(row => {
+          const tr = document.createElement('tr');
+          const date = new Date(row.created_at).toLocaleString();
+          const amountNum = Number(row.amount || 0);
+          const isNegative = amountNum < 0;
+          const amountColor = isNegative ? '#ef4444' : '#059669';
+          const amountPrefix = isNegative ? '-$' : '+$';
+          const amountDisplay = Math.abs(amountNum).toFixed(2);
+          const statusColor = row.status === 'completed' ? '#059669' : (row.status === 'pending' ? '#f59e0b' : '#ef4444');
+          tr.innerHTML = `<td>${escapeHtml(date)}</td>`+
+                        `<td style="color:${amountColor};font-weight:600">${amountPrefix}${escapeHtml(amountDisplay)}</td>`+
+                        `<td>${escapeHtml(row.description || 'Account refill')}</td>`+
+                        `<td style="color:${statusColor}">${escapeHtml(row.status || 'completed')}</td>`;
+          tbody.appendChild(tr);
+        });
+        
+        $('#billing-empty').style.display = 'none';
+        $('#billing-table').style.display = 'table';
+        $('#billing-pager').style.display = 'flex';
+        const totalPages = Math.ceil((j.total || billingData.length) / billingPageSize) || 1;
+        $('#billingPageInfo').textContent = `Page ${billingPage + 1} of ${totalPages}`;
+      } catch (e) {
+        console.error('[loadBillingHistory]', e);
+        $('#billing-empty').textContent = 'Failed to load billing history';
+      }
+    }
+    
+    // Billing pagination
+    $('#billingPrev').addEventListener('click', () => { if (billingPage > 0) { billingPage--; loadBillingHistory(); } });
+    $('#billingNext').addEventListener('click', () => { billingPage++; loadBillingHistory(); });
+    
+    // Add Fund Modal
+    $('#addFundBtn').addEventListener('click', () => {
+      $('#addFundModal').style.display = 'flex';
+      $('#fundAmount').value = '';
+      $('#fundAmount').focus();
+    });
+    
+    $('#cancelFundBtn').addEventListener('click', () => {
+      $('#addFundModal').style.display = 'none';
+    });
+    
+    // Close modal on backdrop click
+    $('#addFundModal').addEventListener('click', (e) => {
+      if (e.target === $('#addFundModal')) {
+        $('#addFundModal').style.display = 'none';
+      }
+    });
+    
+    $('#confirmFundBtn').addEventListener('click', async () => {
+      const amount = parseFloat($('#fundAmount').value);
+      const description = null; // description is generated server-side
+      
+      if (!amount || amount <= 0) {
+        return alert('Please enter a valid amount greater than 0');
+      }
+      
+      $('#confirmFundBtn').disabled = true;
+      $('#confirmFundBtn').textContent = 'Processing...';
+      
+      try {
+        const r = await fetch('/api/me/add-funds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ amount, description })
+        });
+        const j = await r.json();
+        
+        if (!j.success) {
+          alert(j.message || 'Failed to add funds');
+          return;
+        }
+        
+        showToast(`Successfully added $${amount.toFixed(2)} to your account!`);
+        $('#addFundModal').style.display = 'none';
+        loadBillingHistory();
+        loadProfile(); // Refresh balance on profile too
+      } catch (e) {
+        console.error('[addFunds]', e);
+        alert('Failed to add funds. Please try again.');
+      } finally {
+        $('#confirmFundBtn').disabled = false;
+        $('#confirmFundBtn').textContent = 'Add Funds';
+      }
+    });
+
+    // ========== Buy Numbers ==========
+    let countriesData = [], regionsData = [], citiesData = [], didGroupsData = [], availableDidsData = [];
+    let currentSkuId = null, currentDidGroupId = null;
+
+    // Toggle toll-free mode - disable region/city when checked
+    $('#buyTollfree').addEventListener('change', () => {
+      const isTollfree = $('#buyTollfree').checked;
+      $('#buyRegion').disabled = isTollfree;
+      $('#buyCity').disabled = isTollfree;
+      if (isTollfree) {
+        $('#buyRegion').innerHTML = '<option value="">N/A for Toll-Free</option>';
+        $('#buyCity').innerHTML = '<option value="">N/A for Toll-Free</option>';
+      } else {
+        $('#buyRegion').innerHTML = '<option value="">Select State/Region...</option>';
+        $('#buyCity').innerHTML = '<option value="">Select City...</option>';
+        // Reload regions if country selected
+        if ($('#buyCountry').value) $('#buyCountry').dispatchEvent(new Event('change'));
+      }
+    });
+
+    async function loadCountries() {
+      try {
+        const r = await fetch('/api/me/didww/countries');
+        const j = await r.json();
+        if (!j.success) return;
+        countriesData = j.data || [];
+        const sel = $('#buyCountry');
+        sel.innerHTML = '<option value="">Select Country...</option>';
+        countriesData.forEach(c => {
+          const attrs = c.attributes || {};
+          sel.innerHTML += `<option value="${c.id}">${escapeHtml(attrs.name || 'Unknown')}</option>`;
+        });
+      } catch (e) { console.error('[loadCountries]', e); }
+    }
+
+    $('#buyCountry').addEventListener('change', async () => {
+      const countryId = $('#buyCountry').value;
+      const isTollfree = $('#buyTollfree').checked;
+      if (isTollfree) return; // Skip region loading for toll-free
+      $('#buyRegion').innerHTML = '<option value="">Loading...</option>';
+      $('#buyRegion').disabled = true;
+      $('#buyCity').innerHTML = '<option value="">Select City...</option>';
+      $('#buyCity').disabled = true;
+      if (!countryId) return;
+      try {
+        const r = await fetch(`/api/me/didww/regions?country_id=${countryId}`);
+        const j = await r.json();
+        regionsData = j.data || [];
+        const sel = $('#buyRegion');
+        sel.innerHTML = '<option value="">Select State/Region...</option>';
+        regionsData.forEach(rg => {
+          const attrs = rg.attributes || {};
+          sel.innerHTML += `<option value="${rg.id}">${escapeHtml(attrs.name || 'Unknown')}</option>`;
+        });
+        sel.disabled = false;
+      } catch (e) { console.error('[loadRegions]', e); }
+    });
+
+    $('#buyRegion').addEventListener('change', async () => {
+      const regionId = $('#buyRegion').value;
+      $('#buyCity').innerHTML = '<option value="">Loading...</option>';
+      $('#buyCity').disabled = true;
+      if (!regionId) return;
+      try {
+        const r = await fetch(`/api/me/didww/cities?region_id=${regionId}`);
+        const j = await r.json();
+        citiesData = j.data || [];
+        const sel = $('#buyCity');
+        sel.innerHTML = '<option value="">Select City...</option>';
+        citiesData.forEach(ct => {
+          const attrs = ct.attributes || {};
+          sel.innerHTML += `<option value="${ct.id}">${escapeHtml(attrs.name || 'Unknown')}</option>`;
+        });
+        sel.disabled = false;
+      } catch (e) { console.error('[loadCities]', e); }
+    });
+
+    $('#searchDids').addEventListener('click', async () => {
+      const cityId = $('#buyCity').value;
+      const countryId = $('#buyCountry').value;
+      const isTollfree = $('#buyTollfree').checked;
+      
+      if (!countryId) return alert('Please select a country');
+      if (!isTollfree && !cityId && !countryId) return alert('Please select at least a country');
+      
+      $('#did-groups-info').textContent = 'Searching...';
+      $('#available-dids-table').style.display = 'none';
+      $('#available-dids-empty').textContent = '';
+      
+      try {
+        // Get DID groups - for toll-free, use different endpoint
+        let url;
+        if (isTollfree) {
+          url = `/api/me/didww/did-groups?country_id=${countryId}&tollfree=1`;
+        } else {
+          url = '/api/me/didww/did-groups?';
+          if (cityId) url += `city_id=${cityId}`;
+          else url += `country_id=${countryId}`;
+        }
+        
+        const r = await fetch(url);
+        const j = await r.json();
+        didGroupsData = j.data || [];
+        const included = j.included || [];
+        
+        if (didGroupsData.length === 0) {
+          $('#did-groups-info').textContent = isTollfree ? 'No toll-free numbers available for this country.' : 'No numbers available for this location.';
+          return;
+        }
+        
+        // Find first DID group with available SKU
+        const didGroup = didGroupsData[0];
+        const attrs = didGroup.attributes || {};
+        const skuRel = didGroup.relationships?.stock_keeping_units?.data || [];
+        const sku = skuRel[0] ? included.find(i => i.type === 'stock_keeping_units' && i.id === skuRel[0].id) : null;
+        
+        if (!sku) {
+          $('#did-groups-info').textContent = 'No pricing available for this location.';
+          return;
+        }
+        
+        currentSkuId = sku.id;
+        currentDidGroupId = didGroup.id;
+        const skuAttrs = sku.attributes || {};
+        const typeLabel = isTollfree ? '🆓 Toll-Free' : 'DID';
+        const markupMonthly = isTollfree ? TOLLFREE_DID_MARKUP : LOCAL_DID_MARKUP;
+        const markupSetup = 0;
+        $('#did-groups-info').innerHTML = `<strong>${escapeHtml(attrs.name || typeLabel)}</strong> - Monthly: $${markupMonthly.toFixed(2)} | Setup: $${markupSetup.toFixed(2)}`;
+        
+        // Search available DIDs
+        const didUrl = `/api/me/didww/available-dids?did_group_id=${didGroup.id}`;
+        
+        const dr = await fetch(didUrl);
+        const dj = await dr.json();
+        availableDidsData = dj.data || [];
+        
+        const tbody = $('#available-dids-table tbody');
+        tbody.innerHTML = '';
+        
+        if (availableDidsData.length === 0) {
+          $('#available-dids-empty').textContent = 'No specific numbers available. You can buy a random number from this group.';
+          // Add option to buy random
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td colspan="4">Random ${isTollfree ? 'toll-free ' : ''}number from ${escapeHtml(attrs.name || 'this group')}</td><td><button class="buy-did" data-random="true">Buy Random</button></td>`;
+          tbody.appendChild(tr);
+          $('#available-dids-table').style.display = 'table';
+        } else {
+          availableDidsData.forEach(did => {
+            const da = did.attributes || {};
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<td>${escapeHtml(da.number || '')}</td><td>${escapeHtml(isTollfree ? 'Toll-Free' : (da.did_type || ''))}</td><td>$${markupMonthly.toFixed(2)}</td><td>$${markupSetup.toFixed(2)}</td><td><button class=\"buy-did\" data-id=\"${did.id}\">Buy</button></td>`;
+            tbody.appendChild(tr);
+          });
+          $('#available-dids-table').style.display = 'table';
+        }
+      } catch (e) {
+        console.error('[searchDids]', e);
+        $('#did-groups-info').textContent = 'Search failed. Please try again.';
+      }
+    });
+
+    // Buy DID
+    document.addEventListener('click', async (ev) => {
+      if (ev.target && ev.target.classList.contains('buy-did')) {
+        const btn = ev.target;
+        const isRandom = btn.getAttribute('data-random') === 'true';
+        const availableDidId = btn.getAttribute('data-id');
+        
+        if (!currentSkuId) return alert('No SKU selected');
+        if (!confirm('Purchase this number? You will be charged.')) return;
+        
+        btn.disabled = true;
+        btn.textContent = 'Buying...';
+        
+        try {
+          const payload = { sku_id: currentSkuId };
+          if (isRandom) payload.did_group_id = currentDidGroupId;
+          else payload.available_did_id = availableDidId;
+          
+          const r = await fetch('/api/me/didww/orders', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const j = await r.json();
+          if (!j.success) {
+            btn.disabled = false;
+            btn.textContent = 'Buy';
+            return alert(j.message || 'Purchase failed');
+          }
+          showToast('Number purchased successfully!');
+          // Refresh search
+          $('#searchDids').click();
+        } catch (e) {
+          console.error('[buyDid]', e);
+          btn.disabled = false;
+          btn.textContent = 'Buy';
+          alert('Purchase failed');
+        }
+      }
+    });
+
+    // ========== My Numbers ==========
+    let allTrunks = []; // Cache voice trunks for dropdown
+    let allMyDids = []; // Cache all DIDs for pagination
+    let myDidsIncluded = []; // Cache included data
+    let mydidsPage = 0; const mydidsPageSize = 10;
+    let mydidsSearchQuery = '';
+    
+    // My Numbers search handlers
+    $('#mydidsSearchBtn').addEventListener('click', () => {
+      mydidsSearchQuery = $('#mydidsSearch').value.trim();
+      mydidsPage = 0;
+      renderMyDidsPage();
+    });
+    
+    $('#mydidsClearBtn').addEventListener('click', () => {
+      mydidsSearchQuery = '';
+      $('#mydidsSearch').value = '';
+      mydidsPage = 0;
+      renderMyDidsPage();
+    });
+    
+    $('#mydidsSearch').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        mydidsSearchQuery = $('#mydidsSearch').value.trim();
+        mydidsPage = 0;
+        renderMyDidsPage();
+      }
+    });
+    
+    async function loadMyDids() {
+      try {
+        // Fetch DIDs and voice trunks in parallel
+        const [didsRes, trunksRes] = await Promise.all([
+          fetch('/api/me/didww/dids'),
+          fetch('/api/me/didww/trunks')
+        ]);
+        const didsJson = await didsRes.json();
+        const trunksJson = await trunksRes.json();
+        
+        if (!didsJson.success) {
+          $('#mydids-empty').textContent = didsJson.message || 'Failed to load numbers';
+          return;
+        }
+        
+        allMyDids = didsJson.data || [];
+        myDidsIncluded = didsJson.included || [];
+        const included = myDidsIncluded;
+        allTrunks = trunksJson.data || [];
+        
+        // Build lookups from included data
+        const trunksMap = {};
+        const citiesMap = {};
+        const regionsMap = {};
+        const countriesMap = {};
+        const didGroupsMap = {};
+        const skusMap = {};
+        
+        included.forEach(item => {
+          if (item.type === 'voice_in_trunks') trunksMap[item.id] = item.attributes?.name || item.id;
+          if (item.type === 'cities') citiesMap[item.id] = item.attributes?.name || '';
+          if (item.type === 'regions') regionsMap[item.id] = item.attributes?.name || '';
+          if (item.type === 'countries') countriesMap[item.id] = item.attributes?.name || '';
+          if (item.type === 'did_groups') didGroupsMap[item.id] = item;
+          if (item.type === 'stock_keeping_units') skusMap[item.id] = item.attributes || {};
+        });
+        
+        // Also add from trunks API response
+        allTrunks.forEach(t => {
+          trunksMap[t.id] = t.attributes?.name || t.id;
+        });
+        
+        const tbody = $('#mydids-table tbody');
+        tbody.innerHTML = '';
+        
+        // Paginate
+        const start = mydidsPage * mydidsPageSize;
+        const paginated = allMyDids.slice(start, start + mydidsPageSize);
+        const totalPages = Math.ceil(allMyDids.length / mydidsPageSize);
+        
+        if (allMyDids.length === 0) {
+          $('#mydids-empty').textContent = 'No numbers yet. Go to "Buy Numbers" to purchase.';
+          $('#mydids-empty').style.display = 'block';
+          $('#mydids-table').style.display = 'none';
+          $('#mydids-pager').style.display = 'none';
+        } else {
+          $('#mydids-empty').style.display = 'none';
+          $('#mydids-table').style.display = 'table';
+          $('#mydids-pager').style.display = 'flex';
+          $('#mydidsPageInfo').textContent = `Page ${mydidsPage + 1} of ${totalPages}`;
+          paginated.forEach(did => {
+            const attrs = did.attributes || {};
+            const trunkRel = did.relationships?.voice_in_trunk?.data;
+            const currentTrunkId = trunkRel?.id || '';
+            
+            // Build location from did_group relationships or attributes
+            let location = '';
+            const didGroupRel = did.relationships?.did_group?.data;
+            if (didGroupRel) {
+              const dg = didGroupsMap[didGroupRel.id];
+              if (dg) {
+                const cityRel = dg.relationships?.city?.data;
+                const regionRel = dg.relationships?.region?.data;
+                const countryRel = dg.relationships?.country?.data;
+                const parts = [];
+                if (cityRel && citiesMap[cityRel.id]) parts.push(citiesMap[cityRel.id]);
+                if (regionRel && regionsMap[regionRel.id]) parts.push(regionsMap[regionRel.id]);
+                if (countryRel && countriesMap[countryRel.id]) parts.push(countriesMap[countryRel.id]);
+                location = parts.join(', ');
+              }
+            }
+            // Fallback to attributes if available
+            if (!location) {
+              location = [attrs.city_name, attrs.region_name, attrs.country_name].filter(Boolean).join(', ');
+            }
+            
+            // Determine if this DID is toll-free for pricing
+            const didType = String(attrs.did_type || '').toLowerCase();
+            let isTollfreeDid = didType.includes('toll');
+            if (!isTollfreeDid && didGroupRel) {
+              const dg = didGroupsMap[didGroupRel.id];
+              if (dg) {
+                const name = String(dg.attributes?.name || '').toLowerCase();
+                if (name.includes('toll')) isTollfreeDid = true;
+              }
+            }
+            
+            // Use fixed markup prices instead of raw DIDWW prices
+            const monthlyPrice = (isTollfreeDid ? TOLLFREE_DID_MARKUP : LOCAL_DID_MARKUP).toFixed(2);
+            
+            // Calculate status/time left
+            let statusHtml = '';
+            const billedTo = attrs.billing?.billed_to || attrs.expires_at;
+            if (billedTo) {
+              const expDate = new Date(billedTo);
+              const now = new Date();
+              const daysLeft = Math.ceil((expDate - now) / (1000 * 60 * 60 * 24));
+              const statusColor = daysLeft > 7 ? '#22c55e' : (daysLeft > 0 ? '#f59e0b' : '#ef4444');
+              statusHtml = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${statusColor};margin-right:6px"></span>${daysLeft > 0 ? daysLeft + ' days' : 'Expired'}`;
+            } else {
+              statusHtml = '<span class="muted">-</span>';
+            }
+            
+            // Build features icons
+            let featuresHtml = '';
+            const features = attrs.features || attrs.capabilities || {};
+            // Check various feature flags
+            if (features.voice || attrs.voice_in_enabled !== false) featuresHtml += '<span title="Voice" style="background:#22c55e;color:#fff;padding:2px 6px;border-radius:4px;margin:1px;font-size:11px">📞</span>';
+            if (features.sms || attrs.sms_in_enabled) featuresHtml += '<span title="SMS" style="background:#22c55e;color:#fff;padding:2px 6px;border-radius:4px;margin:1px;font-size:11px">💬</span>';
+            if (features.fax || attrs.fax_in_enabled) featuresHtml += '<span title="Fax" style="background:#22c55e;color:#fff;padding:2px 6px;border-radius:4px;margin:1px;font-size:11px">📠</span>';
+            if (!featuresHtml) featuresHtml = '<span title="Voice" style="background:#22c55e;color:#fff;padding:2px 6px;border-radius:4px;margin:1px;font-size:11px">📞</span>';
+            
+            // Build trunk dropdown options
+            let trunkOptions = '<option value="">-- None --</option>';
+            allTrunks.forEach(t => {
+              const tName = t.attributes?.name || t.id;
+              const selected = t.id === currentTrunkId ? 'selected' : '';
+              trunkOptions += `<option value="${escapeHtml(t.id)}" ${selected}>${escapeHtml(tName)}</option>`;
+            });
+            
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${escapeHtml(attrs.number || '')}</td>`+
+                          `<td>${escapeHtml(location)}</td>`+
+                          `<td>${statusHtml}</td>`+
+                          `<td>${featuresHtml}</td>`+
+                          `<td>$${monthlyPrice}</td>`+
+                          `<td><select class="trunk-select" data-did-id="${escapeHtml(did.id)}" style="width:90px">${trunkOptions}</select></td>`+
+                          `<td><button class="del-did" data-id="${escapeHtml(did.id)}">Release</button></td>`;
+            tbody.appendChild(tr);
+          });
+        }
+      } catch (e) {
+        console.error('[loadMyDids]', e);
+        $('#mydids-empty').textContent = 'Failed to load numbers';
+        $('#mydids-pager').style.display = 'none';
+      }
+    }
+    
+    // My Numbers pagination
+    document.getElementById('mydidsPrev').addEventListener('click', () => { if (mydidsPage > 0) { mydidsPage--; renderMyDidsPage(); } });
+    document.getElementById('mydidsNext').addEventListener('click', () => { 
+      const filteredDids = getFilteredMyDids();
+      if ((mydidsPage + 1) * mydidsPageSize < filteredDids.length) { mydidsPage++; renderMyDidsPage(); } 
+    });
+    
+    function getFilteredMyDids() {
+      if (!mydidsSearchQuery) return allMyDids;
+      const q = mydidsSearchQuery.toLowerCase();
+      return allMyDids.filter(did => {
+        const attrs = did.attributes || {};
+        const number = (attrs.number || '').toLowerCase();
+        const location = [attrs.city_name, attrs.region_name, attrs.country_name].filter(Boolean).join(', ').toLowerCase();
+        return number.includes(q) || location.includes(q);
+      });
+    }
+    
+    function renderMyDidsPage() {
+      const included = myDidsIncluded;
+      const trunksMap = {};
+      const citiesMap = {};
+      const regionsMap = {};
+      const countriesMap = {};
+      const didGroupsMap = {};
+      const skusMap = {};
+      
+      included.forEach(item => {
+        if (item.type === 'voice_in_trunks') trunksMap[item.id] = item.attributes?.name || item.id;
+        if (item.type === 'cities') citiesMap[item.id] = item.attributes?.name || '';
+        if (item.type === 'regions') regionsMap[item.id] = item.attributes?.name || '';
+        if (item.type === 'countries') countriesMap[item.id] = item.attributes?.name || '';
+        if (item.type === 'did_groups') didGroupsMap[item.id] = item;
+        if (item.type === 'stock_keeping_units') skusMap[item.id] = item.attributes || {};
+      });
+      allTrunks.forEach(t => { trunksMap[t.id] = t.attributes?.name || t.id; });
+      
+      // Apply search filter
+      const filteredDids = getFilteredMyDids();
+      
+      const tbody = $('#mydids-table tbody');
+      tbody.innerHTML = '';
+      const start = mydidsPage * mydidsPageSize;
+      const paginated = filteredDids.slice(start, start + mydidsPageSize);
+      const totalPages = Math.ceil(filteredDids.length / mydidsPageSize) || 1;
+      
+      if (filteredDids.length === 0) {
+        $('#mydids-empty').textContent = mydidsSearchQuery ? 'No numbers match your search' : 'No numbers yet. Go to "Buy Numbers" to purchase.';
+        $('#mydids-empty').style.display = 'block';
+        $('#mydids-table').style.display = 'none';
+        $('#mydids-pager').style.display = 'none';
+        return;
+      }
+      
+      $('#mydids-empty').style.display = 'none';
+      $('#mydids-table').style.display = 'table';
+      $('#mydids-pager').style.display = 'flex';
+      $('#mydidsPageInfo').textContent = mydidsSearchQuery ? `${filteredDids.length} result(s)` : `Page ${mydidsPage + 1} of ${totalPages}`;
+      
+      paginated.forEach(did => {
+        const attrs = did.attributes || {};
+        const trunkRel = did.relationships?.voice_in_trunk?.data;
+        const currentTrunkId = trunkRel?.id || '';
+        let location = '';
+        const didGroupRel = did.relationships?.did_group?.data;
+        if (didGroupRel) {
+          const dg = didGroupsMap[didGroupRel.id];
+          if (dg) {
+            const parts = [];
+            const cityRel = dg.relationships?.city?.data;
+            const regionRel = dg.relationships?.region?.data;
+            const countryRel = dg.relationships?.country?.data;
+            if (cityRel && citiesMap[cityRel.id]) parts.push(citiesMap[cityRel.id]);
+            if (regionRel && regionsMap[regionRel.id]) parts.push(regionsMap[regionRel.id]);
+            if (countryRel && countriesMap[countryRel.id]) parts.push(countriesMap[countryRel.id]);
+            location = parts.join(', ');
+          }
+        }
+        if (!location) location = [attrs.city_name, attrs.region_name, attrs.country_name].filter(Boolean).join(', ');
+
+        // Determine if this DID is toll-free for pricing
+        const didType = String(attrs.did_type || '').toLowerCase();
+        let isTollfreeDid = didType.includes('toll');
+        if (!isTollfreeDid && didGroupRel) {
+          const dg = didGroupsMap[didGroupRel.id];
+          if (dg) {
+            const name = String(dg.attributes?.name || '').toLowerCase();
+            if (name.includes('toll')) isTollfreeDid = true;
+          }
+        }
+
+        const monthlyPrice = (isTollfreeDid ? TOLLFREE_DID_MARKUP : LOCAL_DID_MARKUP).toFixed(2);
+        let statusHtml = '';
+        const billedTo = attrs.billing?.billed_to || attrs.expires_at;
+        if (billedTo) {
+          const daysLeft = Math.ceil((new Date(billedTo) - new Date()) / (1000 * 60 * 60 * 24));
+          const statusColor = daysLeft > 7 ? '#22c55e' : (daysLeft > 0 ? '#f59e0b' : '#ef4444');
+          statusHtml = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${statusColor};margin-right:6px"></span>${daysLeft > 0 ? daysLeft + ' days' : 'Expired'}`;
+        } else { statusHtml = '<span class="muted">-</span>'; }
+        let featuresHtml = '<span title="Voice" style="background:#22c55e;color:#fff;padding:2px 6px;border-radius:4px;margin:1px;font-size:11px">📞</span>';
+        if (attrs.sms_in_enabled) featuresHtml += '<span title="SMS" style="background:#22c55e;color:#fff;padding:2px 6px;border-radius:4px;margin:1px;font-size:11px">💬</span>';
+        if (attrs.fax_in_enabled) featuresHtml += '<span title="Fax" style="background:#22c55e;color:#fff;padding:2px 6px;border-radius:4px;margin:1px;font-size:11px">📠</span>';
+        let trunkOptions = '<option value="">-- None --</option>';
+        allTrunks.forEach(t => {
+          const selected = t.id === currentTrunkId ? 'selected' : '';
+          trunkOptions += `<option value="${escapeHtml(t.id)}" ${selected}>${escapeHtml(t.attributes?.name || t.id)}</option>`;
+        });
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${escapeHtml(attrs.number || '')}</td><td>${escapeHtml(location)}</td><td>${statusHtml}</td><td>${featuresHtml}</td><td>$${monthlyPrice}</td><td><select class=\"trunk-select\" data-did-id=\"${escapeHtml(did.id)}\" style=\"width:90px\">${trunkOptions}</select></td><td><button class=\"del-did\" data-id=\"${escapeHtml(did.id)}\">Release</button></td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    // Update voice trunk assignment
+    document.addEventListener('change', async (ev) => {
+      if (ev.target && ev.target.classList.contains('trunk-select')) {
+        const select = ev.target;
+        const didId = select.getAttribute('data-did-id');
+        const trunkId = select.value;
+        
+        select.disabled = true;
+        try {
+          const r = await fetch(`/api/me/didww/dids/${encodeURIComponent(didId)}/trunk`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ trunk_id: trunkId || null })
+          });
+          const j = await r.json();
+          if (!j.success) {
+            alert(j.message || 'Failed to update trunk');
+            loadMyDids();
+            return;
+          }
+          showToast('Call forwarding updated!');
+        } catch (e) {
+          console.error('[updateTrunk]', e);
+          alert('Failed to update trunk');
+          loadMyDids();
+        } finally {
+          select.disabled = false;
+        }
+      }
+    });
+
+    // Delete DID
+    document.addEventListener('click', async (ev) => {
+      if (ev.target && ev.target.classList.contains('del-did')) {
+        const id = ev.target.getAttribute('data-id');
+        if (!confirm('Release this number? This action cannot be undone.')) return;
+        try {
+          const r = await fetch(`/api/me/didww/dids/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          const j = await r.json();
+          if (!j.success) return alert(j.message || 'Release failed');
+          showToast('Number released successfully!');
+          loadMyDids();
+        } catch (e) {
+          console.error('[deleteDid]', e);
+          alert('Failed to release number');
+        }
+      }
+    });
+  </script>
+
+  <!-- Footer -->
+  <footer class="site-footer">
+    <div class="footer-brand">TalkUSA.NET</div>
+    <div class="footer-tagline">Connecting your business to the world.</div>
+    <div class="footer-contact">
+      <p>📍 1209 Mountain Road PL NE, Albuquerque, NM 87110, USA</p>
+      <p>📧 support@talkusa.net</p>
+    </div>
+  </footer>
+</body>
+</html>
