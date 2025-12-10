@@ -289,6 +289,8 @@
     const LOCAL_DID_MARKUP = parseFloat('<%= typeof localDidMarkup !== "undefined" ? localDidMarkup : 10.20 %>') || 0;
     const TOLLFREE_DID_MARKUP = parseFloat('<%= typeof tollfreeDidMarkup !== "undefined" ? tollfreeDidMarkup : 25.20 %>') || 0;
     const $ = (s)=>document.querySelector(s);
+    var billingPage = 0;
+    var billingPageSize = 20;
     const tabs = {profile:$('#tab-profile'), sip:$('#tab-sip'), trunk:$('#tab-trunk'), billing:$('#tab-billing'), buydid:$('#tab-buydid'), mydids:$('#tab-mydids'), cdr:$('#tab-cdr')};
     const views = {profile:$('#view-profile'), sip:$('#view-sip'), trunk:$('#view-trunk'), billing:$('#view-billing'), buydid:$('#view-buydid'), mydids:$('#view-mydids'), cdr:$('#view-cdr')};
     function activate(name){
@@ -837,7 +839,6 @@
 
 
     // ========== Billing History ==========
-    var billingPage = 0; var billingPageSize = 20;
     let billingData = [];
     
     async function loadBillingHistory() {
