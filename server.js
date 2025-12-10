@@ -2029,7 +2029,49 @@ const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || '';
 const SQUARE_ENVIRONMENT = process.env.SQUARE_ENVIRONMENT || 'sandbox'; // 'sandbox' or 'production'
 const SQUARE_APPLICATION_ID = process.env.SQUARE_APPLICATION_ID || '';
 const SQUARE_ACCESS_TOKEN = process.env.SQUARE_ACCESS_TOKEN || '';
-const SQUARE_LOCATION_ID = process// Verify NOWPayments IPN HMAC signature (x-nowpayments-sig)
+const SQUARE_LOCATION_ID = process.env.SQUARE_LOCATION_ID || '';
+const SQUARE_WEBHOOK_SIGNATURE_KEY = process.env.SQUARE_WEBHOOK_SIGNATURE_KEY || '';
+const SQUARE_WEBHOOK_NOTIFICATION_URL = process.env.SQUARE_WEBHOOK_NOTIFICATION_URL || '';
+
+function squareApiBaseUrl() {
+  return SQUARE_ENVIRONMENT === 'production'
+    ? 'https://connect.squareup.com'
+    : 'https://connect.squareupsandbox.com';
+}
+
+let cachedSquareLocationId = SQUARE_LOCATION_ID || null;
+async function getSquareLocationId() {
+  if (cachedSquareLocationId) return cachedSquareLocationId;
+  if (!SQUARE_ACCESS_TOKEN) {
+    throw new Error('Square access token not configured');
+  }
+  try {
+    const baseUrl = squareApiBaseUrl();
+    const resp = await axios.get(`${baseUrl}/v2/locations`, {
+      timeout: 15000,
+      headers: {
+        'Authorization': `Bearer ${SQUARE_ACCESS_TOKEN}`,
+        'Square-Version': '2025-10-16',
+        'Accept': 'application/json'
+      }
+    });
+    const locations = resp?.data?.locations || [];
+    const active = locations.find(l => l.status === 'ACTIVE') || locations[0];
+    if (active && active.id) {
+      cachedSquareLocationId = active.id;
+      if (DEBUG) console.log('[square.locations] Using location id:', cachedSquareLocationId);
+      return cachedSquareLocationId;
+    }
+    if (DEBUG) console.warn('[square.locations] No locations returned from Square');
+    return null;
+  } catch (e) {
+    if (DEBUG) console.error('[square.locations] Failed to fetch locations:', e.response?.data || e.message || e);
+    return null;
+  }
+}
+
+// Verify NOWPayments IPN HMAC signature (x-nowpayments-sig)
+function verifyNowpaymentsSignature(req) {
 function verifyNowpaymentsSignature(req) {
   try {
     if (!NOWPAYMENTS_IPN_SECRET) {
