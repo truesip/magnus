@@ -256,7 +256,13 @@ app.use((req, res, next) => {
   }
   return sessionMiddleware(req, res, next);
 });
-app.use(bodyParser.json());
+// Capture raw JSON body (for IPN signature verification, etc.)
+app.use(bodyParser.json({
+  verify: (req, res, buf) => {
+    // Store raw body buffer for routes that need HMAC verification (e.g., NOWPayments IPN)
+    req.rawBody = buf;
+  }
+}));
 app.use(bodyParser.urlencoded({ extended: true }));
 // Lightweight request logging (always on). Logs when the response finishes.
 app.use((req, res, next) => {
@@ -450,6 +456,26 @@ async function initDb() {
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uniq_user_order (user_id, order_id),
     KEY idx_receipt_user (user_id),
+    FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+  // NOWPayments payments table - tracks crypto payments and credits
+  await pool.query(`CREATE TABLE IF NOT EXISTS nowpayments_payments (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    payment_id VARCHAR(128) NOT NULL,
+    order_id VARCHAR(191) NOT NULL,
+    price_amount DECIMAL(18,8) NOT NULL,
+    price_currency VARCHAR(16) NOT NULL DEFAULT 'usd',
+    pay_amount DECIMAL(36,18) NULL,
+    pay_currency VARCHAR(32) NULL,
+    payment_status VARCHAR(64) NOT NULL DEFAULT 'pending',
+    credited TINYINT(1) NOT NULL DEFAULT 0,
+    raw_payload JSON NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_payment_id (payment_id),
+    KEY idx_np_user (user_id),
+    KEY idx_np_order (order_id),
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
   // One-time migration: drop legacy per-user API columns if present and add password_hash if missing
@@ -967,13 +993,140 @@ app.get('/api/me/billing-history', requireAuth, async (req, res) => {
   }
 });
 
-// Add funds to user account
+// Shared helper to apply a refill in MagnusBilling, update billing_history and send receipt
+async function applyMagnusRefill({ userId, magnusUserId, amountNum, desc, displayName, userEmail, httpsAgent, hostHeader, billingId }) {
+  if (!pool) throw new Error('Database not configured');
+  if (!magnusUserId) throw new Error('Missing MagnusBilling user id');
+
+  try {
+    if (DEBUG) console.log('[refill] Attempting to add credit:', { magnusUserId, amount: amountNum, billingId });
+
+    let success = false;
+    let magnusResponse = null;
+
+    // Method 1: Use the 'refill' module (the proper way to add credit in MagnusBilling)
+    try {
+      const refillParams = new URLSearchParams();
+      refillParams.append('module', 'refill');
+      refillParams.append('action', 'save');
+      refillParams.append('id_user', String(magnusUserId));
+      refillParams.append('credit', String(amountNum));
+      refillParams.append('description', desc);
+      refillParams.append('payment', '1'); // 1 = Yes (payment confirmed)
+      refillParams.append('refill_type', '0'); // 0 = Bank transfer/manual (releases credit immediately)
+
+      const refillResp = await mbSignedCall({ relPath: '/index.php/refill/save', params: refillParams, httpsAgent, hostHeader });
+      magnusResponse = JSON.stringify(refillResp?.data || refillResp);
+
+      if (DEBUG) console.log('[refill] Refill module response:', magnusResponse);
+
+      // Check for success - MagnusBilling returns success:true or the new record
+      if (refillResp?.data?.success === true || refillResp?.data?.rows?.length > 0 || (refillResp?.status >= 200 && refillResp?.status < 300)) {
+        success = true;
+        if (DEBUG) console.log('[refill] Refill successful via refill module');
+
+        // Also verify/force the user credit update (some MagnusBilling versions need this)
+        try {
+          const readParams = new URLSearchParams();
+          readParams.append('module', 'user');
+          readParams.append('action', 'read');
+          readParams.append('start', '0');
+          readParams.append('limit', '100');
+          const readResp = await mbSignedCall({ relPath: '/index.php/user/read', params: readParams, httpsAgent, hostHeader });
+          const allUsers = readResp?.data?.rows || readResp?.data?.data || [];
+          const userRow = allUsers.find(u => String(u.id || u.user_id || '') === String(magnusUserId));
+
+          if (userRow) {
+            const currentCredit = Number(userRow.credit || 0);
+            const newCredit = currentCredit + amountNum;
+            if (DEBUG) console.log('[refill] Credit after refill API call:', { currentCredit, newCredit, amountAdded: amountNum });
+
+            // Force update the user's credit field directly
+            // Some MagnusBilling versions don't auto-update user.credit from refill records
+            if (DEBUG) console.log('[refill] Forcing direct credit update...');
+            const updateParams = new URLSearchParams();
+            updateParams.append('module', 'user');
+            updateParams.append('action', 'save');
+            updateParams.append('id', String(magnusUserId));
+            updateParams.append('credit', String(newCredit));
+            const updateResp = await mbSignedCall({ relPath: '/index.php/user/save', params: updateParams, httpsAgent, hostHeader });
+            if (DEBUG) console.log('[refill] Direct credit update response:', JSON.stringify(updateResp?.data || updateResp?.status));
+          }
+        } catch (creditErr) {
+          if (DEBUG) console.warn('[refill] Credit verification/update failed:', creditErr.message);
+        }
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[refill] refill module failed:', e.message, e.response?.data);
+      magnusResponse = JSON.stringify(e.response?.data || e.message);
+    }
+
+    // Method 2: Try refillcredit module as fallback
+    if (!success) {
+      try {
+        const refillParams = new URLSearchParams();
+        refillParams.append('module', 'refillcredit');
+        refillParams.append('action', 'save');
+        refillParams.append('id_user', String(magnusUserId));
+        refillParams.append('credit', String(amountNum));
+        refillParams.append('description', desc);
+
+        const refillResp = await mbSignedCall({ relPath: '/index.php/refillcredit/save', params: refillParams, httpsAgent, hostHeader });
+        magnusResponse = JSON.stringify(refillResp?.data || refillResp);
+
+        if (DEBUG) console.log('[refill] Refillcredit module response:', magnusResponse);
+
+        if (refillResp?.data?.success === true || refillResp?.data?.rows?.length > 0) {
+          success = true;
+          if (DEBUG) console.log('[refill] Refill successful via refillcredit module');
+        }
+      } catch (e) {
+        if (DEBUG) console.warn('[refill] refillcredit module failed:', e.message);
+      }
+    }
+
+    if (success) {
+      await pool.execute(
+        'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+        ['completed', magnusResponse, billingId]
+      );
+
+      // Send refill receipt email (best-effort, do not fail the caller if this fails)
+      try {
+        if (userEmail) {
+          await sendRefillReceiptEmail({ toEmail: userEmail, username: displayName, amount: amountNum, description: desc });
+        }
+      } catch (emailErr) {
+        if (DEBUG) console.warn('[refill] Failed to send refill receipt email:', emailErr.message || emailErr);
+      }
+
+      return { success: true, magnusResponse };
+    } else {
+      await pool.execute(
+        'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+        ['failed', magnusResponse || 'No response', billingId]
+      );
+      return { success: false, error: 'Failed to add credit to MagnusBilling', magnusResponse };
+    }
+  } catch (e) {
+    if (DEBUG) console.error('[refill] MagnusBilling error:', e.message || e);
+    try {
+      await pool.execute(
+        'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+        ['failed', String(e.message || e), billingId]
+      );
+    } catch {}
+    return { success: false, error: e.message || 'Unknown error' };
+  }
+}
+
+// Add funds to user account (manual/direct refill)
 app.post('/api/me/add-funds', requireAuth, async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     const userId = req.session.userId;
     const { amount } = req.body || {};
-    
+
     // Validate amount
     const amountNum = parseFloat(amount);
     if (!amountNum || amountNum <= 0) {
@@ -982,7 +1135,7 @@ app.post('/api/me/add-funds', requireAuth, async (req, res) => {
     if (amountNum > 10000) {
       return res.status(400).json({ success: false, message: 'Amount cannot exceed $10,000' });
     }
-    
+
     // Build a standard refill description: username + amount + fixed note
     let username = '';
     let firstName = '';
@@ -1006,147 +1159,312 @@ app.post('/api/me/add-funds', requireAuth, async (req, res) => {
     const displayName = fullName || baseUser;
     const descRaw = `${baseUser} - $${amountNum.toFixed(2)} - TalkUSA refill`;
     const desc = descRaw.substring(0, 255);
-    
+
     // Get Magnus user ID
-    const httpsAgent = new https.Agent({ rejectUnauthorized: process.env.MAGNUSBILLING_TLS_INSECURE !== '1', ...(process.env.MAGNUSBILLING_TLS_SERVERNAME ? { servername: process.env.MAGNUSBILLING_TLS_SERVERNAME } : {}) });
+    const httpsAgent = new https.Agent({
+      rejectUnauthorized: process.env.MAGNUSBILLING_TLS_INSECURE !== '1',
+      ...(process.env.MAGNUSBILLING_TLS_SERVERNAME ? { servername: process.env.MAGNUSBILLING_TLS_SERVERNAME } : {})
+    });
     const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
     const magnusUserId = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
-    
+
     if (!magnusUserId) {
       return res.status(400).json({ success: false, message: 'Could not find MagnusBilling user ID' });
     }
-    
+
     // Insert pending billing record
     const [insertResult] = await pool.execute(
       'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
       [userId, amountNum, desc, 'pending']
     );
     const billingId = insertResult.insertId;
-    
-    try {
-      if (DEBUG) console.log('[add-funds] Attempting to add credit:', { magnusUserId, amount: amountNum });
-      
-      let success = false;
-      let magnusResponse = null;
-      
-      // Method 1: Use the 'refill' module (the proper way to add credit in MagnusBilling)
-      try {
-        const refillParams = new URLSearchParams();
-        refillParams.append('module', 'refill');
-        refillParams.append('action', 'save');
-        refillParams.append('id_user', String(magnusUserId));
-        refillParams.append('credit', String(amountNum));
-        refillParams.append('description', desc);
-        refillParams.append('payment', '1'); // 1 = Yes (payment confirmed)
-        refillParams.append('refill_type', '0'); // 0 = Bank transfer/manual (releases credit immediately)
-        
-        const refillResp = await mbSignedCall({ relPath: '/index.php/refill/save', params: refillParams, httpsAgent, hostHeader });
-        magnusResponse = JSON.stringify(refillResp?.data || refillResp);
-        
-        if (DEBUG) console.log('[add-funds] Refill module response:', magnusResponse);
-        
-        // Check for success - MagnusBilling returns success:true or the new record
-        if (refillResp?.data?.success === true || refillResp?.data?.rows?.length > 0 || (refillResp?.status >= 200 && refillResp?.status < 300)) {
-          success = true;
-          if (DEBUG) console.log('[add-funds] Refill successful via refill module');
-          
-          // Also verify/force the user credit update (some MagnusBilling versions need this)
-          try {
-            // Get current user credit
-            const readParams = new URLSearchParams();
-            readParams.append('module', 'user');
-            readParams.append('action', 'read');
-            readParams.append('start', '0');
-            readParams.append('limit', '100');
-            const readResp = await mbSignedCall({ relPath: '/index.php/user/read', params: readParams, httpsAgent, hostHeader });
-            const allUsers = readResp?.data?.rows || readResp?.data?.data || [];
-            const userRow = allUsers.find(u => String(u.id || u.user_id || '') === String(magnusUserId));
-            
-            if (userRow) {
-              const currentCredit = Number(userRow.credit || 0);
-              const newCredit = currentCredit + amountNum;
-              if (DEBUG) console.log('[add-funds] Credit after refill API call:', { currentCredit, newCredit, amountAdded: amountNum });
-              
-              // Force update the user's credit field directly
-              // Some MagnusBilling versions don't auto-update user.credit from refill records
-              if (DEBUG) console.log('[add-funds] Forcing direct credit update...');
-              const updateParams = new URLSearchParams();
-              updateParams.append('module', 'user');
-              updateParams.append('action', 'save');
-              updateParams.append('id', String(magnusUserId));
-              updateParams.append('credit', String(newCredit));
-              const updateResp = await mbSignedCall({ relPath: '/index.php/user/save', params: updateParams, httpsAgent, hostHeader });
-              if (DEBUG) console.log('[add-funds] Direct credit update response:', JSON.stringify(updateResp?.data || updateResp?.status));
-            }
-          } catch (creditErr) {
-            if (DEBUG) console.warn('[add-funds] Credit verification/update failed:', creditErr.message);
-          }
-        }
-      } catch (e) {
-        if (DEBUG) console.warn('[add-funds] refill module failed:', e.message, e.response?.data);
-        magnusResponse = JSON.stringify(e.response?.data || e.message);
-      }
-      
-      // Method 2: Try refillcredit module as fallback
-      if (!success) {
-        try {
-          const refillParams = new URLSearchParams();
-          refillParams.append('module', 'refillcredit');
-          refillParams.append('action', 'save');
-          refillParams.append('id_user', String(magnusUserId));
-          refillParams.append('credit', String(amountNum));
-          refillParams.append('description', desc);
-          
-          const refillResp = await mbSignedCall({ relPath: '/index.php/refillcredit/save', params: refillParams, httpsAgent, hostHeader });
-          magnusResponse = JSON.stringify(refillResp?.data || refillResp);
-          
-          if (DEBUG) console.log('[add-funds] Refillcredit module response:', magnusResponse);
-          
-          if (refillResp?.data?.success === true || refillResp?.data?.rows?.length > 0) {
-            success = true;
-            if (DEBUG) console.log('[add-funds] Refill successful via refillcredit module');
-          }
-        } catch (e) {
-          if (DEBUG) console.warn('[add-funds] refillcredit module failed:', e.message);
-        }
-      }
-      
-      if (success) {
-        // Update billing record to completed
-        await pool.execute(
-          'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
-          ['completed', magnusResponse, billingId]
-        );
 
-        // Send refill receipt email (best-effort, do not fail the request if this fails)
-        try {
-          if (userEmail) {
-            await sendRefillReceiptEmail({ toEmail: userEmail, username: displayName, amount: amountNum, description: desc });
-          }
-        } catch (emailErr) {
-          if (DEBUG) console.warn('[add-funds] Failed to send refill receipt email:', emailErr.message || emailErr);
-        }
+    const result = await applyMagnusRefill({
+      userId,
+      magnusUserId,
+      amountNum,
+      desc,
+      displayName,
+      userEmail,
+      httpsAgent,
+      hostHeader,
+      billingId
+    });
 
-        return res.json({ success: true, message: 'Funds added successfully' });
-      } else {
-        // Update billing record to failed
-        await pool.execute(
-          'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
-          ['failed', magnusResponse || 'No response', billingId]
-        );
-        return res.status(500).json({ success: false, message: 'Failed to add credit to MagnusBilling' });
-      }
-    } catch (mbErr) {
-      if (DEBUG) console.error('[add-funds] MagnusBilling error:', mbErr.message || mbErr);
-      await pool.execute(
-        'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
-        ['failed', String(mbErr.message || mbErr), billingId]
-      );
-      return res.status(500).json({ success: false, message: 'Failed to add credit: ' + (mbErr.message || 'Unknown error') });
+    if (result.success) {
+      return res.json({ success: true, message: 'Funds added successfully' });
     }
+    return res.status(500).json({ success: false, message: 'Failed to add credit: ' + (result.error || 'Unknown error') });
   } catch (e) {
     if (DEBUG) console.error('[add-funds] error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to add funds' });
+  }
+});
+
+// Create a NOWPayments checkout (Standard e-commerce flow)
+// Returns a hosted payment URL where the user can complete a crypto payment.
+app.post('/api/me/nowpayments/checkout', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    if (!NOWPAYMENTS_API_KEY) {
+      return res.status(500).json({ success: false, message: 'Crypto payments are not configured' });
+    }
+    const userId = req.session.userId;
+    const { amount } = req.body || {};
+
+    const amountNum = parseFloat(amount);
+    if (!amountNum || amountNum <= 0) {
+      return res.status(400).json({ success: false, message: 'Amount must be greater than 0' });
+    }
+    if (amountNum > 10000) {
+      return res.status(400).json({ success: false, message: 'Amount cannot exceed $10,000' });
+    }
+
+    // Fetch user info for description + email
+    let username = '';
+    let firstName = '';
+    let lastName = '';
+    let userEmail = '';
+    try {
+      const [rows] = await pool.execute('SELECT username, firstname, lastname, email FROM signup_users WHERE id=? LIMIT 1', [userId]);
+      if (rows && rows[0]) {
+        if (rows[0].username) username = String(rows[0].username);
+        if (rows[0].firstname) firstName = String(rows[0].firstname);
+        if (rows[0].lastname) lastName = String(rows[0].lastname);
+        if (rows[0].email) userEmail = String(rows[0].email);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[nowpayments.checkout] Failed to fetch user info:', e.message || e);
+    }
+    const baseUser = username || (req.session.username || 'unknown');
+    const fullName = `${firstName || ''} ${lastName || ''}`.trim();
+    const displayName = fullName || baseUser;
+    const descRaw = `${baseUser} - $${amountNum.toFixed(2)} - TalkUSA crypto refill`;
+    const desc = descRaw.substring(0, 255);
+
+    // Insert pending billing record (we will mark completed after successful IPN)
+    const [insertResult] = await pool.execute(
+      'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
+      [userId, amountNum, desc, 'pending']
+    );
+    const billingId = insertResult.insertId;
+
+    // Build deterministic order_id encoding userId + billingId for later lookup from IPN
+    const orderId = `np-${userId}-${billingId}`;
+
+    // Build IPN & redirect URLs
+    const baseUrl = PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+    const ipnUrl = joinUrl(baseUrl, '/nowpayments/ipn');
+    const successUrl = joinUrl(baseUrl, '/dashboard?payment=success');
+    const cancelUrl = joinUrl(baseUrl, '/dashboard?payment=cancel');
+
+    const client = nowpaymentsAxios();
+    const payload = {
+      price_amount: amountNum,
+      price_currency: 'usd',
+      order_id: orderId,
+      order_description: desc,
+      ipn_callback_url: ipnUrl,
+      success_url: successUrl,
+      cancel_url: cancelUrl
+    };
+
+    if (DEBUG) console.log('[nowpayments.checkout] Creating invoice:', payload);
+    const resp = await client.post('/invoice', payload);
+    const data = resp?.data || {};
+    const paymentUrl = data.invoice_url || data.payment_url || data.checkout_url || null;
+    if (!paymentUrl) {
+      if (DEBUG) console.error('[nowpayments.checkout] Missing invoice/payment URL in response:', data);
+      await pool.execute(
+        'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+        ['failed', JSON.stringify(data), billingId]
+      );
+      return res.status(502).json({ success: false, message: 'Payment provider did not return a checkout URL' });
+    }
+
+    // Record NOWPayments invoice/payment row for tracking/idempotency
+    try {
+      const remoteId = data.id || data.payment_id || orderId;
+      const paymentStatus = data.payment_status || data.invoice_status || 'waiting';
+      await pool.execute(
+        'INSERT INTO nowpayments_payments (user_id, payment_id, order_id, price_amount, price_currency, payment_status, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, 0, ?)',
+        [userId, String(remoteId), String(orderId), amountNum, 'usd', String(paymentStatus), JSON.stringify(data)]
+      );
+    } catch (e) {
+      if (DEBUG) console.warn('[nowpayments.checkout] Failed to insert nowpayments_payments row:', e.message || e);
+      // Do not fail the checkout creation if this insert fails; IPN can still be processed via order_id encoding
+    }
+
+    return res.json({ success: true, payment_url: paymentUrl });
+  } catch (e) {
+    if (DEBUG) console.error('[nowpayments.checkout] error:', e.response?.data || e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to create crypto payment' });
+  }
+});
+
+// NOWPayments IPN webhook (server-to-server callback)
+app.post('/nowpayments/ipn', async (req, res) => {
+  try {
+    if (!pool) {
+      return res.status(500).json({ success: false, message: 'Database not configured' });
+    }
+
+    // Verify HMAC signature
+    const sigOk = verifyNowpaymentsSignature(req);
+    if (!sigOk) {
+      if (DEBUG) console.warn('[nowpayments.ipn] Invalid signature');
+      return res.status(400).json({ success: false, message: 'Invalid signature' });
+    }
+
+    const p = req.body || {};
+    if (DEBUG) console.log('[nowpayments.ipn] Payload:', JSON.stringify(p));
+
+    const orderId = String(p.order_id || '').trim();
+    const paymentStatus = String(p.payment_status || '').toLowerCase();
+    const priceAmount = parseFloat(p.price_amount || '0');
+    const payAmount = p.pay_amount != null ? parseFloat(p.pay_amount) : null;
+    const payCurrency = p.pay_currency || null;
+    const remotePaymentId = p.payment_id || p.id || null;
+
+    if (!orderId) {
+      if (DEBUG) console.warn('[nowpayments.ipn] Missing order_id in IPN payload');
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    // Order id format: np-<userId>-<billingId>
+    const m = /^np-(\d+)-(\d+)$/.exec(orderId);
+    if (!m) {
+      if (DEBUG) console.warn('[nowpayments.ipn] order_id does not match expected pattern:', orderId);
+      return res.status(200).json({ success: true, ignored: true });
+    }
+    const userId = Number(m[1]);
+    const billingId = Number(m[2]);
+
+    // Fetch billing_history row
+    const [billingRows] = await pool.execute(
+      'SELECT id, user_id, amount, description, status FROM billing_history WHERE id = ? LIMIT 1',
+      [billingId]
+    );
+    const billing = billingRows && billingRows[0];
+    if (!billing || String(billing.user_id) !== String(userId)) {
+      if (DEBUG) console.warn('[nowpayments.ipn] Billing row not found or user mismatch for order:', { orderId, userId, billingId });
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    // Upsert nowpayments_payments row for tracking
+    let existing = null;
+    try {
+      const [npRows] = await pool.execute(
+        'SELECT * FROM nowpayments_payments WHERE order_id = ? LIMIT 1',
+        [orderId]
+      );
+      existing = npRows && npRows[0] ? npRows[0] : null;
+    } catch (e) {
+      if (DEBUG) console.warn('[nowpayments.ipn] Failed to select nowpayments_payments row:', e.message || e);
+    }
+
+    const paymentStatusLabel = paymentStatus || 'unknown';
+    const payloadJson = JSON.stringify(p);
+    if (existing) {
+      try {
+        await pool.execute(
+          'UPDATE nowpayments_payments SET payment_id = ?, price_amount = ?, price_currency = ?, pay_amount = ?, pay_currency = ?, payment_status = ?, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [remotePaymentId || existing.payment_id || orderId, priceAmount || billing.amount, p.price_currency || 'usd', payAmount, payCurrency, paymentStatusLabel, payloadJson, existing.id]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[nowpayments.ipn] Failed to update nowpayments_payments row:', e.message || e);
+      }
+    } else {
+      try {
+        await pool.execute(
+          'INSERT INTO nowpayments_payments (user_id, payment_id, order_id, price_amount, price_currency, pay_amount, pay_currency, payment_status, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)',
+          [userId, String(remotePaymentId || orderId), String(orderId), priceAmount || billing.amount, p.price_currency || 'usd', payAmount, payCurrency, paymentStatusLabel, payloadJson]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[nowpayments.ipn] Failed to insert nowpayments_payments row:', e.message || e);
+      }
+    }
+
+    // If not finished yet, acknowledge but do not credit
+    if (paymentStatus !== 'finished') {
+      if (DEBUG) console.log('[nowpayments.ipn] Payment not finished yet, status=', paymentStatus);
+      return res.status(200).json({ success: true, pending: true });
+    }
+
+    // If we've already credited this order, do nothing (idempotent)
+    let creditedFlag = 0;
+    try {
+      const [npRows2] = await pool.execute(
+        'SELECT credited FROM nowpayments_payments WHERE order_id = ? LIMIT 1',
+        [orderId]
+      );
+      creditedFlag = npRows2 && npRows2[0] ? Number(npRows2[0].credited || 0) : 0;
+    } catch {}
+    if (creditedFlag) {
+      if (DEBUG) console.log('[nowpayments.ipn] Order already credited, skipping:', { orderId, billingId });
+      return res.status(200).json({ success: true, alreadyCredited: true });
+    }
+
+    // Fetch user + MagnusBilling id
+    const [userRows] = await pool.execute(
+      'SELECT id, magnus_user_id, username, firstname, lastname, email FROM signup_users WHERE id = ? LIMIT 1',
+      [userId]
+    );
+    const user = userRows && userRows[0];
+    if (!user) {
+      if (DEBUG) console.warn('[nowpayments.ipn] User not found for order:', { orderId, userId });
+      return res.status(200).json({ success: true, ignored: true });
+    }
+    const magnusUserId = String(user.magnus_user_id || '').trim();
+    if (!magnusUserId) {
+      if (DEBUG) console.warn('[nowpayments.ipn] Missing magnus_user_id for user:', { userId });
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const nameBase = user.username || '';
+    const fullName2 = `${user.firstname || ''} ${user.lastname || ''}`.trim();
+    const displayName = fullName2 || nameBase || 'Customer';
+    const userEmail = user.email || '';
+
+    // Use the amount from billing_history as source of truth (what we asked customer to pay)
+    const amountNum = Number(billing.amount || priceAmount || 0);
+    const desc = billing.description || p.order_description || `TalkUSA crypto refill (${orderId})`;
+
+    const httpsAgent = magnusBillingAgent;
+    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+
+    const result = await applyMagnusRefill({
+      userId,
+      magnusUserId,
+      amountNum,
+      desc,
+      displayName,
+      userEmail,
+      httpsAgent,
+      hostHeader,
+      billingId
+    });
+
+    if (!result.success) {
+      if (DEBUG) console.error('[nowpayments.ipn] Failed to credit MagnusBilling for order:', { orderId, error: result.error });
+      return res.status(500).json({ success: false, message: 'Failed to credit MagnusBilling' });
+    }
+
+    // Mark as credited
+    try {
+      await pool.execute(
+        'UPDATE nowpayments_payments SET credited = 1 WHERE order_id = ?',
+        [orderId]
+      );
+    } catch (e) {
+      if (DEBUG) console.warn('[nowpayments.ipn] Failed to mark payment as credited:', e.message || e);
+    }
+
+    if (DEBUG) console.log('[nowpayments.ipn] Successfully credited order:', { orderId, billingId, userId });
+    return res.status(200).json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[nowpayments.ipn] Unhandled error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'IPN handling failed' });
   }
 });
 
@@ -1412,6 +1730,50 @@ app.get('/api/me/cdr', requireAuth, async (req, res) => {
 // DIDWW API helpers
 const DIDWW_API_KEY = process.env.DIDWW_API_KEY;
 const DIDWW_API_URL = process.env.DIDWW_API_URL || 'https://api.didww.com/v3';
+
+// NOWPayments configuration
+const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY || '';
+const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || '';
+const NOWPAYMENTS_API_URL = process.env.NOWPAYMENTS_API_URL || 'https://api.nowpayments.io/v1';
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || '';
+
+function nowpaymentsAxios() {
+  if (!NOWPAYMENTS_API_KEY) throw new Error('NOWPAYMENTS_API_KEY not configured');
+  return axios.create({
+    baseURL: NOWPAYMENTS_API_URL,
+    timeout: 30000,
+    headers: {
+      'x-api-key': NOWPAYMENTS_API_KEY,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    }
+  });
+}
+
+// Verify NOWPayments IPN HMAC signature (x-nowpayments-sig)
+function verifyNowpaymentsSignature(req) {
+  try {
+    if (!NOWPAYMENTS_IPN_SECRET) {
+      if (DEBUG) console.warn('[nowpayments.ipn] NOWPAYMENTS_IPN_SECRET not set; skipping signature verification');
+      return true; // Do not block if secret not configured yet, but log
+    }
+    const signature = req.headers['x-nowpayments-sig'] || req.headers['x-nowpayments-signature'];
+    if (!signature) return false;
+    const raw = req.rawBody;
+    if (!raw || !Buffer.isBuffer(raw)) return false;
+    const hmac = crypto.createHmac('sha512', NOWPAYMENTS_IPN_SECRET);
+    hmac.update(raw);
+    const expected = hmac.digest('hex');
+    // Use timing-safe compare
+    const a = Buffer.from(expected, 'utf8');
+    const b = Buffer.from(String(signature), 'utf8');
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch (e) {
+    if (DEBUG) console.warn('[nowpayments.ipn] Signature verification error:', e.message || e);
+    return false;
+  }
+}
 
 async function didwwApiCall({ method, path, body }) {
   if (!DIDWW_API_KEY) throw new Error('DIDWW_API_KEY not configured');

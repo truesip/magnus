@@ -457,6 +457,35 @@
     // init
     const rng = defaultRange(); $('#from').value = rng.from; $('#to').value = rng.to;
     loadProfile(); loadSip(); loadCdr();
+
+    // If redirected back from NOWPayments with ?payment=success or ?payment=cancel, handle it
+    (function handlePaymentReturn() {
+      try {
+        const params = new URLSearchParams(window.location.search || '');
+        const paymentStatus = params.get('payment');
+        if (!paymentStatus) return;
+
+        if (paymentStatus === 'success') {
+          // Switch to Billing tab and refresh
+          activate('billing');
+          billingPage = 0;
+          loadBillingHistory();
+          loadProfile();
+          showToast('Payment received! Your balance has been updated.');
+        } else if (paymentStatus === 'cancel') {
+          showToast('Payment was cancelled. No funds were added.', 'error');
+        }
+
+        // Clean up URL so the message does not repeat on refresh
+        if (window.history && window.history.replaceState) {
+          const url = new URL(window.location.href);
+          url.searchParams.delete('payment');
+          window.history.replaceState({}, document.title, url.toString());
+        }
+      } catch (e) {
+        console.error('[paymentReturn]', e);
+      }
+    })();
     $('#loadCdr').addEventListener('click', e=>{ e.preventDefault(); cdrPage=0; loadCdr(); });
     document.getElementById('cdrPrev').addEventListener('click', ()=>{ if (cdrPage>0) { cdrPage--; loadCdr(); } });
     document.getElementById('cdrNext').addEventListener('click', ()=>{ cdrPage++; loadCdr(); });
@@ -841,35 +870,32 @@
     
     $('#confirmFundBtn').addEventListener('click', async () => {
       const amount = parseFloat($('#fundAmount').value);
-      const description = null; // description is generated server-side
-      
+
       if (!amount || amount <= 0) {
         return alert('Please enter a valid amount greater than 0');
       }
-      
+
       $('#confirmFundBtn').disabled = true;
-      $('#confirmFundBtn').textContent = 'Processing...';
-      
+      $('#confirmFundBtn').textContent = 'Redirecting...';
+
       try {
-        const r = await fetch('/api/me/add-funds', {
+        const r = await fetch('/api/me/nowpayments/checkout', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ amount, description })
+          body: JSON.stringify({ amount })
         });
         const j = await r.json();
-        
-        if (!j.success) {
-          alert(j.message || 'Failed to add funds');
+
+        if (!j.success || !j.payment_url) {
+          alert(j.message || 'Failed to start crypto payment');
           return;
         }
-        
-        showToast(`Successfully added $${amount.toFixed(2)} to your account!`);
-        $('#addFundModal').style.display = 'none';
-        loadBillingHistory();
-        loadProfile(); // Refresh balance on profile too
+
+        // Redirect user to NOWPayments hosted checkout page
+        window.location.href = j.payment_url;
       } catch (e) {
-        console.error('[addFunds]', e);
-        alert('Failed to add funds. Please try again.');
+        console.error('[addFunds.nowpayments]', e);
+        alert('Failed to start crypto payment. Please try again.');
       } finally {
         $('#confirmFundBtn').disabled = false;
         $('#confirmFundBtn').textContent = 'Add Funds';
