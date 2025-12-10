@@ -25,6 +25,8 @@ const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-change-this';
 const MB_SIP_MODULE = process.env.MB_SIP_MODULE || 'sip';
 const MB_CDR_MODULE = process.env.MB_CDR_MODULE || 'call';
 const MB_PAGE_SIZE = parseInt(process.env.MB_PAGE_SIZE || '50', 10);
+const CHECKOUT_MIN_AMOUNT = parseFloat(process.env.CHECKOUT_MIN_AMOUNT || '100');
+const CHECKOUT_MAX_AMOUNT = parseFloat(process.env.CHECKOUT_MAX_AMOUNT || '500');
 app.set('trust proxy', 1);
 app.set('etag', false);
 const COOKIE_SECURE = process.env.COOKIE_SECURE === '1';
@@ -853,10 +855,14 @@ app.post('/logout', (req, res) => { try { req.session.destroy(()=>{}); } catch {
 app.get('/dashboard', requireAuth, (req, res) => {
   const localMarkup = parseFloat(process.env.DID_LOCAL_MONTHLY_MARKUP || '10.20') || 0;
   const tollfreeMarkup = parseFloat(process.env.DID_TOLLFREE_MONTHLY_MARKUP || '25.20') || 0;
+  const checkoutMin = Number.isFinite(CHECKOUT_MIN_AMOUNT) ? CHECKOUT_MIN_AMOUNT : 100;
+  const checkoutMax = Number.isFinite(CHECKOUT_MAX_AMOUNT) ? CHECKOUT_MAX_AMOUNT : 500;
   res.render('dashboard', {
     username: req.session.username || '',
     localDidMarkup: localMarkup,
-    tollfreeDidMarkup: tollfreeMarkup
+    tollfreeDidMarkup: tollfreeMarkup,
+    checkoutMinAmount: checkoutMin,
+    checkoutMaxAmount: checkoutMax
   });
 });
 // Guard: deleting the primary signup user is disabled via API as well
@@ -1236,11 +1242,11 @@ app.post('/api/me/nowpayments/checkout', requireAuth, async (req, res) => {
     const { amount } = req.body || {};
 
     const amountNum = parseFloat(amount);
-    if (!amountNum || amountNum <= 0) {
-      return res.status(400).json({ success: false, message: 'Amount must be greater than 0' });
+    if (!Number.isFinite(amountNum)) {
+      return res.status(400).json({ success: false, message: 'Invalid amount' });
     }
-    if (amountNum > 10000) {
-      return res.status(400).json({ success: false, message: 'Amount cannot exceed $10,000' });
+    if (amountNum < CHECKOUT_MIN_AMOUNT || amountNum > CHECKOUT_MAX_AMOUNT) {
+      return res.status(400).json({ success: false, message: `Amount must be between $${CHECKOUT_MIN_AMOUNT} and $${CHECKOUT_MAX_AMOUNT}` });
     }
 
     // Fetch user info for description + email
@@ -1337,11 +1343,11 @@ app.post('/api/me/square/checkout', requireAuth, async (req, res) => {
     const { amount } = req.body || {};
 
     const amountNum = parseFloat(amount);
-    if (!amountNum || amountNum <= 0) {
-      return res.status(400).json({ success: false, message: 'Amount must be greater than 0' });
+    if (!Number.isFinite(amountNum)) {
+      return res.status(400).json({ success: false, message: 'Invalid amount' });
     }
-    if (amountNum > 10000) {
-      return res.status(400).json({ success: false, message: 'Amount cannot exceed $10,000' });
+    if (amountNum < CHECKOUT_MIN_AMOUNT || amountNum > CHECKOUT_MAX_AMOUNT) {
+      return res.status(400).json({ success: false, message: `Amount must be between $${CHECKOUT_MIN_AMOUNT} and $${CHECKOUT_MAX_AMOUNT}` });
     }
 
     // Fetch user info for description + email

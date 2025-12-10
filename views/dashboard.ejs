@@ -222,7 +222,7 @@
         <h3 style="margin:0 0 16px 0">💳 Add Funds</h3>
         <div style="margin-bottom:12px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Amount ($)</label>
-          <input id="fundAmount" type="number" min="1" step="0.01" placeholder="Enter amount" style="width:100%;box-sizing:border-box">
+          <input id="fundAmount" type="number" min="<%= checkoutMinAmount || 100 %>" max="<%= checkoutMaxAmount || 500 %>" step="0.01" placeholder="Enter amount" style="width:100%;box-sizing:border-box">
         </div>
         <div style="margin-bottom:12px;font-size:13px;color:#4b5563">
           Payment method:
@@ -296,6 +296,8 @@
   <script>
     const LOCAL_DID_MARKUP = parseFloat('<%= typeof localDidMarkup !== "undefined" ? localDidMarkup : 10.20 %>') || 0;
     const TOLLFREE_DID_MARKUP = parseFloat('<%= typeof tollfreeDidMarkup !== "undefined" ? tollfreeDidMarkup : 25.20 %>') || 0;
+    const CHECKOUT_MIN_AMOUNT = Number('<%= typeof checkoutMinAmount !== "undefined" ? checkoutMinAmount : 100 %>');
+    const CHECKOUT_MAX_AMOUNT = Number('<%= typeof checkoutMaxAmount !== "undefined" ? checkoutMaxAmount : 500 %>');
     const $ = (s)=>document.querySelector(s);
     var billingPage = 0;
     var billingPageSize = 20;
@@ -961,8 +963,11 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     $('#confirmFundBtn').addEventListener('click', async () => {
       const amount = parseFloat($('#fundAmount').value);
 
-      if (!amount || amount <= 0) {
-        return alert('Please enter a valid amount greater than 0');
+      if (!amount || !Number.isFinite(amount)) {
+        return alert('Please enter a valid amount.');
+      }
+      if (amount < CHECKOUT_MIN_AMOUNT || amount > CHECKOUT_MAX_AMOUNT) {
+        return alert(`Amount must be between $${CHECKOUT_MIN_AMOUNT.toFixed(2)} and $${CHECKOUT_MAX_AMOUNT.toFixed(2)}.`);
       }
 
       const methodInput = document.querySelector('input[name="fundMethod"]:checked');
