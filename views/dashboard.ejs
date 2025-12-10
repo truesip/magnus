@@ -35,6 +35,10 @@
     button:active{background:#3730a3;transform:scale(0.97)}
     button.btn-clicked{animation:btnClick 0.3s ease}
     button[disabled]{opacity:.5;cursor:not-allowed}
+    .icon-btn{background:transparent;color:#4b5563;border-radius:999px;padding:2px 6px;font-size:11px;border:none;cursor:pointer}
+    .icon-btn:hover{background:#e5e7eb;color:#111827}
+    .sip-pass{font-family:monospace;letter-spacing:2px}
+    .sip-pass-toggle{margin-right:4px}
     .muted{color:#6b7280;font-size:12px}
     pre{background:#0b1220;color:#e2e8f0;padding:8px;border-radius:8px;overflow:auto}
     .balance-value{font-size:18px;font-weight:600;color:#059669}
@@ -382,11 +386,18 @@
         } else if (lineStatus.toUpperCase().includes('UNREACHABLE')) {
           statusClass = 'status-unreachable'; statusText = 'Offline';
         }
+        const masked = pwd ? '•'.repeat(Math.min(10, String(pwd).length)) : '';
+        const userCell = `${escapeHtml(user)} <button class=\"icon-btn copy\" data-val=\"${escapeHtml(user)}\" title=\"Copy username\">📋</button>`;
+        const passCell = `<span class=\"sip-pass\" data-pass=\"${escapeHtml(pwd)}\" data-visible=\"0\">${escapeHtml(masked)}</span> `+
+                         `<button class=\"icon-btn sip-pass-toggle\" title=\"Show password\">👁</button>`+
+                         `<button class=\"icon-btn copy\" data-val=\"${escapeHtml(pwd)}\" title=\"Copy password\">📋</button>`;
+        const domainCell = `<span class=\"sip-domain-text\">${escapeHtml(domain)}</span> `+
+                           `<button class=\"icon-btn copy\" data-val=\"${escapeHtml(domain)}\" title=\"Copy domain\">📋</button>`;
         const tr = document.createElement('tr');
         tr.innerHTML = `<td><span class=\"status-indicator ${statusClass}\" title=\"${escapeHtml(lineStatus)}\"></span>${escapeHtml(statusText)}</td>`+
-                       `<td>${escapeHtml(user)}</td>`+
-                       `<td>${escapeHtml(pwd)}</td>`+
-                       `<td>${escapeHtml(domain)}</td>`+
+                       `<td>${userCell}</td>`+
+                       `<td>${passCell}</td>`+
+                       `<td>${domainCell}</td>`+
                        `<td><input data-id=\"${escapeHtml(String(id||''))}\" class=\"cid-input\" value=\"${escapeHtml(cid)}\"></td>`+
                        `<td><span class=\"direction-icon\" title=\"Inbound & Outbound calls enabled\">↕</span></td>`+
                        `<td><button data-id=\"${escapeHtml(String(id||''))}\" class=\"save-cid\">Save</button> <button data-id=\"${escapeHtml(String(id||''))}\" class=\"del-sip\">Delete</button></td>`;
@@ -626,6 +637,24 @@
         loadSip();
       } else if (ev.target && ev.target.classList.contains('copy')){
         const v = ev.target.getAttribute('data-val')||''; try { await navigator.clipboard.writeText(v); } catch {}
+      } else if (ev.target && ev.target.classList.contains('sip-pass-toggle')) {
+        const btn = ev.target;
+        const cell = btn.closest('td');
+        const span = cell ? cell.querySelector('.sip-pass') : null;
+        if (!span) return;
+        const isVisible = span.getAttribute('data-visible') === '1';
+        const full = span.getAttribute('data-pass') || '';
+        if (isVisible) {
+          span.textContent = full ? '•'.repeat(Math.min(10, full.length)) : '';
+          span.setAttribute('data-visible','0');
+          btn.textContent = '👁';
+          btn.title = 'Show password';
+        } else {
+          span.textContent = full;
+          span.setAttribute('data-visible','1');
+          btn.textContent = '🙈';
+          btn.title = 'Hide password';
+        }
       }
     });
 
