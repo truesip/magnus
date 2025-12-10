@@ -44,6 +44,28 @@
     @keyframes slideIn{from{transform:translateX(400px);opacity:0}to{transform:translateX(0);opacity:1}}
     @keyframes btnClick{0%{transform:scale(1)}50%{transform:scale(0.95);background:#3730a3}100%{transform:scale(1)}}
   </style>
+  <style>
+    /* Small method badges for billing history */
+    .bill-tag {
+      display:inline-block;
+      margin-right:6px;
+      padding:1px 6px;
+      border-radius:999px;
+      font-size:10px;
+      font-weight:600;
+      vertical-align:middle;
+    }
+    .bill-tag-card {
+      background:#ecfdf5;
+      color:#047857;
+      border:1px solid #6ee7b7;
+    }
+    .bill-tag-crypto {
+      background:#eff6ff;
+      color:#1d4ed8;
+      border:1px solid #bfdbfe;
+    }
+  </style>
 </head>
 <body>
   <header>
@@ -202,6 +224,10 @@
           <label style="margin-left:8px;cursor:pointer">
             <input type="radio" name="fundMethod" value="crypto"> Crypto
           </label>
+          <div style="margin-top:6px;font-size:12px;color:#6b7280">
+            <div><strong>Card</strong>: instant credit after successful payment.</div>
+            <div><strong>Crypto</strong>: credit is applied after network confirmations (may take several minutes).</div>
+          </div>
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
           <button id="cancelFundBtn" style="background:#6b7280">Cancel</button>
@@ -475,6 +501,7 @@
       try {
         const params = new URLSearchParams(window.location.search || '');
         const paymentStatus = params.get('payment');
+        const method = (params.get('method') || '').toLowerCase();
         if (!paymentStatus) return;
 
         if (paymentStatus === 'success') {
@@ -483,15 +510,20 @@
           billingPage = 0;
           loadBillingHistory();
           loadProfile();
-          showToast('Payment received! Your balance has been updated.');
+          const label = method === 'crypto' ? 'Crypto payment' : method === 'card' ? 'Card payment' : 'Payment';
+          showToast(`${label} received! Your balance has been updated or will be shortly.`);
         } else if (paymentStatus === 'cancel') {
-          showToast('Payment was cancelled. No funds were added.', 'error');
+          const cancelLabel = method === 'crypto' ? 'Crypto payment was cancelled. No funds were added.' :
+                             method === 'card' ? 'Card payment was cancelled. No funds were added.' :
+                             'Payment was cancelled. No funds were added.';
+          showToast(cancelLabel, 'error');
         }
 
         // Clean up URL so the message does not repeat on refresh
         if (window.history && window.history.replaceState) {
           const url = new URL(window.location.href);
           url.searchParams.delete('payment');
+          url.searchParams.delete('method');
           window.history.replaceState({}, document.title, url.toString());
         }
       } catch (e) {
@@ -840,9 +872,17 @@
           const amountPrefix = isNegative ? '-$' : '+$';
           const amountDisplay = Math.abs(amountNum).toFixed(2);
           const statusColor = row.status === 'completed' ? '#059669' : (row.status === 'pending' ? '#f59e0b' : '#ef4444');
+          let desc = row.description || 'Account refill';
+          let methodBadge = '';
+          const lowerDesc = desc.toLowerCase();
+          if (lowerDesc.includes('card refill')) {
+            methodBadge = '<span class="bill-tag bill-tag-card">Card</span>';
+          } else if (lowerDesc.includes('crypto refill')) {
+            methodBadge = '<span class="bill-tag bill-tag-crypto">Crypto</span>';
+          }
           tr.innerHTML = `<td>${escapeHtml(date)}</td>`+
                         `<td style="color:${amountColor};font-weight:600">${amountPrefix}${escapeHtml(amountDisplay)}</td>`+
-                        `<td>${escapeHtml(row.description || 'Account refill')}</td>`+
+                        `<td>${methodBadge}${escapeHtml(desc)}</td>`+
                         `<td style="color:${statusColor}">${escapeHtml(row.status || 'completed')}</td>`;
           tbody.appendChild(tr);
         });

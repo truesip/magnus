@@ -1276,8 +1276,8 @@ app.post('/api/me/nowpayments/checkout', requireAuth, async (req, res) => {
     // Build IPN & redirect URLs
     const baseUrl = PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
     const ipnUrl = joinUrl(baseUrl, '/nowpayments/ipn');
-    const successUrl = joinUrl(baseUrl, '/dashboard?payment=success');
-    const cancelUrl = joinUrl(baseUrl, '/dashboard?payment=cancel');
+    const successUrl = joinUrl(baseUrl, '/dashboard?payment=success&method=crypto');
+    const cancelUrl = joinUrl(baseUrl, '/dashboard?payment=cancel&method=crypto');
 
     const client = nowpaymentsAxios();
     const payload = {
@@ -1375,7 +1375,7 @@ app.post('/api/me/square/checkout', requireAuth, async (req, res) => {
     const orderId = `sq-${userId}-${billingId}`;
 
     const baseUrl = PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    const redirectUrl = joinUrl(baseUrl, '/dashboard?payment=success');
+    const redirectUrl = joinUrl(baseUrl, '/dashboard?payment=success&method=card');
 
     const locationId = await getSquareLocationId();
     if (!locationId) {
