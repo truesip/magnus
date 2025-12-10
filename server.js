@@ -478,6 +478,27 @@ async function initDb() {
     KEY idx_np_order (order_id),
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
+  // Square payments table - tracks card payments (Square Payment Links) and credits
+  await pool.query(`CREATE TABLE IF NOT EXISTS square_payments (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    payment_link_id VARCHAR(128) NOT NULL,
+    order_id VARCHAR(191) NOT NULL,
+    square_order_id VARCHAR(128) NULL,
+    square_payment_id VARCHAR(128) NULL,
+    amount DECIMAL(10,2) NOT NULL,
+    currency VARCHAR(16) NOT NULL DEFAULT 'USD',
+    status VARCHAR(64) NOT NULL DEFAULT 'pending',
+    credited TINYINT(1) NOT NULL DEFAULT 0,
+    raw_payload JSON NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_payment_link (payment_link_id),
+    KEY idx_sq_user (user_id),
+    KEY idx_sq_order (square_order_id),
+    KEY idx_sq_local_order (order_id),
+    FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
   // One-time migration: drop legacy per-user API columns if present and add password_hash if missing
   try {
     const toDrop = ['api_key','api_secret'];
@@ -1302,6 +1323,135 @@ app.post('/api/me/nowpayments/checkout', requireAuth, async (req, res) => {
   }
 });
 
+// Create a Square Payment Link checkout for card payments
+// Returns a hosted Square URL where the user can pay with card.
+app.post('/api/me/square/checkout', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    if (!SQUARE_ACCESS_TOKEN || !SQUARE_APPLICATION_ID) {
+      return res.status(500).json({ success: false, message: 'Card payments are not configured' });
+    }
+    const userId = req.session.userId;
+    const { amount } = req.body || {};
+
+    const amountNum = parseFloat(amount);
+    if (!amountNum || amountNum <= 0) {
+      return res.status(400).json({ success: false, message: 'Amount must be greater than 0' });
+    }
+    if (amountNum > 10000) {
+      return res.status(400).json({ success: false, message: 'Amount cannot exceed $10,000' });
+    }
+
+    // Fetch user info for description + email
+    let username = '';
+    let firstName = '';
+    let lastName = '';
+    let userEmail = '';
+    try {
+      const [rows] = await pool.execute('SELECT username, firstname, lastname, email FROM signup_users WHERE id=? LIMIT 1', [userId]);
+      if (rows && rows[0]) {
+        if (rows[0].username) username = String(rows[0].username);
+        if (rows[0].firstname) firstName = String(rows[0].firstname);
+        if (rows[0].lastname) lastName = String(rows[0].lastname);
+        if (rows[0].email) userEmail = String(rows[0].email);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[square.checkout] Failed to fetch user info:', e.message || e);
+    }
+    const baseUser = username || (req.session.username || 'unknown');
+    const fullName = `${firstName || ''} ${lastName || ''}`.trim();
+    const displayName = fullName || baseUser;
+    const descRaw = `${baseUser} - $${amountNum.toFixed(2)} - TalkUSA card refill`;
+    const desc = descRaw.substring(0, 255);
+
+    // Insert pending billing record (we will mark completed after successful webhook)
+    const [insertResult] = await pool.execute(
+      'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
+      [userId, amountNum, desc, 'pending']
+    );
+    const billingId = insertResult.insertId;
+
+    // Build deterministic local order_id encoding userId + billingId for correlation with Square
+    const orderId = `sq-${userId}-${billingId}`;
+
+    const baseUrl = PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+    const redirectUrl = joinUrl(baseUrl, '/dashboard?payment=success');
+
+    const locationId = await getSquareLocationId();
+    if (!locationId) {
+      if (DEBUG) console.error('[square.checkout] Could not resolve Square location id');
+      await pool.execute(
+        'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+        ['failed', 'Square location_id not configured', billingId]
+      );
+      return res.status(500).json({ success: false, message: 'Card payments are temporarily unavailable' });
+    }
+
+    const idempotencyKey = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+    const body = {
+      idempotency_key: idempotencyKey,
+      quick_pay: {
+        name: desc.substring(0, 60),
+        price_money: {
+          amount: Math.round(amountNum * 100),
+          currency: 'USD'
+        },
+        location_id: locationId
+      },
+      payment_note: orderId,
+      checkout_options: {
+        redirect_url: redirectUrl
+      }
+    };
+
+    if (userEmail) {
+      body.pre_populated_data = { buyer_email: userEmail };
+    }
+
+    const squareBase = squareApiBaseUrl();
+    if (DEBUG) console.log('[square.checkout] Creating payment link:', { orderId, amountNum, locationId });
+    const resp = await axios.post(`${squareBase}/v2/online-checkout/payment-links`, body, {
+      timeout: 30000,
+      headers: {
+        'Authorization': `Bearer ${SQUARE_ACCESS_TOKEN}`,
+        'Square-Version': '2025-10-16',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      }
+    });
+
+    const data = resp?.data || {};
+    const paymentLink = data.payment_link || {};
+    const paymentUrl = paymentLink.url || paymentLink.long_url || null;
+    const squareOrderId = paymentLink.order_id || (data.related_resources && data.related_resources.orders && data.related_resources.orders[0] && data.related_resources.orders[0].id) || null;
+
+    if (!paymentUrl) {
+      if (DEBUG) console.error('[square.checkout] Missing payment link URL in response:', data);
+      await pool.execute(
+        'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+        ['failed', JSON.stringify(data), billingId]
+      );
+      return res.status(502).json({ success: false, message: 'Card payment provider did not return a checkout URL' });
+    }
+
+    // Record Square payment link for tracking/idempotency
+    try {
+      await pool.execute(
+        'INSERT INTO square_payments (user_id, payment_link_id, order_id, square_order_id, amount, currency, status, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)',
+        [userId, String(paymentLink.id || orderId), String(orderId), squareOrderId, amountNum, 'USD', 'pending', JSON.stringify(data)]
+      );
+    } catch (e) {
+      if (DEBUG) console.warn('[square.checkout] Failed to insert square_payments row:', e.message || e);
+      // Do not fail the checkout creation if this insert fails; webhook can still be correlated via payment_note/order_id
+    }
+
+    return res.json({ success: true, payment_url: paymentUrl });
+  } catch (e) {
+    if (DEBUG) console.error('[square.checkout] error:', e.response?.data || e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to create card payment' });
+  }
+});
+
 // NOWPayments IPN webhook (server-to-server callback)
 app.post('/nowpayments/ipn', async (req, res) => {
   try {
@@ -1465,6 +1615,144 @@ app.post('/nowpayments/ipn', async (req, res) => {
   } catch (e) {
     if (DEBUG) console.error('[nowpayments.ipn] Unhandled error:', e.message || e);
     return res.status(500).json({ success: false, message: 'IPN handling failed' });
+  }
+});
+
+// Square webhook for card payments (payment.updated -> COMPLETED)
+app.post('/webhooks/square', async (req, res) => {
+  try {
+    if (!pool) {
+      return res.status(500).json({ success: false, message: 'Database not configured' });
+    }
+
+    const sigOk = verifySquareSignature(req);
+    if (!sigOk) {
+      if (DEBUG) console.warn('[square.webhook] Invalid signature');
+      return res.status(400).json({ success: false, message: 'Invalid signature' });
+    }
+
+    const evt = req.body || {};
+    const type = String(evt.type || '').toLowerCase();
+    if (type !== 'payment.updated' && type !== 'payment.created') {
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const dataObj = evt.data || {};
+    const payment = dataObj.object && dataObj.object.payment ? dataObj.object.payment : null;
+    if (!payment) {
+      if (DEBUG) console.warn('[square.webhook] Missing payment object in event');
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const status = String(payment.status || '').toUpperCase();
+    if (status !== 'COMPLETED') {
+      if (DEBUG) console.log('[square.webhook] Payment not completed yet, status=', status);
+      return res.status(200).json({ success: true, pending: true });
+    }
+
+    const squareOrderId = payment.order_id || null;
+    if (!squareOrderId) {
+      if (DEBUG) console.warn('[square.webhook] Missing order_id on payment');
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    // Look up our local square_payments record
+    const [sqRows] = await pool.execute(
+      'SELECT * FROM square_payments WHERE square_order_id = ? LIMIT 1',
+      [squareOrderId]
+    );
+    const sq = sqRows && sqRows[0] ? sqRows[0] : null;
+    if (!sq) {
+      if (DEBUG) console.warn('[square.webhook] No local square_payments row for order:', squareOrderId);
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    if (Number(sq.credited || 0) === 1) {
+      if (DEBUG) console.log('[square.webhook] Payment already credited, skipping:', { id: sq.id, order_id: sq.order_id });
+      return res.status(200).json({ success: true, alreadyCredited: true });
+    }
+
+    const localOrderId = String(sq.order_id || '');
+    const m = /^sq-(\d+)-(\d+)$/.exec(localOrderId);
+    if (!m) {
+      if (DEBUG) console.warn('[square.webhook] order_id does not match expected pattern:', localOrderId);
+      return res.status(200).json({ success: true, ignored: true });
+    }
+    const userId = Number(m[1]);
+    const billingId = Number(m[2]);
+
+    // Fetch billing_history row
+    const [billingRows] = await pool.execute(
+      'SELECT id, user_id, amount, description, status FROM billing_history WHERE id = ? LIMIT 1',
+      [billingId]
+    );
+    const billing = billingRows && billingRows[0] ? billingRows[0] : null;
+    if (!billing || String(billing.user_id) !== String(userId)) {
+      if (DEBUG) console.warn('[square.webhook] Billing row not found or user mismatch for order:', { localOrderId, userId, billingId });
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    // Fetch user row for MagnusBilling id and email
+    const [userRows] = await pool.execute(
+      'SELECT id, magnus_user_id, username, firstname, lastname, email FROM signup_users WHERE id = ? LIMIT 1',
+      [userId]
+    );
+    const user = userRows && userRows[0] ? userRows[0] : null;
+    if (!user) {
+      if (DEBUG) console.warn('[square.webhook] User not found for order:', { localOrderId, userId });
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const magnusUserId = String(user.magnus_user_id || '').trim();
+    if (!magnusUserId) {
+      if (DEBUG) console.warn('[square.webhook] Missing magnus_user_id for user:', { userId });
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const nameBase = user.username || '';
+    const fullName = `${user.firstname || ''} ${user.lastname || ''}`.trim();
+    const displayName = fullName || nameBase || 'Customer';
+    const userEmail = user.email || '';
+
+    // Use the amount from billing_history as source of truth (what we asked customer to pay)
+    const amountNum = Number(billing.amount || 0);
+    const desc = billing.description || `TalkUSA card refill (${localOrderId})`;
+
+    const httpsAgent = magnusBillingAgent;
+    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+
+    const result = await applyMagnusRefill({
+      userId,
+      magnusUserId,
+      amountNum,
+      desc,
+      displayName,
+      userEmail,
+      httpsAgent,
+      hostHeader,
+      billingId
+    });
+
+    if (!result.success) {
+      if (DEBUG) console.error('[square.webhook] Failed to credit MagnusBilling for order:', { localOrderId, error: result.error });
+      return res.status(500).json({ success: false, message: 'Failed to credit MagnusBilling' });
+    }
+
+    // Mark as credited and save latest payload
+    try {
+      await pool.execute(
+        'UPDATE square_payments SET status = ?, square_payment_id = ?, credited = 1, raw_payload = ? WHERE id = ?',
+        ['COMPLETED', String(payment.id || sq.square_payment_id || ''), JSON.stringify(evt), sq.id]
+      );
+    } catch (e) {
+      if (DEBUG) console.warn('[square.webhook] Failed to mark payment as credited:', e.message || e);
+    }
+
+    if (DEBUG) console.log('[square.webhook] Successfully credited order:', { localOrderId, billingId, userId });
+    return res.status(200).json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[square.webhook] Unhandled error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Webhook handling failed' });
   }
 });
 
@@ -1737,20 +2025,11 @@ const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || '';
 const NOWPAYMENTS_API_URL = process.env.NOWPAYMENTS_API_URL || 'https://api.nowpayments.io/v1';
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || '';
 
-function nowpaymentsAxios() {
-  if (!NOWPAYMENTS_API_KEY) throw new Error('NOWPAYMENTS_API_KEY not configured');
-  return axios.create({
-    baseURL: NOWPAYMENTS_API_URL,
-    timeout: 30000,
-    headers: {
-      'x-api-key': NOWPAYMENTS_API_KEY,
-      'Content-Type': 'application/json',
-      'Accept': 'application/json'
-    }
-  });
-}
-
-// Verify NOWPayments IPN HMAC signature (x-nowpayments-sig)
+// Square configuration (card payments via Square Payment Links)
+const SQUARE_ENVIRONMENT = process.env.SQUARE_ENVIRONMENT || 'sandbox'; // 'sandbox' or 'production'
+const SQUARE_APPLICATION_ID = process.env.SQUARE_APPLICATION_ID || '';
+const SQUARE_ACCESS_TOKEN = process.env.SQUARE_ACCESS_TOKEN || '';
+const SQUARE_LOCATION_ID = process// Verify NOWPayments IPN HMAC signature (x-nowpayments-sig)
 function verifyNowpaymentsSignature(req) {
   try {
     if (!NOWPAYMENTS_IPN_SECRET) {
@@ -1771,6 +2050,32 @@ function verifyNowpaymentsSignature(req) {
     return crypto.timingSafeEqual(a, b);
   } catch (e) {
     if (DEBUG) console.warn('[nowpayments.ipn] Signature verification error:', e.message || e);
+    return false;
+  }
+}
+
+// Verify Square webhook signature (x-square-hmacsha256-signature)
+function verifySquareSignature(req) {
+  try {
+    if (!SQUARE_WEBHOOK_SIGNATURE_KEY || !SQUARE_WEBHOOK_NOTIFICATION_URL) {
+      if (DEBUG) console.warn('[square.webhook] Signature key or notification URL not set; skipping verification');
+      return true; // allow through in sandbox if not configured yet
+    }
+    const signature = req.headers['x-square-hmacsha256-signature'];
+    if (!signature) return false;
+    const raw = req.rawBody;
+    if (!raw || !Buffer.isBuffer(raw)) return false;
+    const bodyStr = raw.toString('utf8');
+    const payload = SQUARE_WEBHOOK_NOTIFICATION_URL + bodyStr;
+    const hmac = crypto.createHmac('sha256', SQUARE_WEBHOOK_SIGNATURE_KEY);
+    hmac.update(payload);
+    const expected = hmac.digest('base64');
+    const a = Buffer.from(expected, 'utf8');
+    const b = Buffer.from(String(signature), 'utf8');
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch (e) {
+    if (DEBUG) console.warn('[square.webhook] Signature verification error:', e.message || e);
     return false;
   }
 }

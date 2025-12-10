@@ -194,9 +194,18 @@
           <label style="display:block;margin-bottom:4px;font-size:13px">Amount ($)</label>
           <input id="fundAmount" type="number" min="1" step="0.01" placeholder="Enter amount" style="width:100%;box-sizing:border-box">
         </div>
+        <div style="margin-bottom:12px;font-size:13px;color:#4b5563">
+          Payment method:
+          <label style="margin-left:8px;cursor:pointer">
+            <input type="radio" name="fundMethod" value="card" checked> Card
+          </label>
+          <label style="margin-left:8px;cursor:pointer">
+            <input type="radio" name="fundMethod" value="crypto"> Crypto
+          </label>
+        </div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
           <button id="cancelFundBtn" style="background:#6b7280">Cancel</button>
-          <button id="confirmFundBtn" style="background:#059669">Add Funds</button>
+          <button id="confirmFundBtn" style="background:#059669">Continue</button>
         </div>
       </div>
     </div>
@@ -878,11 +887,17 @@
         return alert('Please enter a valid amount greater than 0');
       }
 
+      const methodInput = document.querySelector('input[name="fundMethod"]:checked');
+      const method = methodInput ? methodInput.value : 'card';
+
       $('#confirmFundBtn').disabled = true;
-      $('#confirmFundBtn').textContent = 'Redirecting...';
+      $('#confirmFundBtn').textContent = method === 'crypto' ? 'Redirecting to Crypto...' : 'Redirecting to Card...';
 
       try {
-        const r = await fetch('/api/me/nowpayments/checkout', {
+        const endpoint = method === 'crypto'
+          ? '/api/me/nowpayments/checkout'
+          : '/api/me/square/checkout';
+        const r = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ amount })
@@ -890,18 +905,18 @@
         const j = await r.json();
 
         if (!j.success || !j.payment_url) {
-          alert(j.message || 'Failed to start crypto payment');
+          alert(j.message || 'Failed to start payment');
           return;
         }
 
-        // Redirect user to NOWPayments hosted checkout page
+        // Redirect user to hosted checkout page (Square or NOWPayments)
         window.location.href = j.payment_url;
       } catch (e) {
-        console.error('[addFunds.nowpayments]', e);
-        alert('Failed to start crypto payment. Please try again.');
+        console.error('[addFunds]', e);
+        alert('Failed to start payment. Please try again.');
       } finally {
         $('#confirmFundBtn').disabled = false;
-        $('#confirmFundBtn').textContent = 'Add Funds';
+        $('#confirmFundBtn').textContent = 'Continue';
       }
     });
 
