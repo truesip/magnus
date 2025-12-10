@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "export:users:balances": "node scripts/export-users-balances.js"
+    "export:users:balances": "node scripts/export-users-balances.js",
+    "clean-db": "node scripts/clean-db.js"
   },
   "keywords": [
     "magnusbilling",
