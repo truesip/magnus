@@ -1692,6 +1692,20 @@ app.post('/webhooks/square', async (req, res) => {
       return res.status(200).json({ success: true, ignored: true });
     }
 
+    // If billing row is already completed, treat this as already credited
+    if (billing.status === 'completed') {
+      if (DEBUG) console.log('[square.webhook] Billing already completed, skipping refill:', { billingId, localOrderId });
+      try {
+        await pool.execute(
+          'UPDATE square_payments SET status = ?, credited = 1 WHERE id = ? AND credited = 0',
+          ['COMPLETED', sq.id]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[square.webhook] Failed to sync credited flag for already-completed billing:', e.message || e);
+      }
+      return res.status(200).json({ success: true, alreadyCredited: true });
+    }
+
     // Fetch user row for MagnusBilling id and email
     const [userRows] = await pool.execute(
       'SELECT id, magnus_user_id, username, firstname, lastname, email FROM signup_users WHERE id = ? LIMIT 1',
