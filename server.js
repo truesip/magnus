@@ -2072,7 +2072,6 @@ async function getSquareLocationId() {
 
 // Verify NOWPayments IPN HMAC signature (x-nowpayments-sig)
 function verifyNowpaymentsSignature(req) {
-function verifyNowpaymentsSignature(req) {
   try {
     if (!NOWPAYMENTS_IPN_SECRET) {
       if (DEBUG) console.warn('[nowpayments.ipn] NOWPAYMENTS_IPN_SECRET not set; skipping signature verification');
@@ -2097,25 +2096,56 @@ function verifyNowpaymentsSignature(req) {
 }
 
 // Verify Square webhook signature (x-square-hmacsha256-signature)
+// Square signs the body as: HMAC_SHA256( notification_url + raw_body ) using the
+// subscription's "Signature key". We try both the configured notification URL
+// and the actual request URL in case there is a mismatch (e.g. proxy changes).
 function verifySquareSignature(req) {
   try {
-    if (!SQUARE_WEBHOOK_SIGNATURE_KEY || !SQUARE_WEBHOOK_NOTIFICATION_URL) {
-      if (DEBUG) console.warn('[square.webhook] Signature key or notification URL not set; skipping verification');
-      return true; // allow through in sandbox if not configured yet
+    if (!SQUARE_WEBHOOK_SIGNATURE_KEY) {
+      if (DEBUG) console.warn('[square.webhook] Signature key not set; skipping verification');
+      return true; // do not block if key not configured yet
     }
+
     const signature = req.headers['x-square-hmacsha256-signature'];
-    if (!signature) return false;
+    if (!signature) {
+      if (DEBUG) console.warn('[square.webhook] Missing x-square-hmacsha256-signature header');
+      return false;
+    }
+
     const raw = req.rawBody;
-    if (!raw || !Buffer.isBuffer(raw)) return false;
-    const bodyStr = raw.toString('utf8');
-    const payload = SQUARE_WEBHOOK_NOTIFICATION_URL + bodyStr;
-    const hmac = crypto.createHmac('sha256', SQUARE_WEBHOOK_SIGNATURE_KEY);
-    hmac.update(payload);
-    const expected = hmac.digest('base64');
-    const a = Buffer.from(expected, 'utf8');
-    const b = Buffer.from(String(signature), 'utf8');
-    if (a.length !== b.length) return false;
-    return crypto.timingSafeEqual(a, b);
+    if (!raw || !Buffer.isBuffer(raw)) {
+      if (DEBUG) console.warn('[square.webhook] Missing rawBody for signature verification');
+      return false;
+    }
+
+    const urlsToTry = [];
+    if (SQUARE_WEBHOOK_NOTIFICATION_URL) urlsToTry.push(SQUARE_WEBHOOK_NOTIFICATION_URL);
+    const actualUrl = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+    if (!urlsToTry.includes(actualUrl)) urlsToTry.push(actualUrl);
+
+    const headerSig = String(signature);
+
+    for (const url of urlsToTry) {
+      const payload = String(url || '') + raw.toString('utf8');
+      const expected = crypto
+        .createHmac('sha256', SQUARE_WEBHOOK_SIGNATURE_KEY)
+        .update(payload)
+        .digest('base64');
+      const a = Buffer.from(expected, 'utf8');
+      const b = Buffer.from(headerSig, 'utf8');
+      if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+        if (DEBUG) console.log('[square.webhook] Signature verified', { urlUsed: url });
+        return true;
+      }
+    }
+
+    if (DEBUG) {
+      console.warn('[square.webhook] Signature mismatch', {
+        header: headerSig,
+        triedUrls: urlsToTry
+      });
+    }
+    return false;
   } catch (e) {
     if (DEBUG) console.warn('[square.webhook] Signature verification error:', e.message || e);
     return false;
