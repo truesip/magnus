@@ -2062,7 +2062,13 @@ app.post(
 
       const text = bodyBuffer.toString('utf8');
       if (!text.trim()) {
+        if (DEBUG) console.warn('[didww.cdr] Received empty body after decoding; nothing to process');
         return res.status(200).end();
+      }
+
+      if (DEBUG) {
+        const preview = text.length > 400 ? text.slice(0, 400) + '…' : text;
+        console.log('[didww.cdr] Raw body preview:', preview.replace(/\s+/g, ' ').slice(0, 400));
       }
 
       const didUserCache = new Map(); // did_number -> user_id | null
