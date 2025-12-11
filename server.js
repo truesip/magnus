@@ -2035,12 +2035,13 @@ app.post(
         return res.status(401).end();
       }
 
-      // Shared secret header (configured as X-Auth-Token in DIDWW portal)
-      const token = req.get('X-Auth-Token') || '';
-      if (!token || token !== (process.env.DIDWW_CDR_X_AUTH_TOKEN || '')) {
-        if (DEBUG) console.warn('[didww.cdr] Invalid X-Auth-Token header');
-        return res.status(403).end();
-      }
+      // Optional X-Auth-Token header (not enforced). If you want an extra
+      // shared secret in the future, you can re-enable this check.
+      // const token = req.get('X-Auth-Token') || '';
+      // if (!token || token !== (process.env.DIDWW_CDR_X_AUTH_TOKEN || '')) {
+      //   if (DEBUG) console.warn('[didww.cdr] Invalid X-Auth-Token header');
+      //   return res.status(403).end();
+      // }
 
       // Handle optional gzip compression
       const encoding = String(req.headers['content-encoding'] || '').toLowerCase();
