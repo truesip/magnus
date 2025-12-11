@@ -2074,17 +2074,26 @@ app.post(
 
       const didUserCache = new Map(); // did_number -> user_id | null
 
-      const lines = text.split('\n');
-      for (const line of lines) {
-        if (!line.trim()) continue;
-
-        let cdr;
-        try {
-          cdr = JSON.parse(line);
-        } catch (e) {
-          if (DEBUG) console.warn('[didww.cdr] JSON parse failed:', e.message || e, 'line=', line.slice(0, 200));
-          continue;
+      // DIDWW may send either a single JSON object or newline-delimited JSON.
+      // Try to parse the whole body first; if that fails, fall back to per-line.
+      const records = [];
+      try {
+        const obj = JSON.parse(text);
+        records.push(obj);
+      } catch {
+        const lines = text.split('\n');
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            records.push(JSON.parse(line));
+          } catch (e) {
+            if (DEBUG) console.warn('[didww.cdr] JSON parse failed for line:', e.message || e, 'line=', line.slice(0, 200));
+          }
         }
+      }
+
+      for (const cdr of records) {
+        if (!cdr || typeof cdr !== 'object') continue;
 
         const attrs = cdr.attributes || {};
         const didNumber = attrs.did_number || attrs.dst_number || null;
