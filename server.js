@@ -739,12 +739,11 @@ async function sendDidPurchaseReceiptEmail({ toEmail, displayName, items, totalA
     <p style=\"color:#555;margin-top:18px;\">Thank you for your business.</p>\r
   </div>`;
 
-  const adminEmail = process.env.ADMIN_NOTIFY_EMAIL;
+  // DID purchase receipts go only to the customer, not the admin.
   const to = [toEmail].filter(Boolean);
   const payload = {
     api_key: apiKey,
     to,
-    ...(adminEmail ? { bcc: [adminEmail] } : {}),
     sender,
     subject,
     text_body: text,
