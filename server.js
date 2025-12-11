@@ -2964,21 +2964,25 @@ app.get('/api/me/didww/available-dids', requireAuth, async (req, res) => {
 // Purchase a DID number
 app.post('/api/me/didww/orders', requireAuth, async (req, res) => {
   try {
-    const { sku_id, did_group_id, available_did_id } = req.body || {};
+    const { sku_id, did_group_id, available_did_id, is_tollfree } = req.body || {};
     
     if (!sku_id) return res.status(400).json({ success: false, message: 'sku_id is required' });
     
     // Always check MagnusBilling balance before placing order
-    // Use a minimum expected price if SKU fetch fails
-    const MIN_DID_PRICE = 1.00; // Minimum expected DID price as fallback
-    let skuPrice = MIN_DID_PRICE;
-    try {
-      const skuData = await didwwApiCall({ method: 'GET', path: `/stock_keeping_units/${sku_id}` });
-      skuPrice = parseFloat(skuData.data?.attributes?.monthly_price || skuData.data?.attributes?.setup_price || MIN_DID_PRICE);
-      if (DEBUG) console.log('[didww.order] SKU price:', { sku_id, skuPrice });
-    } catch (skuErr) {
-      if (DEBUG) console.error('[didww.order] Failed to fetch SKU price, using minimum:', skuErr.message);
-      // Use minimum price for balance check
+    // Use TalkUSA monthly markup prices (local vs toll-free)
+    const localMarkup = parseFloat(process.env.DID_LOCAL_MONTHLY_MARKUP || '10.20') || 0;
+    const tollfreeMarkup = parseFloat(process.env.DID_TOLLFREE_MONTHLY_MARKUP || '25.20') || 0;
+    const isTollfreeFlag = Boolean(
+      is_tollfree === true ||
+      is_tollfree === 1 ||
+      is_tollfree === '1' ||
+      String(is_tollfree || '').toLowerCase() === 'true'
+    );
+    let requiredMonthly = isTollfreeFlag
+      ? (tollfreeMarkup || localMarkup || 0)
+      : (localMarkup || tollfreeMarkup || 0);
+    if (!requiredMonthly || requiredMonthly <= 0) {
+      requiredMonthly = 1.00; // conservative fallback if markup not configured
     }
     
     // Check MagnusBilling balance before placing order
@@ -3002,12 +3006,12 @@ app.post('/api/me/didww/orders', requireAuth, async (req, res) => {
         
         if (userRow) {
           const currentCredit = Number(userRow.credit || 0);
-          if (DEBUG) console.log('[didww.order] Balance check:', { magnusUserId, currentCredit, skuPrice });
+          if (DEBUG) console.log('[didww.order] Balance check:', { magnusUserId, currentCredit, requiredMonthly, isTollfree: isTollfreeFlag });
           
-          if (currentCredit < skuPrice) {
+          if (currentCredit < requiredMonthly) {
             return res.status(400).json({ 
               success: false, 
-              message: `Insufficient balance in your TalkUSA account. This number costs $${skuPrice.toFixed(2)} per month and your current balance is $${currentCredit.toFixed(2)}. Please add funds on the dashboard and try again.` 
+              message: `Insufficient balance in your TalkUSA account. This number costs $${requiredMonthly.toFixed(2)} per month and your current balance is $${currentCredit.toFixed(2)}. Please add funds on the dashboard and try again.` 
             });
           }
         }

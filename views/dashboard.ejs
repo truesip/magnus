@@ -1226,7 +1226,8 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         btn.textContent = 'Buying...';
         
         try {
-          const payload = { sku_id: currentSkuId };
+          const isTollfree = $('#buyTollfree').checked;
+          const payload = { sku_id: currentSkuId, is_tollfree: isTollfree };
           if (isRandom) payload.did_group_id = currentDidGroupId;
           else payload.available_did_id = availableDidId;
           
