@@ -2048,12 +2048,15 @@ app.post(
       if (!Buffer.isBuffer(bodyBuffer)) {
         bodyBuffer = Buffer.from(bodyBuffer || '');
       }
-      if (encoding === 'gzip') {
+      // Some deployments or proxies may strip gzip encoding or send plain JSON
+      // while still setting Content-Encoding. Be tolerant: if gunzip fails,
+      // fall back to treating the body as plain text instead of 4xx.
+      if (encoding.includes('gzip')) {
         try {
           bodyBuffer = zlib.gunzipSync(bodyBuffer);
         } catch (e) {
-          if (DEBUG) console.warn('[didww.cdr] Failed to gunzip body:', e.message || e);
-          return res.status(400).end();
+          if (DEBUG) console.warn('[didww.cdr] Failed to gunzip body, treating as plain text:', e.message || e);
+          // leave bodyBuffer as-is (raw JSON / NDJSON)
         }
       }
 
