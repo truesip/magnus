@@ -13,6 +13,7 @@ const bodyParser = require('body-parser');
 const axios = require('axios');
 const crypto = require('crypto');
 const https = require('https');
+const zlib = require('zlib');
 const mysql = require('mysql2/promise');
 const session = require('express-session');
 const MySQLStore = require('express-mysql-session')(session);
@@ -259,12 +260,17 @@ app.use((req, res, next) => {
   return sessionMiddleware(req, res, next);
 });
 // Capture raw JSON body (for IPN signature verification, etc.)
-app.use(bodyParser.json({
-  verify: (req, res, buf) => {
-    // Store raw body buffer for routes that need HMAC verification (e.g., NOWPayments IPN)
-    req.rawBody = buf;
-  }
-}));
+// NOTE: We skip JSON parsing for the DIDWW CDR webhook so we can handle
+// newline-delimited JSON (NDJSON) and optional gzip compression manually.
+app.use((req, res, next) => {
+  if (req.path === '/webhooks/didww/voice-in-cdr') return next();
+  return bodyParser.json({
+    verify: (req, res, buf) => {
+      // Store raw body buffer for routes that need HMAC verification (e.g., NOWPayments IPN)
+      req.rawBody = buf;
+    }
+  })(req, res, next);
+});
 app.use(bodyParser.urlencoded({ extended: true }));
 // Lightweight request logging (always on). Logs when the response finishes.
 app.use((req, res, next) => {
@@ -426,6 +432,28 @@ async function initDb() {
     UNIQUE KEY uniq_user_did_cycle (user_id, didww_did_id, billed_to),
     KEY idx_user_id (user_id),
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+  // Per-DID CDR history table - stores inbound CDRs streamed from DIDWW per user/DID
+  await pool.query(`CREATE TABLE IF NOT EXISTS user_did_cdrs (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    cdr_id VARCHAR(64) NOT NULL,
+    user_id BIGINT NULL,
+    did_number VARCHAR(32) NOT NULL,
+    direction VARCHAR(16) NOT NULL DEFAULT 'inbound',
+    src_number VARCHAR(64) NULL,
+    dst_number VARCHAR(64) NULL,
+    time_start DATETIME NULL,
+    time_connect DATETIME NULL,
+    time_end DATETIME NULL,
+    duration INT NULL,
+    billsec INT NULL,
+    price DECIMAL(18,8) NULL,
+    raw_cdr JSON NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_cdr_id (cdr_id),
+    KEY idx_user_id (user_id),
+    KEY idx_did_number (did_number),
+    CONSTRAINT fk_user_did_cdrs_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE SET NULL
   )`);
   // Ensure uniq_user_did_cycle index exists even if table was created on an older schema
   try {
@@ -1066,6 +1094,90 @@ app.get('/api/me/billing-history', requireAuth, async (req, res) => {
   } catch (e) {
     if (DEBUG) console.error('[billing.history] error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to fetch billing history' });
+  }
+});
+
+// ========== Per-user CDR history (from streamed DIDWW Voice IN CDRs) ==========
+// Returns CDRs for the logged-in user based on user_did_cdrs table.
+// Supports pagination (?page, ?pageSize) and optional filters: ?from, ?to, ?did.
+app.get('/api/me/cdrs', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    if (!userId) return res.status(401).json({ success: false, message: 'Not authenticated' });
+
+    const page = Math.max(0, parseInt(req.query.page || '0', 10));
+    const pageSize = Math.max(1, Math.min(200, parseInt(req.query.pageSize || '50', 10)));
+    const offset = page * pageSize;
+
+    const filters = ['user_id = ?'];
+    const params = [userId];
+
+    const fromRaw = (req.query.from || '').toString().trim();
+    const toRaw = (req.query.to || '').toString().trim();
+    const didFilter = (req.query.did || '').toString().trim();
+
+    if (fromRaw) {
+      const fromDate = new Date(fromRaw);
+      if (!isNaN(fromDate.getTime())) {
+        filters.push('time_start >= ?');
+        params.push(fromDate);
+      }
+    }
+    if (toRaw) {
+      const toDate = new Date(toRaw);
+      if (!isNaN(toDate.getTime())) {
+        filters.push('time_start <= ?');
+        params.push(toDate);
+      }
+    }
+    if (didFilter) {
+      filters.push('did_number = ?');
+      params.push(didFilter);
+    }
+
+    const whereSql = filters.length ? 'WHERE ' + filters.join(' AND ') : '';
+
+    // Total count for pagination
+    const [[countRow]] = await pool.execute(
+      `SELECT COUNT(*) AS total FROM user_did_cdrs ${whereSql}`,
+      params
+    );
+    const total = countRow?.total || 0;
+
+    // Page of CDRs
+    const [rows] = await pool.query(
+      `SELECT id, cdr_id, user_id, did_number, direction, src_number, dst_number,
+              time_start, time_connect, time_end, duration, billsec, price, created_at
+       FROM user_did_cdrs
+       ${whereSql}
+       ORDER BY time_start DESC, id DESC
+       LIMIT ${parseInt(pageSize, 10)} OFFSET ${parseInt(offset, 10)}`,
+      params
+    );
+
+    const data = rows.map(r => ({
+      id: r.id,
+      cdrId: r.cdr_id,
+      didNumber: r.did_number,
+      direction: r.direction,
+      srcNumber: r.src_number,
+      dstNumber: r.dst_number,
+      timeStart: r.time_start ? r.time_start.toISOString() : null,
+      timeConnect: r.time_connect ? r.time_connect.toISOString() : null,
+      timeEnd: r.time_end ? r.time_end.toISOString() : null,
+      duration: r.duration != null ? Number(r.duration) : null,
+      billsec: r.billsec != null ? Number(r.billsec) : null,
+      price: r.price != null ? Number(r.price) : null,
+      createdAt: r.created_at ? r.created_at.toISOString() : null
+    }));
+
+    if (DEBUG) console.log('[me.cdrs]', { userId, count: data.length, total });
+
+    return res.json({ success: true, data, total, page, pageSize });
+  } catch (e) {
+    if (DEBUG) console.error('[me.cdrs] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to fetch CDRs' });
   }
 });
 
@@ -1883,6 +1995,152 @@ app.post('/webhooks/square', async (req, res) => {
     return res.status(500).json({ success: false, message: 'Webhook handling failed' });
   }
 });
+
+// DIDWW Voice IN CDR Streaming webhook (Call Events API)
+app.post(
+  '/webhooks/didww/voice-in-cdr',
+  express.raw({ type: '*/*', limit: '5mb' }),
+  async (req, res) => {
+    try {
+      if (!pool) {
+        if (DEBUG) console.warn('[didww.cdr] Database not configured');
+        // Acknowledge to avoid endless retries if the app is misconfigured.
+        return res.status(200).end();
+      }
+
+      // HTTP Basic Auth (configured in DIDWW portal)
+      const authHeader = req.headers.authorization || '';
+      const m = /^Basic\s+(.+)$/.exec(authHeader);
+      if (!m) {
+        if (DEBUG) console.warn('[didww.cdr] Missing Authorization header');
+        return res.status(401).end();
+      }
+      let basicUser = '';
+      let basicPass = '';
+      try {
+        const decoded = Buffer.from(m[1], 'base64').toString('utf8');
+        const idx = decoded.indexOf(':');
+        basicUser = idx >= 0 ? decoded.slice(0, idx) : decoded;
+        basicPass = idx >= 0 ? decoded.slice(idx + 1) : '';
+      } catch {
+        if (DEBUG) console.warn('[didww.cdr] Failed to decode Basic auth header');
+        return res.status(401).end();
+      }
+
+      if (
+        basicUser !== (process.env.DIDWW_CDR_BASIC_USER || '') ||
+        basicPass !== (process.env.DIDWW_CDR_BASIC_PASS || '')
+      ) {
+        if (DEBUG) console.warn('[didww.cdr] Invalid Basic auth credentials');
+        return res.status(401).end();
+      }
+
+      // Shared secret header (configured as X-Auth-Token in DIDWW portal)
+      const token = req.get('X-Auth-Token') || '';
+      if (!token || token !== (process.env.DIDWW_CDR_X_AUTH_TOKEN || '')) {
+        if (DEBUG) console.warn('[didww.cdr] Invalid X-Auth-Token header');
+        return res.status(403).end();
+      }
+
+      // Handle optional gzip compression
+      const encoding = String(req.headers['content-encoding'] || '').toLowerCase();
+      let bodyBuffer = req.body;
+      if (!Buffer.isBuffer(bodyBuffer)) {
+        bodyBuffer = Buffer.from(bodyBuffer || '');
+      }
+      if (encoding === 'gzip') {
+        try {
+          bodyBuffer = zlib.gunzipSync(bodyBuffer);
+        } catch (e) {
+          if (DEBUG) console.warn('[didww.cdr] Failed to gunzip body:', e.message || e);
+          return res.status(400).end();
+        }
+      }
+
+      const text = bodyBuffer.toString('utf8');
+      if (!text.trim()) {
+        return res.status(200).end();
+      }
+
+      const didUserCache = new Map(); // did_number -> user_id | null
+
+      const lines = text.split('\n');
+      for (const line of lines) {
+        if (!line.trim()) continue;
+
+        let cdr;
+        try {
+          cdr = JSON.parse(line);
+        } catch (e) {
+          if (DEBUG) console.warn('[didww.cdr] JSON parse failed:', e.message || e, 'line=', line.slice(0, 200));
+          continue;
+        }
+
+        const attrs = cdr.attributes || {};
+        const didNumber = attrs.did_number || attrs.dst_number || null;
+        const srcNumber = attrs.src_number || attrs.cli || null;
+        const dstNumber = attrs.dst_number || attrs.did_number || null;
+        const timeStart = attrs.time_start ? new Date(attrs.time_start) : null;
+        const timeConnect = attrs.time_connect ? new Date(attrs.time_connect) : null;
+        const timeEnd = attrs.time_end ? new Date(attrs.time_end) : null;
+        const duration = attrs.duration != null ? Number(attrs.duration) || 0 : null;
+        const billsec = attrs.billsec != null ? Number(attrs.billsec) || 0 : null;
+        const price = attrs.price != null ? Number(attrs.price) || 0 : null;
+        const cdrId = cdr.id ? String(cdr.id) : null;
+        const direction = String(cdr.type || 'inbound-cdr').includes('outbound') ? 'outbound' : 'inbound';
+
+        if (!didNumber) {
+          if (DEBUG) console.warn('[didww.cdr] Missing did_number/dst_number in CDR; skipping');
+          continue;
+        }
+
+        let userId = null;
+        if (didUserCache.has(didNumber)) {
+          userId = didUserCache.get(didNumber);
+        } else {
+          try {
+            const [rows] = await pool.execute(
+              'SELECT user_id FROM user_dids WHERE did_number = ? LIMIT 1',
+              [didNumber]
+            );
+            userId = rows && rows[0] ? rows[0].user_id : null;
+          } catch (e) {
+            if (DEBUG) console.warn('[didww.cdr] Failed to lookup DID owner:', e.message || e);
+          }
+          didUserCache.set(didNumber, userId);
+        }
+
+        try {
+          await pool.execute(
+            'INSERT IGNORE INTO user_did_cdrs (cdr_id, user_id, did_number, direction, src_number, dst_number, time_start, time_connect, time_end, duration, billsec, price, raw_cdr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [
+              cdrId,
+              userId,
+              didNumber,
+              direction,
+              srcNumber,
+              dstNumber,
+              timeStart,
+              timeConnect,
+              timeEnd,
+              duration,
+              billsec,
+              price,
+              JSON.stringify(cdr)
+            ]
+          );
+        } catch (e) {
+          if (DEBUG) console.warn('[didww.cdr] Failed to insert CDR row:', e.message || e);
+        }
+      }
+
+      return res.status(200).end();
+    } catch (e) {
+      if (DEBUG) console.error('[didww.cdr] Unhandled error:', e.message || e);
+      return res.status(500).end();
+    }
+  }
+);
 
 app.get('/api/me/sip-users', requireAuth, async (req, res) => {
   try {

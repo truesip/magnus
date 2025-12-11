@@ -55,6 +55,7 @@ async function main() {
     'pending_orders',
     'nowpayments_payments',
     'square_payments',
+    'user_did_cdrs',
     'user_did_markup_cycles',
     'user_did_markups',
     'user_dids',

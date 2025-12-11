@@ -467,60 +467,99 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       }
     });
     function defaultRange(){
-      const now = new Date(); const to = now.toISOString().slice(0,10); const d7 = new Date(now.getTime()-6*86400000); const from = d7.toISOString().slice(0,10); return {from,to};
+      const now = new Date();
+      const to = now.toISOString().slice(0,10);
+      const d7 = new Date(now.getTime()-6*86400000);
+      const from = d7.toISOString().slice(0,10);
+      return {from,to};
     }
-    let cdrPage = 0; const cdrPageSize = 20;
-    let cdrMyNumbers = []; // Cache of user's DID numbers for inbound detection
+    let cdrPage = 0; const cdrPageSize = 50;
     
     async function loadCdr(){
-      const from = $('#from').value; const to = $('#to').value;
+      const from = $('#from').value;
+      const to = $('#to').value;
       const filter = $('#cdrFilter').value;
-      const q = new URLSearchParams({from,to,page:String(cdrPage),pageSize:String(cdrPageSize)});
+
+      const q = new URLSearchParams();
+      q.set('page', String(cdrPage));
+      q.set('pageSize', String(cdrPageSize));
+      if (from) q.set('from', from);
+      if (to) q.set('to', to);
+
       try{
-        // Fetch CDRs and user's DIDs in parallel
-        const [cdrRes, didsRes] = await Promise.all([
-          fetch('/api/me/cdr?'+q.toString()),
-          cdrMyNumbers.length === 0 ? fetch('/api/me/didww/dids') : Promise.resolve(null)
-        ]);
-        const j = await cdrRes.json();
-        if (didsRes) {
-          const didsJson = await didsRes.json();
-          cdrMyNumbers = (didsJson.data || []).map(d => d.attributes?.number || '').filter(Boolean);
+        const r = await fetch('/api/me/cdrs?'+q.toString());
+        const j = await r.json();
+
+        if (!j || j.success === false) {
+          const msg = j && j.message ? j.message : 'Failed to load CDRs';
+          $('#cdr-empty').textContent = msg;
+          $('#cdr-empty').style.display = 'block';
+          $('#cdr-table').style.display = 'none';
+          $('#cdr-pager').style.display = 'none';
+          return;
         }
-        
-        let rows = grabRows(j);
-        const tbody = $('#cdr-table tbody'); tbody.innerHTML='';
-        
-        // Process rows with direction detection
-        const processedRows = rows.map(c => {
-          const when = c.starttime || c.creationdate || c.date || '';
-          const cid = c.callerid || c.cid || c.src || '';
-          const dst = c.calledstation || c.dst || c.extension || '';
-          const dur = c.sessiontime || c.billseconds || c.duration || 0;
-          const cost = c.sessionbill || c.cost || 0;
-          const disp = c.terminatecauseid || c.disposition || '';
-          // Detect direction: inbound if destination matches one of user's DIDs or trunk DSTs
-          const dstClean = String(dst).replace(/\D/g, '');
-          const cidClean = String(cid).replace(/\D/g, '');
-          const isInbound = cdrMyNumbers.some(num => dstClean.includes(num.replace(/\D/g, '')) || cidClean.includes(num.replace(/\D/g, '')));
-          return { when, cid, dst, dur, cost, disp, isInbound };
-        });
-        
-        // Apply filter
-        const filteredRows = filter === 'all' ? processedRows :
-          filter === 'inbound' ? processedRows.filter(r => r.isInbound) :
-          processedRows.filter(r => !r.isInbound);
-        
-        filteredRows.forEach(c => {
-          const dirIcon = c.isInbound ? 
-            '<span style="color:#22c55e" title="Inbound">↓</span>' : 
-            '<span style="color:#3b82f6" title="Outbound">↑</span>';
+
+        let rows = Array.isArray(j.data) ? j.data : grabRows(j);
+        const tbody = $('#cdr-table tbody');
+        tbody.innerHTML='';
+
+        // Apply inbound/outbound filter using direction from backend
+        if (filter !== 'all') {
+          const want = filter === 'inbound' ? 'inbound' : 'outbound';
+          rows = rows.filter(c => String(c.direction || '').toLowerCase() === want);
+        }
+
+        if (!rows.length) {
+          $('#cdr-empty').textContent = filter === 'all'
+            ? 'No calls in this range yet.'
+            : `No ${filter} calls in this range.`;
+          $('#cdr-empty').style.display = 'block';
+          $('#cdr-table').style.display = 'none';
+          $('#cdr-pager').style.display = 'none';
+          return;
+        }
+
+        rows.forEach(c => {
+          const dir = String(c.direction || 'inbound').toLowerCase();
+          const dirIcon = dir === 'outbound'
+            ? '<span style="color:#3b82f6" title="Outbound">↑</span>'
+            : '<span style="color:#22c55e" title="Inbound">↓</span>';
+
+          const whenIso = c.timeStart || c.createdAt || null;
+          const whenStr = whenIso ? new Date(whenIso).toLocaleString() : '';
+          const src = c.srcNumber || '';
+          const dst = c.dstNumber || c.didNumber || '';
+          const durSec = c.billsec != null ? Number(c.billsec) : (c.duration != null ? Number(c.duration) : 0);
+          const priceNum = c.price != null ? Number(c.price) : null;
+          const priceStr = priceNum != null ? `$${priceNum.toFixed(4)}` : '';
+          const statusLabel = 'Completed';
+
           const tr = document.createElement('tr');
-          tr.innerHTML = `<td>${dirIcon}</td><td>${escapeHtml(String(c.when))}</td><td>${escapeHtml(String(c.cid))}</td><td>${escapeHtml(String(c.dst))}</td><td>${escapeHtml(String(c.dur))}s</td><td>$${escapeHtml(String(c.cost))}</td><td>${escapeHtml(String(c.disp))}</td>`;
+          tr.innerHTML =
+            `<td>${dirIcon}</td>`+
+            `<td>${escapeHtml(whenStr)}</td>`+
+            `<td>${escapeHtml(String(src))}</td>`+
+            `<td>${escapeHtml(String(dst))}</td>`+
+            `<td>${escapeHtml(String(durSec))}s</td>`+
+            `<td>${escapeHtml(priceStr)}</td>`+
+            `<td>${escapeHtml(statusLabel)}</td>`;
           tbody.appendChild(tr);
         });
-        if (filteredRows.length){ $('#cdr-empty').style.display='none'; $('#cdr-table').style.display='table'; $('#cdr-pager').style.display='flex'; $('#cdrPageInfo').textContent = `Page ${cdrPage+1}`; } else { $('#cdr-empty').textContent = filter === 'all' ? 'No CDR in range' : `No ${filter} calls in range`; }
-      }catch(e){ console.error('[loadCdr]', e); $('#cdr-empty').textContent='Failed to load CDR'; }
+
+        $('#cdr-empty').style.display='none';
+        $('#cdr-table').style.display='table';
+        $('#cdr-pager').style.display='flex';
+
+        const total = typeof j.total === 'number' ? j.total : rows.length;
+        const totalPages = Math.max(1, Math.ceil(total / cdrPageSize));
+        $('#cdrPageInfo').textContent = `Page ${cdrPage+1} of ${totalPages}`;
+      }catch(e){
+        console.error('[loadCdr]', e);
+        $('#cdr-empty').textContent='Failed to load CDRs';
+        $('#cdr-empty').style.display='block';
+        $('#cdr-table').style.display='none';
+        $('#cdr-pager').style.display='none';
+      }
     }
     function escapeHtml(s){ return String(s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
     function copyBtn(val){ const v = String(val||''); if (!v) return ''; return `<button class=\"copy\" data-val=\"${escapeHtml(v)}\">Copy</button>`; }
