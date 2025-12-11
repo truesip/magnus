@@ -6,7 +6,6 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "export:users:balances": "node scripts/export-users-balances.js",
     "clean-db": "node scripts/clean-db.js",
     "fix-duplicate-markups": "node scripts/fix-duplicate-markups.js"
   },
