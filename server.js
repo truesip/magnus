@@ -427,6 +427,22 @@ async function initDb() {
     KEY idx_user_id (user_id),
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
+  // Ensure uniq_user_did_cycle index exists even if table was created on an older schema
+  try {
+    const [cycleIdx] = await pool.query(
+      "SELECT 1 FROM information_schema.statistics WHERE table_schema=? AND table_name='user_did_markup_cycles' AND index_name='uniq_user_did_cycle' LIMIT 1",
+      [dbName]
+    );
+    if (!cycleIdx || !cycleIdx.length) {
+      try {
+        await pool.query('ALTER TABLE user_did_markup_cycles ADD UNIQUE KEY uniq_user_did_cycle (user_id, didww_did_id, billed_to)');
+      } catch (e) {
+        if (DEBUG) console.warn('[schema] Failed to add uniq_user_did_cycle index:', e.message || e);
+      }
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[schema] Failed to verify uniq_user_did_cycle index:', e.message || e);
+  }
   // Billing history table - records user refills/credits
   await pool.query(`CREATE TABLE IF NOT EXISTS billing_history (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -2665,6 +2681,28 @@ async function chargeDidMarkup({ userId, magnusUserId, didId, didNumber, markupA
   const periodLabel = billedTo ? `period ending ${new Date(billedTo).toISOString().slice(0, 10)}` : 'monthly period';
   const descRaw = `Number monthly service fee - ${isTollfree ? 'Toll-Free' : 'Local'} ${didNumber || didId} (${periodLabel})`;
   const description = descRaw.substring(0, 255);
+
+  // Extra safety: check for an existing non-failed billing row with the same
+  // user, amount, and description to avoid duplicate charges even if the
+  // markup_cycles table is missing its unique index.
+  try {
+    const [existingRows] = await pool.execute(
+      'SELECT id FROM billing_history WHERE user_id = ? AND amount = ? AND description = ? AND status != ? LIMIT 1',
+      [userId, -amt, description, 'failed']
+    );
+    if (existingRows && existingRows.length) {
+      if (DEBUG) console.warn('[didww.markup] Duplicate billing detected; skipping new charge', {
+        userId,
+        didId,
+        didNumber,
+        markupAmount: amt,
+        billedTo
+      });
+      return true;
+    }
+  } catch (dupErr) {
+    if (DEBUG) console.warn('[didww.markup] Duplicate-check query failed; continuing with charge:', dupErr.message || dupErr);
+  }
 
   // Insert pending billing record
   const [insertResult] = await pool.execute(
