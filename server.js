@@ -1177,6 +1177,25 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
   }
 });
 
+// Simple list of the logged-in user's DIDs from local DB (used for Call History DID filter)
+app.get('/api/me/dids', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    if (!userId) return res.status(401).json({ success: false, message: 'Not authenticated' });
+
+    const [rows] = await pool.execute(
+      'SELECT did_number FROM user_dids WHERE user_id = ? ORDER BY did_number',
+      [userId]
+    );
+
+    return res.json({ success: true, data: rows });
+  } catch (e) {
+    if (DEBUG) console.error('[me.dids] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to fetch DIDs' });
+  }
+});
+
 // Shared helper to apply a refill in MagnusBilling, update billing_history and send receipt
 async function applyMagnusRefill({ userId, magnusUserId, amountNum, desc, displayName, userEmail, httpsAgent, hostHeader, billingId }) {
   if (!pool) throw new Error('Database not configured');

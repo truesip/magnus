@@ -151,6 +151,11 @@
         <div class="toolbar">
           <label>From <input type="date" id="from"></label>
           <label>To <input type="date" id="to"></label>
+          <label>DID
+            <select id="cdrDid">
+              <option value="">All My Numbers</option>
+            </select>
+          </label>
           <select id="cdrFilter" style="margin-left:10px">
             <option value="all">All Calls</option>
             <option value="inbound">Inbound Only</option>
@@ -337,7 +342,7 @@
     tabs.billing.addEventListener('click',e=>{e.preventDefault();activate('billing');billingPage=0;loadBillingHistory();});
     tabs.buydid.addEventListener('click',e=>{e.preventDefault();activate('buydid');loadCountries();});
     tabs.mydids.addEventListener('click',e=>{e.preventDefault();activate('mydids');mydidsPage=0;loadMyDids();});
-    tabs.cdr.addEventListener('click',e=>{e.preventDefault();activate('cdr');cdrPage=0;loadCdr();});
+    tabs.cdr.addEventListener('click',e=>{e.preventDefault();activate('cdr');cdrPage=0;loadCdrDidOptions();loadCdr();});
 
     function grabRows(payload){
       const d = (payload && typeof payload === 'object') ? (payload.data ?? payload) : payload;
@@ -474,17 +479,52 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       return {from,to};
     }
     let cdrPage = 0; const cdrPageSize = 50;
+    let cdrMyDids = [];
+    
+    async function loadCdrDidOptions(){
+      try {
+        const sel = $('#cdrDid');
+        if (!sel) return;
+        const r = await fetch('/api/me/dids');
+        const j = await r.json();
+        if (!j || j.success === false) return;
+        const rows = Array.isArray(j.data) ? j.data : [];
+        cdrMyDids = rows;
+        const current = sel.value;
+        sel.innerHTML = '';
+        const optAll = document.createElement('option');
+        optAll.value = '';
+        optAll.textContent = 'All My Numbers';
+        sel.appendChild(optAll);
+        rows.forEach(row => {
+          const num = row.did_number || row.didNumber || row.number || '';
+          if (!num) return;
+          const opt = document.createElement('option');
+          opt.value = String(num);
+          opt.textContent = String(num);
+          sel.appendChild(opt);
+        });
+        if (current && rows.some(row => String(row.did_number || row.didNumber || row.number || '') === current)) {
+          sel.value = current;
+        }
+      } catch (e) {
+        console.error('[loadCdrDidOptions]', e);
+      }
+    }
     
     async function loadCdr(){
       const from = $('#from').value;
       const to = $('#to').value;
       const filter = $('#cdrFilter').value;
+      const didSel = $('#cdrDid');
+      const did = didSel ? didSel.value : '';
 
       const q = new URLSearchParams();
       q.set('page', String(cdrPage));
       q.set('pageSize', String(cdrPageSize));
       if (from) q.set('from', from);
       if (to) q.set('to', to);
+      if (did) q.set('did', did);
 
       try{
         const r = await fetch('/api/me/cdrs?'+q.toString());
@@ -592,7 +632,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     });
     // init
     const rng = defaultRange(); $('#from').value = rng.from; $('#to').value = rng.to;
-    loadProfile(); loadSip(); loadCdr();
+    loadProfile(); loadSip(); loadCdrDidOptions(); loadCdr();
 
     // If redirected back from NOWPayments with ?payment=success or ?payment=cancel, handle it
     (function handlePaymentReturn() {
