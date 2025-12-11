@@ -1117,19 +1117,15 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
     const toRaw = (req.query.to || '').toString().trim();
     const didFilter = (req.query.did || '').toString().trim();
 
+    // Treat from/to as calendar dates (YYYY-MM-DD) in the DB's local timezone.
+    // Using DATE(time_start) avoids JS/UTC timezone edge cases when comparing.
     if (fromRaw) {
-      const fromDate = new Date(fromRaw);
-      if (!isNaN(fromDate.getTime())) {
-        filters.push('time_start >= ?');
-        params.push(fromDate);
-      }
+      filters.push('DATE(time_start) >= ?');
+      params.push(fromRaw);
     }
     if (toRaw) {
-      const toDate = new Date(toRaw);
-      if (!isNaN(toDate.getTime())) {
-        filters.push('time_start <= ?');
-        params.push(toDate);
-      }
+      filters.push('DATE(time_start) <= ?');
+      params.push(toRaw);
     }
     if (didFilter) {
       filters.push('did_number = ?');
