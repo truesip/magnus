@@ -2077,6 +2077,21 @@ const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || '';
 const NOWPAYMENTS_API_URL = process.env.NOWPAYMENTS_API_URL || 'https://api.nowpayments.io/v1';
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || '';
 
+function nowpaymentsAxios() {
+  if (!NOWPAYMENTS_API_KEY) {
+    throw new Error('NOWPayments API key not configured');
+  }
+  return axios.create({
+    baseURL: NOWPAYMENTS_API_URL,
+    timeout: 15000,
+    headers: {
+      'x-api-key': NOWPAYMENTS_API_KEY,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    }
+  });
+}
+
 // Square configuration (card payments via Square Payment Links)
 const SQUARE_ENVIRONMENT = process.env.SQUARE_ENVIRONMENT || 'sandbox'; // 'sandbox' or 'production'
 const SQUARE_APPLICATION_ID = process.env.SQUARE_APPLICATION_ID || '';
@@ -2933,7 +2948,7 @@ app.post('/api/me/didww/orders', requireAuth, async (req, res) => {
           if (currentCredit < skuPrice) {
             return res.status(400).json({ 
               success: false, 
-              message: `Insufficient balance. You need $${skuPrice.toFixed(2)} but only have $${currentCredit.toFixed(2)}. Please add funds first.` 
+              message: `Insufficient balance in your TalkUSA account. This number costs $${skuPrice.toFixed(2)} per month and your current balance is $${currentCredit.toFixed(2)}. Please add funds on the dashboard and try again.` 
             });
           }
         }
