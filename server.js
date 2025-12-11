@@ -887,12 +887,14 @@ app.get('/dashboard', requireAuth, (req, res) => {
   const tollfreeMarkup = parseFloat(process.env.DID_TOLLFREE_MONTHLY_MARKUP || '25.20') || 0;
   const checkoutMin = Number.isFinite(CHECKOUT_MIN_AMOUNT) ? CHECKOUT_MIN_AMOUNT : 100;
   const checkoutMax = Number.isFinite(CHECKOUT_MAX_AMOUNT) ? CHECKOUT_MAX_AMOUNT : 500;
+  const sipDomain = process.env.SIP_DOMAIN || process.env.MAGNUSBILLING_TLS_SERVERNAME || process.env.MAGNUSBILLING_HOST_HEADER || '';
   res.render('dashboard', {
     username: req.session.username || '',
     localDidMarkup: localMarkup,
     tollfreeDidMarkup: tollfreeMarkup,
     checkoutMinAmount: checkoutMin,
-    checkoutMaxAmount: checkoutMax
+    checkoutMaxAmount: checkoutMax,
+    sipDomain
   });
 });
 // Guard: deleting the primary signup user is disabled via API as well

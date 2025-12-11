@@ -318,10 +318,11 @@
     </div>
   </div>
   <script>
-    const LOCAL_DID_MARKUP = parseFloat('<%= typeof localDidMarkup !== "undefined" ? localDidMarkup : 10.20 %>') || 0;
-    const TOLLFREE_DID_MARKUP = parseFloat('<%= typeof tollfreeDidMarkup !== "undefined" ? tollfreeDidMarkup : 25.20 %>') || 0;
-    const CHECKOUT_MIN_AMOUNT = Number('<%= typeof checkoutMinAmount !== "undefined" ? checkoutMinAmount : 100 %>');
-    const CHECKOUT_MAX_AMOUNT = Number('<%= typeof checkoutMaxAmount !== "undefined" ? checkoutMaxAmount : 500 %>');
+    const LOCAL_DID_MARKUP = parseFloat('<%= typeof localDidMarkup !== \"undefined\" ? localDidMarkup : 10.20 %>') || 0;
+    const TOLLFREE_DID_MARKUP = parseFloat('<%= typeof tollfreeDidMarkup !== \"undefined\" ? tollfreeDidMarkup : 25.20 %>') || 0;
+    const CHECKOUT_MIN_AMOUNT = Number('<%= typeof checkoutMinAmount !== \"undefined\" ? checkoutMinAmount : 100 %>');
+    const CHECKOUT_MAX_AMOUNT = Number('<%= typeof checkoutMaxAmount !== \"undefined\" ? checkoutMaxAmount : 500 %>');
+    const SIP_DOMAIN = '<%= typeof sipDomain !== "undefined" ? sipDomain : "" %>';
     const $ = (s)=>document.querySelector(s);
     var billingPage = 0;
     var billingPageSize = 20;
@@ -399,7 +400,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       }
       
       const tbody = $('#sip-table tbody'); tbody.innerHTML='';
-      const domain = 'sip.dialerone.net';
+      const domain = SIP_DOMAIN || window.location.hostname || '';
       filteredRows.forEach(row=>{
         const id = row.id || row.id_sip || row.idUser || row.id_user || row.idsip;
         const user = row.username||row.name||row.sipuser||''; const cid=row.callerid||row.cid||row.calleridname||'';
