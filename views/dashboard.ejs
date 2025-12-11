@@ -72,6 +72,30 @@
       color:#1d4ed8;
       border:1px solid #bfdbfe;
     }
+    /* Status badges for billing rows */
+    .bill-status {
+      display:inline-block;
+      padding:1px 8px;
+      border-radius:999px;
+      font-size:10px;
+      font-weight:600;
+      vertical-align:middle;
+    }
+    .bill-status-completed {
+      background:#ecfdf5;
+      color:#047857;
+      border:1px solid #6ee7b7;
+    }
+    .bill-status-pending {
+      background:#fffbeb;
+      color:#92400e;
+      border:1px solid #fed7aa;
+    }
+    .bill-status-failed {
+      background:#fef2f2;
+      color:#b91c1c;
+      border:1px solid #fecaca;
+    }
   </style>
 </head>
 <body>
@@ -922,7 +946,14 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           const amountColor = isNegative ? '#ef4444' : '#059669';
           const amountPrefix = isNegative ? '-$' : '+$';
           const amountDisplay = Math.abs(amountNum).toFixed(2);
-          const statusColor = row.status === 'completed' ? '#059669' : (row.status === 'pending' ? '#f59e0b' : '#ef4444');
+          const rawStatus = (row.status || 'completed').toLowerCase();
+          let statusLabel;
+          let statusClass;
+          if (rawStatus === 'completed') { statusLabel = 'Completed'; statusClass = 'bill-status-completed'; }
+          else if (rawStatus === 'pending') { statusLabel = 'Pending confirmation'; statusClass = 'bill-status-pending'; }
+          else if (rawStatus === 'failed') { statusLabel = 'Failed'; statusClass = 'bill-status-failed'; }
+          else { statusLabel = rawStatus.charAt(0).toUpperCase() + rawStatus.slice(1); statusClass = 'bill-status-pending'; }
+          const statusBadge = `<span class=\"bill-status ${statusClass}\">${escapeHtml(statusLabel)}<\/span>`;
           let desc = row.description || 'Account refill';
           let methodBadge = '';
           const lowerDesc = desc.toLowerCase();
@@ -932,9 +963,9 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
             methodBadge = '<span class="bill-tag bill-tag-crypto">Crypto</span>';
           }
           tr.innerHTML = `<td>${escapeHtml(date)}</td>`+
-                        `<td style="color:${amountColor};font-weight:600">${amountPrefix}${escapeHtml(amountDisplay)}</td>`+
+                        `<td style=\"color:${amountColor};font-weight:600\">${amountPrefix}${escapeHtml(amountDisplay)}</td>`+
                         `<td>${methodBadge}${escapeHtml(desc)}</td>`+
-                        `<td style="color:${statusColor}">${escapeHtml(row.status || 'completed')}</td>`;
+                        `<td>${statusBadge}</td>`;
           tbody.appendChild(tr);
         });
         

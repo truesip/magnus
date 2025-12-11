@@ -1573,9 +1573,27 @@ app.post('/nowpayments/ipn', async (req, res) => {
       }
     }
 
-    // If not finished yet, acknowledge but do not credit
+    // Handle non-finished statuses: distinguish pending vs terminal failure
     if (paymentStatus !== 'finished') {
-      if (DEBUG) console.log('[nowpayments.ipn] Payment not finished yet, status=', paymentStatus);
+      const normalized = paymentStatusLabel.toLowerCase();
+      const pendingStatuses = ['waiting', 'confirming', 'confirmed', 'sending'];
+      const isPending = pendingStatuses.includes(normalized);
+
+      if (!isPending) {
+        // Terminal state: mark billing row as failed
+        try {
+          await pool.execute(
+            'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+            ['failed', payloadJson, billingId]
+          );
+        } catch (e) {
+          if (DEBUG) console.warn('[nowpayments.ipn] Failed to mark billing as failed for order:', orderId, e.message || e);
+        }
+        if (DEBUG) console.log('[nowpayments.ipn] Terminal status, marking failed:', { orderId, status: paymentStatusLabel });
+        return res.status(200).json({ success: true, failed: true });
+      }
+
+      if (DEBUG) console.log('[nowpayments.ipn] Payment not finished yet, status=', paymentStatusLabel);
       return res.status(200).json({ success: true, pending: true });
     }
 
@@ -1683,10 +1701,6 @@ app.post('/webhooks/square', async (req, res) => {
     }
 
     const status = String(payment.status || '').toUpperCase();
-    if (status !== 'COMPLETED') {
-      if (DEBUG) console.log('[square.webhook] Payment not completed yet, status=', status);
-      return res.status(200).json({ success: true, pending: true });
-    }
 
     const squareOrderId = payment.order_id || null;
     if (!squareOrderId) {
@@ -1703,6 +1717,51 @@ app.post('/webhooks/square', async (req, res) => {
     if (!sq) {
       if (DEBUG) console.warn('[square.webhook] No local square_payments row for order:', squareOrderId);
       return res.status(200).json({ success: true, ignored: true });
+    }
+
+    // Handle non-completed statuses: mark terminal failures
+    if (status !== 'COMPLETED') {
+      const terminal = ['FAILED', 'CANCELED'];
+      const isTerminal = terminal.includes(status);
+
+      if (isTerminal) {
+        const localOrderIdFail = String(sq.order_id || '');
+        const mFail = /^sq-(\d+)-(\d+)$/.exec(localOrderIdFail);
+        if (mFail) {
+          const userIdFail = Number(mFail[1]);
+          const billingIdFail = Number(mFail[2]);
+          try {
+            const [bRows] = await pool.execute(
+              'SELECT id, user_id, status FROM billing_history WHERE id = ? LIMIT 1',
+              [billingIdFail]
+            );
+            const bRow = bRows && bRows[0] ? bRows[0] : null;
+            if (bRow && String(bRow.user_id) === String(userIdFail) && bRow.status !== 'completed') {
+              await pool.execute(
+                'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+                ['failed', `Square status: ${status}`, billingIdFail]
+              );
+            }
+          } catch (e) {
+            if (DEBUG) console.warn('[square.webhook] Failed to mark billing as failed for order:', localOrderIdFail, e.message || e);
+          }
+
+          try {
+            await pool.execute(
+              'UPDATE square_payments SET status = ?, credited = 0 WHERE id = ?',
+              [status, sq.id]
+            );
+          } catch (e) {
+            if (DEBUG) console.warn('[square.webhook] Failed to update square_payments for failed status:', e.message || e);
+          }
+
+          if (DEBUG) console.log('[square.webhook] Terminal status, marking failed:', { orderId: squareOrderId, status });
+          return res.status(200).json({ success: true, failed: true });
+        }
+      }
+
+      if (DEBUG) console.log('[square.webhook] Payment not completed yet, status=', status);
+      return res.status(200).json({ success: true, pending: true });
     }
 
     if (Number(sq.credited || 0) === 1) {
