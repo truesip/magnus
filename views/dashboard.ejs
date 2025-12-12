@@ -1496,6 +1496,16 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
                 if (name.includes('toll')) isTollfreeDid = true;
               }
             }
+            // Fallback: detect US/CA toll-free by prefix (800, 833, 844, 855, 866, 877, 888)
+            if (!isTollfreeDid) {
+              const rawNum = String(attrs.number || '').replace(/\D/g, '');
+              if (rawNum) {
+                const digits = rawNum.length > 11 ? rawNum.slice(-11) : rawNum;
+                const npa = digits.startsWith('1') ? digits.slice(1,4) : digits.slice(0,3);
+                const tollfreeNpas = ['800','833','844','855','866','877','888'];
+                if (tollfreeNpas.includes(npa)) isTollfreeDid = true;
+              }
+            }
             
             // Use fixed markup prices instead of raw DIDWW prices
             const monthlyPrice = (isTollfreeDid ? TOLLFREE_DID_MARKUP : LOCAL_DID_MARKUP).toFixed(2);
@@ -1636,6 +1646,16 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           if (dg) {
             const name = String(dg.attributes?.name || '').toLowerCase();
             if (name.includes('toll')) isTollfreeDid = true;
+          }
+        }
+        // Fallback: detect US/CA toll-free by prefix (800, 833, 844, 855, 866, 877, 888)
+        if (!isTollfreeDid) {
+          const rawNum = String(attrs.number || '').replace(/\D/g, '');
+          if (rawNum) {
+            const digits = rawNum.length > 11 ? rawNum.slice(-11) : rawNum;
+            const npa = digits.startsWith('1') ? digits.slice(1,4) : digits.slice(0,3);
+            const tollfreeNpas = ['800','833','844','855','866','877','888'];
+            if (tollfreeNpas.includes(npa)) isTollfreeDid = true;
           }
         }
 

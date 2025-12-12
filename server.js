@@ -3095,6 +3095,17 @@ async function billDidMarkupsForUser({ localUserId, magnusUserId, userDids, incl
           if (name.includes('toll')) isTollfree = true;
         }
       }
+      // Fallback: detect US/CA toll-free by prefix (800, 833, 844, 855, 866, 877, 888)
+      if (!isTollfree) {
+        const rawNum = String(attrs.number || '').replace(/\D/g, '');
+        if (rawNum) {
+          const digits = rawNum.length > 11 ? rawNum.slice(-11) : rawNum;
+          const npa = digits.startsWith('1') ? digits.slice(1, 4) : digits.slice(0, 3);
+          const tollfreeNpas = new Set(['800','833','844','855','866','877','888']);
+          if (tollfreeNpas.has(npa)) isTollfree = true;
+        }
+      }
+
       const markupAmount = isTollfree ? tollfreeMarkup : localMarkup;
       if (!markupAmount || markupAmount <= 0) continue;
 
