@@ -24,6 +24,9 @@ const PORT = process.env.PORT || 8080;
 const DEBUG = process.env.DEBUG === '1' || process.env.LOG_LEVEL === 'debug';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-change-this';
 const MB_SIP_MODULE = process.env.MB_SIP_MODULE || 'sip';
+
+// One-time flags
+let didwwGunzipWarned = false;
 const MB_CDR_MODULE = process.env.MB_CDR_MODULE || 'call';
 const MB_PAGE_SIZE = parseInt(process.env.MB_PAGE_SIZE || '50', 10);
 const CHECKOUT_MIN_AMOUNT = parseFloat(process.env.CHECKOUT_MIN_AMOUNT || '100');
@@ -242,7 +245,7 @@ async function prefetchUserData(req){
 // Views + Sessions + Middleware
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
-// Initialize session middleware (will use MySQL store after DB is ready, memory store initially)
+// Session configuration; store will be attached after initDb() creates sessionStore
 const sessionConfig = {
   secret: SESSION_SECRET,
   resave: false,
@@ -255,11 +258,13 @@ const sessionConfig = {
     maxAge: 7 * 24 * 60 * 60 * 1000
   }
 };
-let sessionMiddleware = session(sessionConfig);
+let sessionMiddleware;
 app.use((req, res, next) => {
-  // Update store if it becomes available and recreate middleware once
-  if (!sessionConfig.store && sessionStore) {
-    sessionConfig.store = sessionStore;
+  // sessionMiddleware is created in startServer() after DB init.
+  // As a safety net, if it is somehow missing, fall back to a
+  // MemoryStore-backed session with a warning.
+  if (!sessionMiddleware) {
+    if (DEBUG) console.warn('[session] Session middleware used before DB init; falling back to MemoryStore');
     sessionMiddleware = session(sessionConfig);
   }
   return sessionMiddleware(req, res, next);
@@ -1936,17 +1941,51 @@ app.post('/nowpayments/ipn', async (req, res) => {
       return res.status(200).json({ success: true, pending: true });
     }
 
-    // If we've already credited this order, do nothing (idempotent)
-    let creditedFlag = 0;
+    // Acquire a per-order lock to prevent double-crediting the same NOWPayments order.
+    let lockAcquired = false;
     try {
-      const [npRows2] = await pool.execute(
-        'SELECT credited FROM nowpayments_payments WHERE order_id = ? LIMIT 1',
+      const [lockResult] = await pool.execute(
+        'UPDATE nowpayments_payments SET credited = 2 WHERE order_id = ? AND credited = 0',
         [orderId]
       );
-      creditedFlag = npRows2 && npRows2[0] ? Number(npRows2[0].credited || 0) : 0;
-    } catch {}
-    if (creditedFlag) {
-      if (DEBUG) console.log('[nowpayments.ipn] Order already credited, skipping:', { orderId, billingId });
+      lockAcquired = !!(lockResult && lockResult.affectedRows > 0);
+    } catch (e) {
+      if (DEBUG) console.warn('[nowpayments.ipn] Failed to acquire processing lock:', e.message || e);
+    }
+
+    if (!lockAcquired) {
+      // Someone else has already processed or is processing this order.
+      try {
+        const [npRows2] = await pool.execute(
+          'SELECT credited FROM nowpayments_payments WHERE order_id = ? LIMIT 1',
+          [orderId]
+        );
+        const creditedVal = npRows2 && npRows2[0] ? Number(npRows2[0].credited || 0) : 0;
+        if (creditedVal === 1) {
+          if (DEBUG) console.log('[nowpayments.ipn] Order already credited, skipping duplicate:', { orderId, billingId });
+          return res.status(200).json({ success: true, alreadyCredited: true });
+        }
+        if (DEBUG) console.log('[nowpayments.ipn] Order is being processed by another handler, skipping duplicate:', { orderId, billingId, credited: creditedVal });
+        return res.status(200).json({ success: true, pending: true, duplicate: true });
+      } catch (e) {
+        if (DEBUG) console.warn('[nowpayments.ipn] Failed to re-read nowpayments_payments for lock check:', e.message || e);
+        // Do not risk double-charging if we are unsure.
+        return res.status(200).json({ success: true, pending: true });
+      }
+    }
+
+    // If billing row is already completed, treat this as already credited and
+    // simply sync the credited flag.
+    if (billing.status === 'completed') {
+      if (DEBUG) console.log('[nowpayments.ipn] Billing already completed, skipping refill:', { billingId, orderId });
+      try {
+        await pool.execute(
+          'UPDATE nowpayments_payments SET credited = 1 WHERE order_id = ? AND credited <> 1',
+          [orderId]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[nowpayments.ipn] Failed to sync credited flag for already-completed billing:', e.message || e);
+      }
       return res.status(200).json({ success: true, alreadyCredited: true });
     }
 
@@ -1992,6 +2031,15 @@ app.post('/nowpayments/ipn', async (req, res) => {
 
     if (!result.success) {
       if (DEBUG) console.error('[nowpayments.ipn] Failed to credit MagnusBilling for order:', { orderId, error: result.error });
+      // Release the processing lock so a future IPN can retry.
+      try {
+        await pool.execute(
+          'UPDATE nowpayments_payments SET credited = 0 WHERE order_id = ? AND credited = 2',
+          [orderId]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[nowpayments.ipn] Failed to revert credited flag after error:', e.message || e);
+      }
       return res.status(500).json({ success: false, message: 'Failed to credit MagnusBilling' });
     }
 
@@ -2304,7 +2352,10 @@ app.post(
         try {
           bodyBuffer = zlib.gunzipSync(bodyBuffer);
         } catch (e) {
-          if (DEBUG) console.warn('[didww.cdr] Failed to gunzip body, treating as plain text:', e.message || e);
+          if (DEBUG && !didwwGunzipWarned) {
+            console.warn('[didww.cdr] Failed to gunzip body, treating as plain text:', e.message || e);
+            didwwGunzipWarned = true;
+          }
           // leave bodyBuffer as-is (raw JSON / NDJSON)
         }
       }
@@ -4215,7 +4266,39 @@ app.get('/api/me/didww/dids', requireAuth, async (req, res) => {
                 addedSharedGroup: !hasSharedGroup && !!sharedCapacityGroupId
               });
             } catch (cpErr) {
-              console.error('[didww.dids.autoCapacity] Failed to update DID capacity relationships:', cpErr.response?.data || cpErr.message);
+              const status = cpErr.response && cpErr.response.status;
+              const errors = (cpErr.response && cpErr.response.data && cpErr.response.data.errors) || [];
+
+              const isAdditionalChannelsError =
+                status === 422 &&
+                Array.isArray(errors) &&
+                errors.length > 0 &&
+                errors.every(err => {
+                  const title = String(err.title || err.detail || '').toLowerCase();
+                  return (
+                    title.includes('does not allow additional channels') ||
+                    title.includes('group does not allow additional channels')
+                  );
+                });
+
+              if (isAdditionalChannelsError) {
+                if (DEBUG) {
+                  console.warn(
+                    '[didww.dids.autoCapacity] DID does not allow additional channels, skipping auto capacity for this number:',
+                    {
+                      didId: did.id,
+                      number: attrs.number,
+                      errors
+                    }
+                  );
+                }
+                // Do not treat this as a hard error; just skip this DID.
+              } else {
+                console.error(
+                  '[didww.dids.autoCapacity] Failed to update DID capacity relationships:',
+                  cpErr.response?.data || cpErr.message || cpErr
+                );
+              }
             }
           }
         }
@@ -4759,22 +4842,40 @@ async function runMarkupBillingTick() {
 // Controlled by BILLING_MARKUP_INTERVAL_MINUTES; if unset or 0, scheduler is disabled.
 function startBillingScheduler() {
   const intervalMs = (parseInt(process.env.BILLING_MARKUP_INTERVAL_MINUTES || '0', 10) || 0) * 60 * 1000;
-  if (!intervalMs) {
-    if (DEBUG) console.log('[billing.scheduler] Disabled (no interval set)');
-    return;
-  }
-  if (DEBUG) console.log('[billing.scheduler] Enabled with interval (ms):', intervalMs);
-  setInterval(() => {
-    runMarkupBillingTick();
-  }, intervalMs);
+    if (!intervalMs) {
+      if (DEBUG) console.log('[billing.scheduler] Disabled (no interval set)');
+      return;
+    }
+    if (DEBUG) console.log('[billing.scheduler] Enabled with interval (ms):', intervalMs);
+    setInterval(() => {
+      runMarkupBillingTick();
+    }, intervalMs);
 }
 
-// Start server
-app.listen(PORT, '0.0.0.0', async () => {
-  await initDb().catch(err => console.error('DB init error', err));
-  if (sessionStore) console.log('MySQL session store initialized');
-  console.log(`TalkUSA Signup Server running on port ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV}`);
-  if (DEBUG) console.log('Debug logging enabled');
-  startBillingScheduler();
-});
+// Start server after DB + session store are initialized
+async function startServer() {
+  try {
+    await initDb().catch(err => console.error('DB init error', err));
+
+    if (sessionStore) {
+      sessionConfig.store = sessionStore;
+      sessionMiddleware = session(sessionConfig);
+      console.log('MySQL session store initialized');
+    } else {
+      sessionMiddleware = session(sessionConfig);
+      console.warn('MySQL session store not available; using in-memory sessions');
+    }
+
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`TalkUSA Signup Server running on port ${PORT}`);
+      console.log(`Environment: ${process.env.NODE_ENV}`);
+      if (DEBUG) console.log('Debug logging enabled');
+      startBillingScheduler();
+    });
+  } catch (e) {
+    console.error('Fatal startup error', e.message || e);
+    process.exit(1);
+  }
+}
+
+startServer();
