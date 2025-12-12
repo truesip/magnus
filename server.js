@@ -480,7 +480,7 @@ async function initDb() {
   await pool.query(`CREATE TABLE IF NOT EXISTS billing_history (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     user_id BIGINT NOT NULL,
-    amount DECIMAL(10,2) NOT NULL,
+    amount DECIMAL(18,8) NOT NULL,
     description VARCHAR(255) NULL,
     status ENUM('pending', 'completed', 'failed') NOT NULL DEFAULT 'completed',
     magnus_response TEXT NULL,
@@ -610,6 +610,26 @@ async function initDb() {
       }
     } catch (e) {
       if (DEBUG) console.warn('[schema] Inbound CDR billing column check failed', e.message || e);
+    }
+
+    // Ensure billing_history.amount has enough precision for small per-second charges
+    try {
+      const [amountCol] = await pool.query(
+        "SELECT NUMERIC_SCALE AS scale, NUMERIC_PRECISION AS prec FROM information_schema.columns WHERE table_schema=? AND table_name='billing_history' AND column_name='amount' LIMIT 1",
+        [dbName]
+      );
+      const col = amountCol && amountCol[0];
+      // If scale < 4 or precision < 18, upgrade to DECIMAL(18,8)
+      if (col && ((col.scale != null && col.scale < 4) || (col.prec != null && col.prec < 18))) {
+        try {
+          await pool.query('ALTER TABLE billing_history MODIFY COLUMN amount DECIMAL(18,8) NOT NULL');
+          if (DEBUG) console.log('[schema] Upgraded billing_history.amount to DECIMAL(18,8)');
+        } catch (e) {
+          if (DEBUG) console.warn('[schema] Failed to alter billing_history.amount precision:', e.message || e);
+        }
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] Billing_history.amount precision check failed:', e.message || e);
     }
   } catch (e) { if (DEBUG) console.warn('Schema check failed', e.message || e); }
 }
@@ -3430,41 +3450,85 @@ async function billInboundCdrsForUser({ localUserId, magnusUserId, httpsAgent, h
   }
 
   try {
-    const readParams = new URLSearchParams();
-    readParams.append('module', 'user');
-    readParams.append('action', 'read');
-    readParams.append('start', '0');
-    readParams.append('limit', '100');
-    const readResp = await mbSignedCall({ relPath: '/index.php/user/read', params: readParams, httpsAgent, hostHeader });
-    const allUsers = readResp?.data?.rows || readResp?.data?.data || [];
-    const userRow = allUsers.find(u => String(u.id || u.user_id || u.uid || u.id_user || '') === String(magnusUserId));
-    let magnusResponse = JSON.stringify(readResp?.data || readResp || {});
+    let magnusResponse = null;
+    let success = false;
 
-    if (userRow) {
-      const currentCredit = Number(userRow.credit || 0);
-      const newCredit = currentCredit - totalAmount; // allow negative balance
-      const updateParams = new URLSearchParams();
-      updateParams.append('module', 'user');
-      updateParams.append('action', 'save');
-      updateParams.append('id', String(magnusUserId));
-      updateParams.append('credit', String(newCredit));
-      const updateResp = await mbSignedCall({ relPath: '/index.php/user/save', params: updateParams, httpsAgent, hostHeader });
-      magnusResponse = JSON.stringify(updateResp?.data || updateResp || {});
-      if (DEBUG) console.log('[didww.cdr.billing] Deducted inbound charges from MagnusBilling credit:', {
-        magnusUserId,
-        userId: localUserId,
-        totalAmount,
-        currentCredit,
-        newCredit,
-        callCount
-      });
-    } else if (DEBUG) {
-      console.warn('[didww.cdr.billing] Magnus user not found when charging inbound calls', { magnusUserId });
+    // Primary path: create a negative refill in MagnusBilling so there is a visible
+    // ledger entry (similar to how manual fees are recorded).
+    try {
+      const refillParams = new URLSearchParams();
+      refillParams.append('module', 'refill');
+      refillParams.append('action', 'save');
+      refillParams.append('id_user', String(magnusUserId));
+      refillParams.append('credit', String(-totalAmount)); // negative = charge/fee
+      refillParams.append('description', desc);
+      refillParams.append('payment', '1'); // mark as paid/confirmed
+      refillParams.append('refill_type', '0'); // manual/fee
+
+      const refillResp = await mbSignedCall({ relPath: '/index.php/refill/save', params: refillParams, httpsAgent, hostHeader });
+      magnusResponse = JSON.stringify(refillResp?.data || refillResp || {});
+
+      if (
+        refillResp?.data?.success === true ||
+        (Array.isArray(refillResp?.data?.rows) && refillResp.data.rows.length > 0) ||
+        (refillResp?.status >= 200 && refillResp?.status < 300)
+      ) {
+        success = true;
+        if (DEBUG) console.log('[didww.cdr.billing.refill] Created negative refill for inbound charges:', {
+          magnusUserId,
+          userId: localUserId,
+          totalAmount,
+          callCount
+        });
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[didww.cdr.billing] Refill module failed, falling back to direct credit update:', e.message || e);
+    }
+
+    // Fallback: if refill failed, directly adjust user.credit so at least the
+    // balance is correct (no visible ledger entry in MagnusBilling though).
+    if (!success) {
+      try {
+        const readParams = new URLSearchParams();
+        readParams.append('module', 'user');
+        readParams.append('action', 'read');
+        readParams.append('start', '0');
+        readParams.append('limit', '100');
+        const readResp = await mbSignedCall({ relPath: '/index.php/user/read', params: readParams, httpsAgent, hostHeader });
+        const allUsers = readResp?.data?.rows || readResp?.data?.data || [];
+        const userRow = allUsers.find(u => String(u.id || u.user_id || u.uid || u.id_user || '') === String(magnusUserId));
+        magnusResponse = JSON.stringify(readResp?.data || readResp || {});
+
+        if (userRow) {
+          const currentCredit = Number(userRow.credit || 0);
+          const newCredit = currentCredit - totalAmount; // allow negative balance
+          const updateParams = new URLSearchParams();
+          updateParams.append('module', 'user');
+          updateParams.append('action', 'save');
+          updateParams.append('id', String(magnusUserId));
+          updateParams.append('credit', String(newCredit));
+          const updateResp = await mbSignedCall({ relPath: '/index.php/user/save', params: updateParams, httpsAgent, hostHeader });
+          magnusResponse = JSON.stringify(updateResp?.data || updateResp || {});
+          success = true;
+          if (DEBUG) console.log('[didww.cdr.billing] Deducted inbound charges from MagnusBilling credit (fallback path):', {
+            magnusUserId,
+            userId: localUserId,
+            totalAmount,
+            currentCredit,
+            newCredit,
+            callCount
+          });
+        } else if (DEBUG) {
+          console.warn('[didww.cdr.billing] Magnus user not found when charging inbound calls (fallback path)', { magnusUserId });
+        }
+      } catch (fallbackErr) {
+        if (DEBUG) console.warn('[didww.cdr.billing] Fallback direct credit update failed:', fallbackErr.message || fallbackErr);
+      }
     }
 
     await pool.execute(
       'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
-      ['completed', magnusResponse, billingId]
+      [success ? 'completed' : 'failed', magnusResponse || 'No MagnusBilling response', billingId]
     );
   } catch (e) {
     if (DEBUG) console.warn('[didww.cdr.billing] MagnusBilling error while charging inbound calls:', e.message || e);

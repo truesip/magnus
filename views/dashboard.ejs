@@ -1050,7 +1050,11 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           const isNegative = amountNum < 0;
           const amountColor = isNegative ? '#ef4444' : '#059669';
           const amountPrefix = isNegative ? '-$' : '+$';
-          const amountDisplay = Math.abs(amountNum).toFixed(2);
+          // Show more precision for very small charges (e.g. inbound per-second usage)
+          let decimals = 2;
+          const absAmt = Math.abs(amountNum);
+          if (absAmt > 0 && absAmt < 0.01) decimals = 4;
+          const amountDisplay = absAmt.toFixed(decimals);
           const rawStatus = (row.status || 'completed').toLowerCase();
           let statusLabel;
           let statusClass;
