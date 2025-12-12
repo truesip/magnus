@@ -465,6 +465,28 @@ async function initDb() {
     KEY idx_did_number (did_number),
     CONSTRAINT fk_user_did_cdrs_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE SET NULL
   )`);
+  // Per-user outbound CDR history table - stores normalized MagnusBilling CDRs per user
+  await pool.query(`CREATE TABLE IF NOT EXISTS user_mb_cdrs (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    cdr_id VARCHAR(64) NOT NULL,
+    user_id BIGINT NOT NULL,
+    magnus_user_id VARCHAR(64) NOT NULL,
+    direction VARCHAR(16) NOT NULL DEFAULT 'outbound',
+    src_number VARCHAR(64) NULL,
+    dst_number VARCHAR(64) NULL,
+    did_number VARCHAR(32) NULL,
+    time_start DATETIME NULL,
+    duration INT NULL,
+    billsec INT NULL,
+    price DECIMAL(18,8) NULL,
+    raw_cdr JSON NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_mb_cdr (cdr_id),
+    KEY idx_mb_user (user_id),
+    KEY idx_mb_magnus_user (magnus_user_id),
+    KEY idx_mb_time_start (time_start),
+    CONSTRAINT fk_user_mb_cdrs_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
   // Ensure uniq_user_did_cycle index exists even if table was created on an older schema
   try {
     const [cycleIdx] = await pool.query(
@@ -1211,6 +1233,7 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
 
     // --- Outbound (and possibly inbound) CDRs from MagnusBilling ---
     let outbound = [];
+    let outboundRaw = [];
     try {
       const httpsAgent = new https.Agent({
         rejectUnauthorized: process.env.MAGNUSBILLING_TLS_INSECURE !== '1',
@@ -1229,6 +1252,7 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
         const rawRows = dataRaw?.rows || dataRaw?.data || [];
 
         const ownedRows = rawRows.filter(r => belongsToUser(r, idUser, username, req.session.email));
+        outboundRaw = ownedRows;
 
         outbound = ownedRows.map(r => {
           // Direction: try to infer from common MagnusBilling fields, default to outbound
@@ -1345,6 +1369,21 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
           });
         }
       }
+
+      // Best-effort: persist outbound MagnusBilling CDRs into local DB for history
+      try {
+        const magnusIdStr = idUser ? String(idUser) : '';
+        if (magnusIdStr && outbound.length) {
+          await saveMagnusCdrsToDb({
+            localUserId: userId,
+            magnusUserId: magnusIdStr,
+            rows: outbound,
+            rawRows: outboundRaw
+          });
+        }
+      } catch (storeErr) {
+        if (DEBUG) console.warn('[me.cdrs.magnus.store] Failed to persist outbound CDRs:', storeErr.message || storeErr);
+      }
     } catch (e) {
       if (DEBUG) console.warn('[me.cdrs.magnus] fetch failed:', e.message || e);
     }
@@ -1376,6 +1415,38 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
     return res.status(500).json({ success: false, message: 'Failed to fetch CDRs' });
   }
 });
+
+// Persist normalized MagnusBilling CDRs into local DB for history
+async function saveMagnusCdrsToDb({ localUserId, magnusUserId, rows, rawRows }) {
+  if (!pool || !localUserId || !magnusUserId || !Array.isArray(rows) || !rows.length) return;
+  try {
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const raw = Array.isArray(rawRows) && rawRows[i] ? rawRows[i] : null;
+      if (!r || !r.cdrId) continue;
+      const ts = r.timeStart ? new Date(r.timeStart) : null;
+      await pool.execute(
+        'INSERT IGNORE INTO user_mb_cdrs (cdr_id, user_id, magnus_user_id, direction, src_number, dst_number, did_number, time_start, duration, billsec, price, raw_cdr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [
+          String(r.cdrId),
+          localUserId,
+          String(magnusUserId),
+          r.direction || 'outbound',
+          r.srcNumber || null,
+          r.dstNumber || null,
+          r.didNumber || null,
+          ts,
+          r.duration != null ? Number(r.duration) : null,
+          r.billsec != null ? Number(r.billsec) : null,
+          r.price != null ? Number(r.price) : null,
+          raw ? JSON.stringify(raw) : null
+        ]
+      );
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[me.cdrs.magnus.store] Error while inserting outbound CDRs:', e.message || e);
+  }
+}
 
 // Simple list of the logged-in user's DIDs from local DB (used for Call History DID filter)
 app.get('/api/me/dids', requireAuth, async (req, res) => {
