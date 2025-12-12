@@ -2103,9 +2103,38 @@ app.post('/webhooks/square', async (req, res) => {
       return res.status(200).json({ success: true, pending: true });
     }
 
-    if (Number(sq.credited || 0) === 1) {
-      if (DEBUG) console.log('[square.webhook] Payment already credited, skipping:', { id: sq.id, order_id: sq.order_id });
-      return res.status(200).json({ success: true, alreadyCredited: true });
+    // Acquire a per-payment lock to prevent double-crediting the same order.
+    let lockAcquired = false;
+    try {
+      const [lockResult] = await pool.execute(
+        'UPDATE square_payments SET status = ?, credited = 2 WHERE id = ? AND credited = 0',
+        ['PROCESSING', sq.id]
+      );
+      lockAcquired = !!(lockResult && lockResult.affectedRows > 0);
+    } catch (e) {
+      if (DEBUG) console.warn('[square.webhook] Failed to acquire processing lock:', e.message || e);
+    }
+
+    if (!lockAcquired) {
+      // Someone else has already processed or is processing this payment.
+      try {
+        const [freshRows] = await pool.execute(
+          'SELECT credited FROM square_payments WHERE id = ? LIMIT 1',
+          [sq.id]
+        );
+        const fresh = freshRows && freshRows[0] ? freshRows[0] : null;
+        const creditedVal = fresh ? Number(fresh.credited || 0) : Number(sq.credited || 0);
+        if (creditedVal === 1) {
+          if (DEBUG) console.log('[square.webhook] Payment already credited, skipping duplicate:', { id: sq.id, order_id: sq.order_id });
+          return res.status(200).json({ success: true, alreadyCredited: true });
+        }
+        if (DEBUG) console.log('[square.webhook] Payment is being processed by another handler, skipping duplicate:', { id: sq.id, order_id: sq.order_id, credited: creditedVal });
+        return res.status(200).json({ success: true, pending: true, duplicate: true });
+      } catch (e) {
+        if (DEBUG) console.warn('[square.webhook] Failed to re-read square_payments for lock check:', e.message || e);
+        // Do not risk double-charging if we are unsure.
+        return res.status(200).json({ success: true, pending: true });
+      }
     }
 
     const localOrderId = String(sq.order_id || '');
@@ -2133,7 +2162,7 @@ app.post('/webhooks/square', async (req, res) => {
       if (DEBUG) console.log('[square.webhook] Billing already completed, skipping refill:', { billingId, localOrderId });
       try {
         await pool.execute(
-          'UPDATE square_payments SET status = ?, credited = 1 WHERE id = ? AND credited = 0',
+          'UPDATE square_payments SET status = ?, credited = 1 WHERE id = ? AND credited <> 1',
           ['COMPLETED', sq.id]
         );
       } catch (e) {
@@ -2185,6 +2214,15 @@ app.post('/webhooks/square', async (req, res) => {
 
     if (!result.success) {
       if (DEBUG) console.error('[square.webhook] Failed to credit MagnusBilling for order:', { localOrderId, error: result.error });
+      // Release the processing lock so a future retry can attempt again.
+      try {
+        await pool.execute(
+          'UPDATE square_payments SET status = ?, credited = 0 WHERE id = ? AND credited = 2',
+          ['FAILED', sq.id]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[square.webhook] Failed to revert credited flag after error:', e.message || e);
+      }
       return res.status(500).json({ success: false, message: 'Failed to credit MagnusBilling' });
     }
 
