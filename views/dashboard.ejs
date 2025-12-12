@@ -553,17 +553,16 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
 
       try{
         let j;
-        let source = 'live';
 
-        // Primary: live Magnus + inbound
+        // Primary: /api/me/cdrs (does its own Magnus→local outbound fallback)
         try {
           const r = await fetch('/api/me/cdrs?'+q.toString());
           j = await r.json();
           if (!j || j.success === false) {
-            throw new Error('primary CDR fetch failed or Magnus unavailable');
+            throw new Error('primary CDR fetch failed');
           }
         } catch (primaryErr) {
-          // Fallback: local DB-only CDRs (user_mb_cdrs + user_did_cdrs)
+          // Last-resort: local-only endpoint if primary handler itself errors
           try {
             const r2 = await fetch('/api/me/cdrs/local?'+q.toString());
             const j2 = await r2.json();
@@ -571,8 +570,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
               throw j2 || primaryErr;
             }
             j = j2;
-            source = 'local';
-            console.warn('[loadCdr] Using local CDRs fallback (Magnus unavailable or error).');
+            console.warn('[loadCdr] Using /api/me/cdrs/local fallback because /api/me/cdrs failed.');
           } catch (fallbackErr) {
             const msg = (j && j.message) || (fallbackErr && fallbackErr.message) || 'Failed to load CDRs';
             $('#cdr-empty').textContent = msg;
