@@ -29,8 +29,8 @@ const MB_PAGE_SIZE = parseInt(process.env.MB_PAGE_SIZE || '50', 10);
 const CHECKOUT_MIN_AMOUNT = parseFloat(process.env.CHECKOUT_MIN_AMOUNT || '100');
 const CHECKOUT_MAX_AMOUNT = parseFloat(process.env.CHECKOUT_MAX_AMOUNT || '500');
 
-// Inbound call billing (flat per-minute rates, 60/60 rounding)
-// Defaults: Local $0.025/min, Toll-Free $0.03/min
+// Inbound call billing (flat rates expressed per minute, billed per second)
+// Defaults: Local $0.025/min equivalent, Toll-Free $0.03/min equivalent
 const INBOUND_LOCAL_RATE_PER_MIN = parseFloat(process.env.INBOUND_LOCAL_RATE_PER_MIN || '0.025') || 0.025;
 const INBOUND_TOLLFREE_RATE_PER_MIN = parseFloat(process.env.INBOUND_TOLLFREE_RATE_PER_MIN || '0.03') || 0.03;
 app.set('trust proxy', 1);
@@ -2170,7 +2170,7 @@ app.post(
           didUserCache.set(didNumber, userId);
         }
 
-        // Rate this CDR using flat per-minute retail pricing (60/60 rounding)
+        // Rate this CDR using flat per-second retail pricing derived from per-minute rates
         let retailPrice = 0;
         try {
           const tollfreeNpas = ['800','833','844','855','866','877','888'];
@@ -2185,9 +2185,8 @@ app.post(
           }
           const ratePerMin = isTollfreeDid ? INBOUND_TOLLFREE_RATE_PER_MIN : INBOUND_LOCAL_RATE_PER_MIN;
           if (billsec != null && billsec > 0 && ratePerMin > 0) {
-            const roundedSeconds = Math.ceil(billsec / 60) * 60; // 60/60 billing
-            const minutes = roundedSeconds / 60;
-            retailPrice = Number((minutes * ratePerMin).toFixed(6));
+            const ratePerSec = ratePerMin / 60;
+            retailPrice = Number((billsec * ratePerSec).toFixed(6));
           } else {
             retailPrice = 0;
           }
