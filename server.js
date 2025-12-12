@@ -28,6 +28,11 @@ const MB_CDR_MODULE = process.env.MB_CDR_MODULE || 'call';
 const MB_PAGE_SIZE = parseInt(process.env.MB_PAGE_SIZE || '50', 10);
 const CHECKOUT_MIN_AMOUNT = parseFloat(process.env.CHECKOUT_MIN_AMOUNT || '100');
 const CHECKOUT_MAX_AMOUNT = parseFloat(process.env.CHECKOUT_MAX_AMOUNT || '500');
+
+// Inbound call billing (flat per-minute rates, 60/60 rounding)
+// Defaults: Local $0.025/min, Toll-Free $0.03/min
+const INBOUND_LOCAL_RATE_PER_MIN = parseFloat(process.env.INBOUND_LOCAL_RATE_PER_MIN || '0.025') || 0.025;
+const INBOUND_TOLLFREE_RATE_PER_MIN = parseFloat(process.env.INBOUND_TOLLFREE_RATE_PER_MIN || '0.03') || 0.03;
 app.set('trust proxy', 1);
 app.set('etag', false);
 const COOKIE_SECURE = process.env.COOKIE_SECURE === '1';
@@ -585,6 +590,26 @@ async function initDb() {
       }
     } catch (e) {
       if (DEBUG) console.warn('[schema] Failed to drop user_sms_trunks:', e.message || e);
+    }
+
+    // Ensure inbound CDR billing columns exist on user_did_cdrs
+    try {
+      const [hasCdrBilled] = await pool.query(
+        'SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name=\'user_did_cdrs\' AND column_name=\'billed\' LIMIT 1',
+        [dbName]
+      );
+      if (!hasCdrBilled || !hasCdrBilled.length) {
+        try { await pool.query('ALTER TABLE user_did_cdrs ADD COLUMN billed TINYINT(1) NOT NULL DEFAULT 0 AFTER price'); } catch (e) { if (DEBUG) console.warn('Add billed column to user_did_cdrs failed', e.message || e); }
+      }
+      const [hasCdrBillingId] = await pool.query(
+        'SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name=\'user_did_cdrs\' AND column_name=\'billing_history_id\' LIMIT 1',
+        [dbName]
+      );
+      if (!hasCdrBillingId || !hasCdrBillingId.length) {
+        try { await pool.query('ALTER TABLE user_did_cdrs ADD COLUMN billing_history_id BIGINT NULL AFTER billed'); } catch (e) { if (DEBUG) console.warn('Add billing_history_id column to user_did_cdrs failed', e.message || e); }
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] Inbound CDR billing column check failed', e.message || e);
     }
   } catch (e) { if (DEBUG) console.warn('Schema check failed', e.message || e); }
 }
@@ -2119,7 +2144,8 @@ app.post(
         const timeEnd = attrs.time_end ? new Date(attrs.time_end) : null;
         const duration = attrs.duration != null ? Number(attrs.duration) || 0 : null;
         const billsec = attrs.billsec != null ? Number(attrs.billsec) || 0 : null;
-        const price = attrs.price != null ? Number(attrs.price) || 0 : null;
+        // DIDWW-provided price (may be 0); kept only for debugging/auditing in raw_cdr
+        const carrierPrice = attrs.price != null ? Number(attrs.price) || 0 : null;
         const cdrId = cdr.id ? String(cdr.id) : null;
         const direction = String(cdr.type || 'inbound-cdr').includes('outbound') ? 'outbound' : 'inbound';
 
@@ -2144,6 +2170,32 @@ app.post(
           didUserCache.set(didNumber, userId);
         }
 
+        // Rate this CDR using flat per-minute retail pricing (60/60 rounding)
+        let retailPrice = 0;
+        try {
+          const tollfreeNpas = ['800','833','844','855','866','877','888'];
+          let isTollfreeDid = false;
+          if (didNumber) {
+            const rawNum = String(didNumber).replace(/\D/g, '');
+            if (rawNum) {
+              const digits = rawNum.length > 11 ? rawNum.slice(-11) : rawNum;
+              const npa = digits.startsWith('1') ? digits.slice(1,4) : digits.slice(0,3);
+              if (tollfreeNpas.includes(npa)) isTollfreeDid = true;
+            }
+          }
+          const ratePerMin = isTollfreeDid ? INBOUND_TOLLFREE_RATE_PER_MIN : INBOUND_LOCAL_RATE_PER_MIN;
+          if (billsec != null && billsec > 0 && ratePerMin > 0) {
+            const roundedSeconds = Math.ceil(billsec / 60) * 60; // 60/60 billing
+            const minutes = roundedSeconds / 60;
+            retailPrice = Number((minutes * ratePerMin).toFixed(6));
+          } else {
+            retailPrice = 0;
+          }
+        } catch (e) {
+          if (DEBUG) console.warn('[didww.cdr] Rating failed, falling back to carrier price:', e.message || e);
+          retailPrice = carrierPrice != null ? carrierPrice : 0;
+        }
+
         try {
           await pool.execute(
             'INSERT IGNORE INTO user_did_cdrs (cdr_id, user_id, did_number, direction, src_number, dst_number, time_start, time_connect, time_end, duration, billsec, price, raw_cdr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -2159,7 +2211,7 @@ app.post(
               timeEnd,
               duration,
               billsec,
-              price,
+              retailPrice,
               JSON.stringify(cdr)
             ]
           );
@@ -3157,6 +3209,90 @@ async function billDidMarkupsForUser({ localUserId, magnusUserId, userDids, incl
     } catch (e) {
       if (DEBUG) console.warn('[didww.markup] Error while processing DID for markup:', e.message || e);
     }
+  }
+}
+
+// Aggregate and bill inbound CDRs for a user (per-minute retail pricing)
+async function billInboundCdrsForUser({ localUserId, magnusUserId, httpsAgent, hostHeader }) {
+  if (!pool || !localUserId || !magnusUserId) return;
+
+  const [[agg]] = await pool.execute(
+    "SELECT SUM(price) AS total_amount, COUNT(*) AS call_count FROM user_did_cdrs WHERE user_id = ? AND billed = 0 AND direction = 'inbound' AND price IS NOT NULL AND price > 0",
+    [localUserId]
+  );
+  const totalAmount = Number(agg?.total_amount || 0);
+  const callCount = Number(agg?.call_count || 0);
+  if (!totalAmount || totalAmount <= 0 || !callCount) return;
+
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const now = new Date();
+  const dateLabel = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+  const desc = `Inbound call charges - ${dateLabel} - ${callCount} call${callCount === 1 ? '' : 's'}`;
+
+  // Insert pending billing record
+  const [insertResult] = await pool.execute(
+    'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
+    [localUserId, -totalAmount, desc, 'pending']
+  );
+  const billingId = insertResult.insertId;
+
+  // Mark CDRs as billed and associate them with this billing row. We do this
+  // *before* updating MagnusBilling to avoid double-charging on retries; worst
+  // case is an undercharge if the MagnusBilling call fails.
+  try {
+    await pool.execute(
+      "UPDATE user_did_cdrs SET billed = 1, billing_history_id = ? WHERE user_id = ? AND billed = 0 AND direction = 'inbound' AND price IS NOT NULL AND price > 0",
+      [billingId, localUserId]
+    );
+  } catch (e) {
+    if (DEBUG) console.warn('[didww.cdr.billing] Failed to mark CDRs as billed:', e.message || e);
+    // If we can't mark them billed, bail out so we don't charge without a clear marker
+    return;
+  }
+
+  try {
+    const readParams = new URLSearchParams();
+    readParams.append('module', 'user');
+    readParams.append('action', 'read');
+    readParams.append('start', '0');
+    readParams.append('limit', '100');
+    const readResp = await mbSignedCall({ relPath: '/index.php/user/read', params: readParams, httpsAgent, hostHeader });
+    const allUsers = readResp?.data?.rows || readResp?.data?.data || [];
+    const userRow = allUsers.find(u => String(u.id || u.user_id || u.uid || u.id_user || '') === String(magnusUserId));
+    let magnusResponse = JSON.stringify(readResp?.data || readResp || {});
+
+    if (userRow) {
+      const currentCredit = Number(userRow.credit || 0);
+      const newCredit = currentCredit - totalAmount; // allow negative balance
+      const updateParams = new URLSearchParams();
+      updateParams.append('module', 'user');
+      updateParams.append('action', 'save');
+      updateParams.append('id', String(magnusUserId));
+      updateParams.append('credit', String(newCredit));
+      const updateResp = await mbSignedCall({ relPath: '/index.php/user/save', params: updateParams, httpsAgent, hostHeader });
+      magnusResponse = JSON.stringify(updateResp?.data || updateResp || {});
+      if (DEBUG) console.log('[didww.cdr.billing] Deducted inbound charges from MagnusBilling credit:', {
+        magnusUserId,
+        userId: localUserId,
+        totalAmount,
+        currentCredit,
+        newCredit,
+        callCount
+      });
+    } else if (DEBUG) {
+      console.warn('[didww.cdr.billing] Magnus user not found when charging inbound calls', { magnusUserId });
+    }
+
+    await pool.execute(
+      'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+      ['completed', magnusResponse, billingId]
+    );
+  } catch (e) {
+    if (DEBUG) console.warn('[didww.cdr.billing] MagnusBilling error while charging inbound calls:', e.message || e);
+    await pool.execute(
+      'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+      ['failed', String(e.message || e), billingId]
+    );
   }
 }
 
@@ -4321,6 +4457,14 @@ async function runMarkupBillingTick() {
         magnusUserId,
         userDids,
         included: allIncluded,
+        httpsAgent,
+        hostHeader
+      });
+
+      // Also bill inbound CDR usage for this user (if any)
+      await billInboundCdrsForUser({
+        localUserId,
+        magnusUserId,
         httpsAgent,
         hostHeader
       });
