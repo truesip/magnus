@@ -2190,6 +2190,13 @@ app.post(
           } else {
             retailPrice = 0;
           }
+          if (DEBUG) console.log('[didww.cdr.rate]', {
+            didNumber,
+            billsec,
+            isTollfreeDid,
+            ratePerMin,
+            retailPrice
+          });
         } catch (e) {
           if (DEBUG) console.warn('[didww.cdr] Rating failed, falling back to carrier price:', e.message || e);
           retailPrice = carrierPrice != null ? carrierPrice : 0;
