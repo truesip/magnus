@@ -1133,7 +1133,6 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
 
     const page = Math.max(0, parseInt(req.query.page || '0', 10));
     const pageSize = Math.max(1, Math.min(200, parseInt(req.query.pageSize || '50', 10)));
-    const offset = page * pageSize;
 
     const filters = ['user_id = ?'];
     const params = [userId];
@@ -1159,25 +1158,17 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
 
     const whereSql = filters.length ? 'WHERE ' + filters.join(' AND ') : '';
 
-    // Total count for pagination
-    const [[countRow]] = await pool.execute(
-      `SELECT COUNT(*) AS total FROM user_did_cdrs ${whereSql}`,
-      params
-    );
-    const total = countRow?.total || 0;
-
-    // Page of CDRs
-    const [rows] = await pool.query(
+    // --- Inbound CDRs from DIDWW (local table) ---
+    const [inboundRows] = await pool.query(
       `SELECT id, cdr_id, user_id, did_number, direction, src_number, dst_number,
               time_start, time_connect, time_end, duration, billsec, price, created_at
        FROM user_did_cdrs
        ${whereSql}
-       ORDER BY time_start DESC, id DESC
-       LIMIT ${parseInt(pageSize, 10)} OFFSET ${parseInt(offset, 10)}`,
+       ORDER BY time_start DESC, id DESC`,
       params
     );
 
-    const data = rows.map(r => ({
+    const inbound = inboundRows.map(r => ({
       id: r.id,
       cdrId: r.cdr_id,
       didNumber: r.did_number,
@@ -1193,9 +1184,147 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
       createdAt: r.created_at ? r.created_at.toISOString() : null
     }));
 
-    if (DEBUG) console.log('[me.cdrs]', { userId, count: data.length, total });
+    // --- Outbound (and possibly inbound) CDRs from MagnusBilling ---
+    let outbound = [];
+    try {
+      const httpsAgent = new https.Agent({
+        rejectUnauthorized: process.env.MAGNUSBILLING_TLS_INSECURE !== '1',
+        ...(process.env.MAGNUSBILLING_TLS_SERVERNAME ? { servername: process.env.MAGNUSBILLING_TLS_SERVERNAME } : {})
+      });
+      const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+      const idUser = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
+      const username = req.session.username;
 
-    return res.json({ success: true, data, total, page, pageSize });
+      if (idUser || username) {
+        const rngDefault = defaultRange();
+        const mbFrom = fromRaw || rngDefault.from;
+        const mbTo = toRaw || rngDefault.to;
+
+        const dataRaw = await fetchCdr({ idUser, username, from: mbFrom, to: mbTo, httpsAgent, hostHeader });
+        const rawRows = dataRaw?.rows || dataRaw?.data || [];
+
+        const ownedRows = rawRows.filter(r => belongsToUser(r, idUser, username, req.session.email));
+
+        outbound = ownedRows.map(r => {
+          // Direction: try to infer from common MagnusBilling fields, default to outbound
+          const dirRaw = String(
+            r.direction || r.calltype || r.call_type || r.call_direction || ''
+          ).toLowerCase();
+          let direction = 'outbound';
+          if (dirRaw.includes('in') && !dirRaw.includes('out')) direction = 'inbound';
+          if (dirRaw.includes('out')) direction = 'outbound';
+
+          // Start time
+          const startStr =
+            r.starttime ||
+            r.start_time ||
+            r.calldate ||
+            r.callstart ||
+            r.start_date ||
+            r.date ||
+            null;
+          const startDate = startStr ? new Date(startStr) : null;
+
+          // Numbers
+          const src =
+            r.src ||
+            r.callerid ||
+            r.clid ||
+            r.cli ||
+            r.src_number ||
+            r.callingnumber ||
+            '';
+          const dst =
+            r.dst ||
+            r.calledstation ||
+            r.destination ||
+            r.dest ||
+            r.dst_number ||
+            '';
+
+          // Duration / billsec
+          let billsec = null;
+          if (r.billsec != null) billsec = Number(r.billsec) || 0;
+          else if (r.sessiontime != null) billsec = Number(r.sessiontime) || 0;
+          else if (r.duration != null) billsec = Number(r.duration) || 0;
+          if (billsec != null && billsec < 0) billsec = 0;
+
+          // Price (customer debited amount in MagnusBilling)
+          let price = null;
+          if (r.sessionbill != null) price = Number(r.sessionbill);
+          else if (r.debit != null) price = Number(r.debit);
+          else if (r.cost != null) price = Number(r.cost);
+
+          const idVal = r.id || r.id_call || r.uniqueid || r.unique_id || null;
+
+          // Optional DID association if available on the CDR
+          const didNumber = r.did || r.did_number || r.didnumber || null;
+
+          return {
+            id: idVal != null ? `mb-${idVal}` : `mb-${Math.random().toString(36).slice(2)}`,
+            cdrId: idVal != null ? String(idVal) : null,
+            didNumber,
+            direction,
+            srcNumber: src || '',
+            dstNumber: dst || '',
+            timeStart: startDate ? startDate.toISOString() : null,
+            timeConnect: null,
+            timeEnd: null,
+            duration: billsec,
+            billsec,
+            price: price != null && Number.isFinite(price) ? price : null,
+            createdAt: startDate ? startDate.toISOString() : null
+          };
+        });
+
+        // If DID filter is applied, try to restrict Magnus CDRs using it as well
+        if (didFilter) {
+          const wantDigits = didFilter.replace(/\D/g, '');
+          outbound = outbound.filter(c => {
+            const combined = `${c.srcNumber || ''}${c.dstNumber || ''}${c.didNumber || ''}`.replace(/\D/g, '');
+            return combined.includes(wantDigits);
+          });
+        }
+
+        if (DEBUG) {
+          console.log('[me.cdrs.magnus]', {
+            idUser,
+            username,
+            from: mbFrom,
+            to: mbTo,
+            totalRaw: rawRows.length,
+            owned: ownedRows.length,
+            normalized: outbound.length,
+            sample: outbound[0] || null
+          });
+        }
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[me.cdrs.magnus] fetch failed:', e.message || e);
+    }
+
+    // Merge inbound + MagnusBilling CDRs into a single timeline
+    let all = inbound.concat(outbound);
+
+    // Sort newest first by timeStart (fallback to createdAt)
+    all.sort((a, b) => {
+      const aTs = a.timeStart ? Date.parse(a.timeStart) : (a.createdAt ? Date.parse(a.createdAt) : 0);
+      const bTs = b.timeStart ? Date.parse(b.timeStart) : (b.createdAt ? Date.parse(b.createdAt) : 0);
+      if (bTs !== aTs) return bTs - aTs;
+      // Stable-ish fallback using id string
+      const aId = String(a.id || '');
+      const bId = String(b.id || '');
+      return bId.localeCompare(aId);
+    });
+
+    const total = all.length;
+    const startIndex = page * pageSize;
+    const endIndex = startIndex + pageSize;
+    const pageRows = all.slice(startIndex, endIndex);
+
+    if (DEBUG) console.log('[me.cdrs]', { userId, count: pageRows.length, total });
+
+    return res.json({ success: true, data: pageRows, total, page, pageSize });
   } catch (e) {
     if (DEBUG) console.error('[me.cdrs] error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to fetch CDRs' });
@@ -2143,7 +2272,29 @@ app.post(
         const timeConnect = attrs.time_connect ? new Date(attrs.time_connect) : null;
         const timeEnd = attrs.time_end ? new Date(attrs.time_end) : null;
         const duration = attrs.duration != null ? Number(attrs.duration) || 0 : null;
-        const billsec = attrs.billsec != null ? Number(attrs.billsec) || 0 : null;
+
+        // billsec is the number of seconds we bill the customer for.
+        // DIDWW does not always send a dedicated billsec field for inbound CDRs,
+        // so derive it from the most reliable attributes we have:
+        //   1) attrs.billsec (if present)
+        //   2) attrs.duration (actual call duration in seconds)
+        //   3) attrs.metered_channels_duration (wholesale billed seconds)
+        //   4) Difference between time_end and time_connect
+        let billsec = null;
+        if (attrs.billsec != null) {
+          billsec = Number(attrs.billsec) || 0;
+        }
+        if (!billsec && duration != null) {
+          billsec = duration;
+        }
+        if (!billsec && attrs.metered_channels_duration != null) {
+          billsec = Number(attrs.metered_channels_duration) || 0;
+        }
+        if (!billsec && timeConnect && timeEnd) {
+          const diffSec = Math.round((timeEnd.getTime() - timeConnect.getTime()) / 1000);
+          if (Number.isFinite(diffSec) && diffSec > 0) billsec = diffSec;
+        }
+
         // DIDWW-provided price (may be 0); kept only for debugging/auditing in raw_cdr
         const carrierPrice = attrs.price != null ? Number(attrs.price) || 0 : null;
         const cdrId = cdr.id ? String(cdr.id) : null;
@@ -2192,6 +2343,7 @@ app.post(
           }
           if (DEBUG) console.log('[didww.cdr.rate]', {
             didNumber,
+            duration,
             billsec,
             isTollfreeDid,
             ratePerMin,
