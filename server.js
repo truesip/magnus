@@ -1226,14 +1226,35 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
           const startDate = startStr ? new Date(startStr) : null;
 
           // Numbers
-          const src =
-            r.src ||
+          // For the "From" field we want the public caller ID (CLI), not the SIP
+          // login/extension. Many MagnusBilling CDRs expose CLI in callerid/clid/cli,
+          // while src/accountcode is the SIP username.
+          let callerRaw =
             r.callerid ||
+            r.cid ||
             r.clid ||
             r.cli ||
-            r.src_number ||
             r.callingnumber ||
+            r.src_number ||
+            r.src ||
             '';
+
+          // Normalise common formats like "1234567890" <546788> or 1234567890 <546788>
+          callerRaw = String(callerRaw || '').trim();
+          const angleMatch = /<([^>]+)>/.exec(callerRaw);
+          if (angleMatch) {
+            callerRaw = angleMatch[1];
+          }
+          callerRaw = callerRaw.replace(/"/g, '').trim();
+
+          const extRaw =
+            r.src ||
+            r.accountcode ||
+            r.sipiax ||
+            '';
+
+          const src = callerRaw || extRaw || '';
+
           const dst =
             r.dst ||
             r.calledstation ||
