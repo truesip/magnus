@@ -178,6 +178,15 @@ function sipBelongsToUser(row, idUser){
   const idStr = String(idUser || '');
   return Boolean(idStr && [row?.id_user, row?.idUser, row?.userid, row?.user_id].some(v => String(v||'') === idStr));
 }
+// Redact sensitive SIP fields for logging
+function redactSipRow(row){
+  if (!row || typeof row !== 'object') return row;
+  const clone = { ...row };
+  for (const key of ['secret','sippasswd','password']) {
+    if (key in clone) clone[key] = '***REDACTED***';
+  }
+  return clone;
+}
 // Resolve MagnusBilling user id when missing by querying upstream; cache in session and DB
 async function ensureMagnusUserId(req, { httpsAgent, hostHeader }) {
   // First, try to get the Magnus user ID from local database
@@ -1234,6 +1243,7 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
     // --- Outbound (and possibly inbound) CDRs from MagnusBilling ---
     let outbound = [];
     let outboundRaw = [];
+    let hadMagnusError = false;
     try {
       const httpsAgent = new https.Agent({
         rejectUnauthorized: process.env.MAGNUSBILLING_TLS_INSECURE !== '1',
@@ -1243,6 +1253,33 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
       const idUser = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
       const username = req.session.username;
 
+      // Optional: fetch SIP users for this Magnus account so we can treat
+      // calls from any of their SIP logins as "owned" even if the CDR's
+      // user id or username is not a direct match.
+      let sipNameSet = new Set();
+      if (idUser) {
+        try {
+          const sipsData = await fetchSipUsers({ idUser, httpsAgent, hostHeader });
+          const rawSipRows = sipsData?.rows || sipsData?.data || [];
+          const sipRows = rawSipRows.filter(r => sipBelongsToUser(r, idUser));
+          sipNameSet = new Set(
+            sipRows
+              .flatMap(r => [r.name, r.accountcode, r.defaultuser])
+              .filter(Boolean)
+              .map(v => String(v).toLowerCase())
+          );
+          if (DEBUG) {
+            console.log('[me.cdrs.magnus.sips]', {
+              idUser,
+              sipCount: sipRows.length,
+              sipNames: Array.from(sipNameSet).slice(0, 10)
+            });
+          }
+        } catch (sipErr) {
+          if (DEBUG) console.warn('[me.cdrs.magnus] fetchSipUsers failed:', sipErr.message || sipErr);
+        }
+      }
+
       if (idUser || username) {
         const rngDefault = defaultRange();
         const mbFrom = fromRaw || rngDefault.from;
@@ -1251,7 +1288,19 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
         const dataRaw = await fetchCdr({ idUser, username, from: mbFrom, to: mbTo, httpsAgent, hostHeader });
         const rawRows = dataRaw?.rows || dataRaw?.data || [];
 
-        const ownedRows = rawRows.filter(r => belongsToUser(r, idUser, username, req.session.email));
+        const ownedRows = rawRows.filter(r => {
+          if (belongsToUser(r, idUser, username, req.session.email)) return true;
+          if (!sipNameSet || !sipNameSet.size) return false;
+          const acc = String(
+            r.accountcode ||
+            r.sipiax ||
+            r.username ||
+            r.user ||
+            r.src ||
+            ''
+          ).toLowerCase();
+          return acc && sipNameSet.has(acc);
+        });
         outboundRaw = ownedRows;
 
         outbound = ownedRows.map(r => {
@@ -1294,7 +1343,7 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
           if (angleMatch) {
             callerRaw = angleMatch[1];
           }
-          callerRaw = callerRaw.replace(/"/g, '').trim();
+          callerRaw = callerRaw.replace(/\"/g, '').trim();
 
           const extRaw =
             r.src ||
@@ -1385,10 +1434,74 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
         if (DEBUG) console.warn('[me.cdrs.magnus.store] Failed to persist outbound CDRs:', storeErr.message || storeErr);
       }
     } catch (e) {
+      hadMagnusError = true;
       if (DEBUG) console.warn('[me.cdrs.magnus] fetch failed:', e.message || e);
     }
 
-    // Merge inbound + MagnusBilling CDRs into a single timeline
+    // If MagnusBilling is unreachable or fetch failed, fall back to outbound CDRs
+    // stored locally in user_mb_cdrs so Call History continues to work.
+    if (hadMagnusError) {
+      try {
+        const outFilters = ['user_id = ?'];
+        const outParams = [userId];
+        if (fromRaw) {
+          outFilters.push('DATE(time_start) >= ?');
+          outParams.push(fromRaw);
+        }
+        if (toRaw) {
+          outFilters.push('DATE(time_start) <= ?');
+          outParams.push(toRaw);
+        }
+        if (didFilter) {
+          outFilters.push('(did_number = ? OR dst_number = ? OR src_number = ?)');
+          outParams.push(didFilter, didFilter, didFilter);
+        }
+        const whereOutSql = outFilters.length ? 'WHERE ' + outFilters.join(' AND ') : '';
+
+        const [outRows] = await pool.query(
+          `SELECT id, cdr_id, magnus_user_id, direction, src_number, dst_number, did_number,
+                  time_start, duration, billsec, price, created_at
+           FROM user_mb_cdrs
+           ${whereOutSql}
+           ORDER BY time_start DESC, id DESC`,
+          outParams
+        );
+
+        outbound = outRows.map(r => ({
+          id: r.cdr_id ? `mb-${r.cdr_id}` : `mb-db-${r.id}`,
+          cdrId: r.cdr_id ? String(r.cdr_id) : null,
+          didNumber: r.did_number,
+          direction: r.direction || 'outbound',
+          srcNumber: r.src_number || '',
+          dstNumber: r.dst_number || '',
+          timeStart: r.time_start ? r.time_start.toISOString() : null,
+          timeConnect: null,
+          timeEnd: null,
+          duration: r.duration != null ? Number(r.duration) : (r.billsec != null ? Number(r.billsec) : null),
+          billsec: r.billsec != null ? Number(r.billsec) : (r.duration != null ? Number(r.duration) : null),
+          price: r.price != null ? Number(r.price) : null,
+          createdAt: r.created_at ? r.created_at.toISOString() : null
+        }));
+
+        if (DEBUG) {
+          console.log('[me.cdrs.magnus.fallback]', {
+            userId,
+            from: fromRaw || null,
+            to: toRaw || null,
+            did: didFilter || null,
+            count: outbound.length
+          });
+        }
+      } catch (fallbackErr) {
+        if (DEBUG) console.warn(
+          '[me.cdrs.magnus.fallback] Failed to load outbound from user_mb_cdrs:',
+          fallbackErr.message || fallbackErr
+        );
+        outbound = [];
+      }
+    }
+
+    // Merge inbound + MagnusBilling (or local) CDRs into a single timeline
     let all = inbound.concat(outbound);
 
     // Sort newest first by timeStart (fallback to createdAt)
@@ -1464,6 +1577,132 @@ app.get('/api/me/dids', requireAuth, async (req, res) => {
   } catch (e) {
     if (DEBUG) console.error('[me.dids] error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to fetch DIDs' });
+  }
+});
+
+// Local CDR history endpoint: reads outbound from user_mb_cdrs instead of MagnusBilling
+// and inbound from user_did_cdrs. Same query params as /api/me/cdrs: page, pageSize,
+// optional from, to, did. Useful for long history and when MagnusBilling is offline.
+app.get('/api/me/cdrs/local', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    if (!userId) return res.status(401).json({ success: false, message: 'Not authenticated' });
+
+    const page = Math.max(0, parseInt(req.query.page || '0', 10));
+    const pageSize = Math.max(1, Math.min(200, parseInt(req.query.pageSize || '50', 10)));
+
+    const filters = ['user_id = ?'];
+    const params = [userId];
+
+    const fromRaw = (req.query.from || '').toString().trim();
+    const toRaw = (req.query.to || '').toString().trim();
+    const didFilter = (req.query.did || '').toString().trim();
+
+    if (fromRaw) {
+      filters.push('DATE(time_start) >= ?');
+      params.push(fromRaw);
+    }
+    if (toRaw) {
+      filters.push('DATE(time_start) <= ?');
+      params.push(toRaw);
+    }
+    if (didFilter) {
+      filters.push('did_number = ?');
+      params.push(didFilter);
+    }
+    const whereSql = filters.length ? 'WHERE ' + filters.join(' AND ') : '';
+
+    // Inbound from user_did_cdrs
+    const [inboundRows] = await pool.query(
+      `SELECT id, cdr_id, user_id, did_number, direction, src_number, dst_number,
+              time_start, time_connect, time_end, duration, billsec, price, created_at
+       FROM user_did_cdrs
+       ${whereSql}
+       ORDER BY time_start DESC, id DESC`,
+      params
+    );
+
+    const inbound = inboundRows.map(r => ({
+      id: r.id,
+      cdrId: r.cdr_id,
+      didNumber: r.did_number,
+      direction: r.direction,
+      srcNumber: r.src_number,
+      dstNumber: r.dst_number,
+      timeStart: r.time_start ? r.time_start.toISOString() : null,
+      timeConnect: r.time_connect ? r.time_connect.toISOString() : null,
+      timeEnd: r.time_end ? r.time_end.toISOString() : null,
+      duration: r.duration != null ? Number(r.duration) : null,
+      billsec: r.billsec != null ? Number(r.billsec) : null,
+      price: r.price != null ? Number(r.price) : null,
+      createdAt: r.created_at ? r.created_at.toISOString() : null
+    }));
+
+    // Outbound from user_mb_cdrs
+    const outFilters = ['user_id = ?'];
+    const outParams = [userId];
+    if (fromRaw) {
+      outFilters.push('DATE(time_start) >= ?');
+      outParams.push(fromRaw);
+    }
+    if (toRaw) {
+      outFilters.push('DATE(time_start) <= ?');
+      outParams.push(toRaw);
+    }
+    if (didFilter) {
+      outFilters.push('(did_number = ? OR dst_number = ? OR src_number = ?)');
+      outParams.push(didFilter, didFilter, didFilter);
+    }
+    const whereOutSql = outFilters.length ? 'WHERE ' + outFilters.join(' AND ') : '';
+
+    const [outRows] = await pool.query(
+      `SELECT id, cdr_id, magnus_user_id, direction, src_number, dst_number, did_number,
+              time_start, duration, billsec, price, created_at
+       FROM user_mb_cdrs
+       ${whereOutSql}
+       ORDER BY time_start DESC, id DESC`,
+      outParams
+    );
+
+    const outbound = outRows.map(r => ({
+      id: r.cdr_id ? `mb-${r.cdr_id}` : `mb-db-${r.id}`,
+      cdrId: r.cdr_id ? String(r.cdr_id) : null,
+      didNumber: r.did_number,
+      direction: r.direction || 'outbound',
+      srcNumber: r.src_number || '',
+      dstNumber: r.dst_number || '',
+      timeStart: r.time_start ? r.time_start.toISOString() : null,
+      timeConnect: null,
+      timeEnd: null,
+      duration: r.duration != null ? Number(r.duration) : (r.billsec != null ? Number(r.billsec) : null),
+      billsec: r.billsec != null ? Number(r.billsec) : (r.duration != null ? Number(r.duration) : null),
+      price: r.price != null ? Number(r.price) : null,
+      createdAt: r.created_at ? r.created_at.toISOString() : null
+    }));
+
+    let all = inbound.concat(outbound);
+
+    all.sort((a, b) => {
+      const aTs = a.timeStart ? Date.parse(a.timeStart) : (a.createdAt ? Date.parse(a.createdAt) : 0);
+      const bTs = b.timeStart ? Date.parse(b.timeStart) : (b.createdAt ? Date.parse(b.createdAt) : 0);
+      if (bTs !== aTs) return bTs - aTs;
+      const aId = String(a.id || '');
+      const bId = String(b.id || '');
+      return bId.localeCompare(aId);
+    });
+
+    const total = all.length;
+    const startIndex = page * pageSize;
+    const endIndex = startIndex + pageSize;
+    const pageRows = all.slice(startIndex, endIndex);
+
+    if (DEBUG) console.log('[me.cdrs.local]', { userId, count: pageRows.length, total });
+
+    return res.json({ success: true, data: pageRows, total, page, pageSize });
+  } catch (e) {
+    if (DEBUG) console.error('[me.cdrs.local] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to fetch local CDRs' });
   }
 });
 
@@ -2619,8 +2858,8 @@ app.get('/api/me/sip-users', requireAuth, async (req, res) => {
     // Apply client-side pagination
     const paginatedRows = allFilteredRows.slice(start, start + pageSize);
     console.log('[me.sip]', { userId: idUser, username, in: rawRows.length, filtered: allFilteredRows.length, out: paginatedRows.length, page, pageSize });
-    if (DEBUG && paginatedRows.length > 0) console.log('[me.sip.sample]', JSON.stringify(paginatedRows[0]));
-    if (DEBUG && rawRows.length > 0 && allFilteredRows.length === 0) console.warn('[me.sip] All rows filtered out. Sample raw row:', JSON.stringify(rawRows[0]));
+    if (DEBUG && paginatedRows.length > 0) console.log('[me.sip.sample]', JSON.stringify(redactSipRow(paginatedRows[0])));
+    if (DEBUG && rawRows.length > 0 && allFilteredRows.length === 0) console.warn('[me.sip] All rows filtered out. Sample raw row:', JSON.stringify(redactSipRow(rawRows[0])));
     return res.json({ success: true, data: { rows: paginatedRows, page, pageSize, total: allFilteredRows.length } });
   } catch (e) { 
     console.error('[me.sip.error]', e.message || e, e.stack);
@@ -2734,7 +2973,13 @@ app.post('/api/me/sip-users', requireAuth, async (req, res) => {
         params.append('status', '1');
         build(params);
         const path = `/index.php/${MB_SIP_MODULE}/save`;
-        if (DEBUG) console.log('[sip.create] Attempting with params:', Object.fromEntries(params.entries()));
+        if (DEBUG) {
+          const safeParams = Object.fromEntries(params.entries());
+          for (const key of ['secret','password']) {
+            if (key in safeParams) safeParams[key] = '***REDACTED***';
+          }
+          console.log('[sip.create] Attempting with params:', safeParams);
+        }
         const resp = await mbSignedCall({ relPath: path, params, httpsAgent, hostHeader });
         if (DEBUG) console.log('[sip.create] Response:', { status: resp.status, data: resp.data });
         const ok = (resp.status>=200 && resp.status<300) && (resp.data?.success===true || /success/i.test(String(resp.data)));

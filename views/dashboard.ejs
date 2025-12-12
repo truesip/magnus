@@ -552,16 +552,35 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       if (did) q.set('did', did);
 
       try{
-        const r = await fetch('/api/me/cdrs?'+q.toString());
-        const j = await r.json();
+        let j;
+        let source = 'live';
 
-        if (!j || j.success === false) {
-          const msg = j && j.message ? j.message : 'Failed to load CDRs';
-          $('#cdr-empty').textContent = msg;
-          $('#cdr-empty').style.display = 'block';
-          $('#cdr-table').style.display = 'none';
-          $('#cdr-pager').style.display = 'none';
-          return;
+        // Primary: live Magnus + inbound
+        try {
+          const r = await fetch('/api/me/cdrs?'+q.toString());
+          j = await r.json();
+          if (!j || j.success === false) {
+            throw new Error('primary CDR fetch failed or Magnus unavailable');
+          }
+        } catch (primaryErr) {
+          // Fallback: local DB-only CDRs (user_mb_cdrs + user_did_cdrs)
+          try {
+            const r2 = await fetch('/api/me/cdrs/local?'+q.toString());
+            const j2 = await r2.json();
+            if (!j2 || j2.success === false) {
+              throw j2 || primaryErr;
+            }
+            j = j2;
+            source = 'local';
+            console.warn('[loadCdr] Using local CDRs fallback (Magnus unavailable or error).');
+          } catch (fallbackErr) {
+            const msg = (j && j.message) || (fallbackErr && fallbackErr.message) || 'Failed to load CDRs';
+            $('#cdr-empty').textContent = msg;
+            $('#cdr-empty').style.display = 'block';
+            $('#cdr-table').style.display = 'none';
+            $('#cdr-pager').style.display = 'none';
+            return;
+          }
         }
 
         let rows = Array.isArray(j.data) ? j.data : grabRows(j);
