@@ -1451,10 +1451,23 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
       localOutbound = [];
     }
 
-    // If MagnusBilling is unreachable or fetch failed, fall back to outbound CDRs
-    // stored locally in user_mb_cdrs so Call History continues to work.
+    // If MagnusBilling is unreachable or returned no owned rows, fall back to
+    // outbound CDRs stored locally in user_mb_cdrs so Call History continues to work.
     if (hadMagnusError || !outbound.length) {
       outbound = localOutbound;
+
+      if (DEBUG) {
+        console.log('[me.cdrs.local.merge]', {
+          userId,
+          from: fromRaw || null,
+          to: toRaw || null,
+          did: didFilter || null,
+          magnusOutbound: magnusOutboundCount,
+          localOutbound: localOutbound.length,
+          merged: outbound.length,
+          reason: hadMagnusError ? 'magnusError' : 'noMagnusOwned'
+        });
+      }
 
       if (hadMagnusError && DEBUG) {
         console.log('[me.cdrs.magnus.fallback]', {
@@ -1495,7 +1508,8 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
           did: didFilter || null,
           magnusOutbound: magnusOutboundCount,
           localOutbound: localOutbound.length,
-          merged: outbound.length
+          merged: outbound.length,
+          reason: 'mergeMagnusAndLocal'
         });
       }
     }
@@ -1589,6 +1603,16 @@ async function loadLocalOutboundCdrs({ userId, fromRaw, toRaw, didFilter }) {
      ORDER BY time_start DESC, id DESC`,
     outParams
   );
+
+  if (DEBUG) {
+    console.log('[me.cdrs.local.query]', {
+      userId,
+      from: fromRaw || null,
+      to: toRaw || null,
+      did: didFilter || null,
+      count: outRows.length
+    });
+  }
 
   return outRows.map(r => ({
     id: r.cdr_id ? `mb-${r.cdr_id}` : `mb-db-${r.id}`,
