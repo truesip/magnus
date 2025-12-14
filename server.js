@@ -1438,66 +1438,65 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
       if (DEBUG) console.warn('[me.cdrs.magnus] fetch failed:', e.message || e);
     }
 
+    // Always load outbound CDRs from the local mirror and merge with Magnus results.
+    const magnusOutboundCount = outbound.length;
+    let localOutbound = [];
+    try {
+      localOutbound = await loadLocalOutboundCdrs({ userId, fromRaw, toRaw, didFilter });
+    } catch (localErr) {
+      if (DEBUG) console.warn(
+        '[me.cdrs.local.merge] Failed to load outbound from user_mb_cdrs:',
+        localErr.message || localErr
+      );
+      localOutbound = [];
+    }
+
     // If MagnusBilling is unreachable or fetch failed, fall back to outbound CDRs
     // stored locally in user_mb_cdrs so Call History continues to work.
-    if (hadMagnusError) {
-      try {
-        const outFilters = ['user_id = ?'];
-        const outParams = [userId];
-        if (fromRaw) {
-          outFilters.push('DATE(time_start) >= ?');
-          outParams.push(fromRaw);
-        }
-        if (toRaw) {
-          outFilters.push('DATE(time_start) <= ?');
-          outParams.push(toRaw);
-        }
-        if (didFilter) {
-          outFilters.push('(did_number = ? OR dst_number = ? OR src_number = ?)');
-          outParams.push(didFilter, didFilter, didFilter);
-        }
-        const whereOutSql = outFilters.length ? 'WHERE ' + outFilters.join(' AND ') : '';
+    if (hadMagnusError || !outbound.length) {
+      outbound = localOutbound;
 
-        const [outRows] = await pool.query(
-          `SELECT id, cdr_id, magnus_user_id, direction, src_number, dst_number, did_number,
-                  time_start, duration, billsec, price, created_at
-           FROM user_mb_cdrs
-           ${whereOutSql}
-           ORDER BY time_start DESC, id DESC`,
-          outParams
-        );
+      if (hadMagnusError && DEBUG) {
+        console.log('[me.cdrs.magnus.fallback]', {
+          userId,
+          from: fromRaw || null,
+          to: toRaw || null,
+          did: didFilter || null,
+          count: outbound.length
+        });
+      }
+    } else {
+      // Merge live Magnus CDRs with local history, de-duplicating on cdrId when available.
+      const mergedMap = new Map();
 
-        outbound = outRows.map(r => ({
-          id: r.cdr_id ? `mb-${r.cdr_id}` : `mb-db-${r.id}`,
-          cdrId: r.cdr_id ? String(r.cdr_id) : null,
-          didNumber: r.did_number,
-          direction: r.direction || 'outbound',
-          srcNumber: r.src_number || '',
-          dstNumber: r.dst_number || '',
-          timeStart: r.time_start ? r.time_start.toISOString() : null,
-          timeConnect: null,
-          timeEnd: null,
-          duration: r.duration != null ? Number(r.duration) : (r.billsec != null ? Number(r.billsec) : null),
-          billsec: r.billsec != null ? Number(r.billsec) : (r.duration != null ? Number(r.duration) : null),
-          price: r.price != null ? Number(r.price) : null,
-          createdAt: r.created_at ? r.created_at.toISOString() : null
-        }));
+      const makeKey = (row) => {
+        if (row.cdrId) return `cdr:${row.cdrId}`;
+        const ts = row.timeStart || row.createdAt || '';
+        return `row:${row.direction || ''}:${ts}:${row.srcNumber || ''}:${row.dstNumber || ''}`;
+      };
 
-        if (DEBUG) {
-          console.log('[me.cdrs.magnus.fallback]', {
-            userId,
-            from: fromRaw || null,
-            to: toRaw || null,
-            did: didFilter || null,
-            count: outbound.length
-          });
-        }
-      } catch (fallbackErr) {
-        if (DEBUG) console.warn(
-          '[me.cdrs.magnus.fallback] Failed to load outbound from user_mb_cdrs:',
-          fallbackErr.message || fallbackErr
-        );
-        outbound = [];
+      for (const r of outbound) {
+        const key = makeKey(r);
+        if (!mergedMap.has(key)) mergedMap.set(key, r);
+      }
+
+      for (const r of localOutbound) {
+        const key = makeKey(r);
+        if (!mergedMap.has(key)) mergedMap.set(key, r);
+      }
+
+      outbound = Array.from(mergedMap.values());
+
+      if (DEBUG) {
+        console.log('[me.cdrs.local.merge]', {
+          userId,
+          from: fromRaw || null,
+          to: toRaw || null,
+          did: didFilter || null,
+          magnusOutbound: magnusOutboundCount,
+          localOutbound: localOutbound.length,
+          merged: outbound.length
+        });
       }
     }
 
@@ -1559,6 +1558,53 @@ async function saveMagnusCdrsToDb({ localUserId, magnusUserId, rows, rawRows }) 
   } catch (e) {
     if (DEBUG) console.warn('[me.cdrs.magnus.store] Error while inserting outbound CDRs:', e.message || e);
   }
+}
+
+// Load outbound CDRs for a user from the local MagnusBilling mirror (user_mb_cdrs)
+// using the same date/DID filters as /api/me/cdrs and /api/me/cdrs/local.
+async function loadLocalOutboundCdrs({ userId, fromRaw, toRaw, didFilter }) {
+  if (!pool || !userId) return [];
+
+  const outFilters = ['user_id = ?'];
+  const outParams = [userId];
+  if (fromRaw) {
+    outFilters.push('DATE(time_start) >= ?');
+    outParams.push(fromRaw);
+  }
+  if (toRaw) {
+    outFilters.push('DATE(time_start) <= ?');
+    outParams.push(toRaw);
+  }
+  if (didFilter) {
+    outFilters.push('(did_number = ? OR dst_number = ? OR src_number = ?)');
+    outParams.push(didFilter, didFilter, didFilter);
+  }
+  const whereOutSql = outFilters.length ? 'WHERE ' + outFilters.join(' AND ') : '';
+
+  const [outRows] = await pool.query(
+    `SELECT id, cdr_id, magnus_user_id, direction, src_number, dst_number, did_number,
+            time_start, duration, billsec, price, created_at
+     FROM user_mb_cdrs
+     ${whereOutSql}
+     ORDER BY time_start DESC, id DESC`,
+    outParams
+  );
+
+  return outRows.map(r => ({
+    id: r.cdr_id ? `mb-${r.cdr_id}` : `mb-db-${r.id}`,
+    cdrId: r.cdr_id ? String(r.cdr_id) : null,
+    didNumber: r.did_number,
+    direction: r.direction || 'outbound',
+    srcNumber: r.src_number || '',
+    dstNumber: r.dst_number || '',
+    timeStart: r.time_start ? r.time_start.toISOString() : null,
+    timeConnect: null,
+    timeEnd: null,
+    duration: r.duration != null ? Number(r.duration) : (r.billsec != null ? Number(r.billsec) : null),
+    billsec: r.billsec != null ? Number(r.billsec) : (r.duration != null ? Number(r.duration) : null),
+    price: r.price != null ? Number(r.price) : null,
+    createdAt: r.created_at ? r.created_at.toISOString() : null
+  }));
 }
 
 // Simple list of the logged-in user's DIDs from local DB (used for Call History DID filter)
@@ -1640,46 +1686,13 @@ app.get('/api/me/cdrs/local', requireAuth, async (req, res) => {
     }));
 
     // Outbound from user_mb_cdrs
-    const outFilters = ['user_id = ?'];
-    const outParams = [userId];
-    if (fromRaw) {
-      outFilters.push('DATE(time_start) >= ?');
-      outParams.push(fromRaw);
+    let outbound = [];
+    try {
+      outbound = await loadLocalOutboundCdrs({ userId, fromRaw, toRaw, didFilter });
+    } catch (e) {
+      if (DEBUG) console.warn('[me.cdrs.local] Failed to load outbound from user_mb_cdrs:', e.message || e);
+      outbound = [];
     }
-    if (toRaw) {
-      outFilters.push('DATE(time_start) <= ?');
-      outParams.push(toRaw);
-    }
-    if (didFilter) {
-      outFilters.push('(did_number = ? OR dst_number = ? OR src_number = ?)');
-      outParams.push(didFilter, didFilter, didFilter);
-    }
-    const whereOutSql = outFilters.length ? 'WHERE ' + outFilters.join(' AND ') : '';
-
-    const [outRows] = await pool.query(
-      `SELECT id, cdr_id, magnus_user_id, direction, src_number, dst_number, did_number,
-              time_start, duration, billsec, price, created_at
-       FROM user_mb_cdrs
-       ${whereOutSql}
-       ORDER BY time_start DESC, id DESC`,
-      outParams
-    );
-
-    const outbound = outRows.map(r => ({
-      id: r.cdr_id ? `mb-${r.cdr_id}` : `mb-db-${r.id}`,
-      cdrId: r.cdr_id ? String(r.cdr_id) : null,
-      didNumber: r.did_number,
-      direction: r.direction || 'outbound',
-      srcNumber: r.src_number || '',
-      dstNumber: r.dst_number || '',
-      timeStart: r.time_start ? r.time_start.toISOString() : null,
-      timeConnect: null,
-      timeEnd: null,
-      duration: r.duration != null ? Number(r.duration) : (r.billsec != null ? Number(r.billsec) : null),
-      billsec: r.billsec != null ? Number(r.billsec) : (r.duration != null ? Number(r.duration) : null),
-      price: r.price != null ? Number(r.price) : null,
-      createdAt: r.created_at ? r.created_at.toISOString() : null
-    }));
 
     let all = inbound.concat(outbound);
 
