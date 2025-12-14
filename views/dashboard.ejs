@@ -310,8 +310,8 @@
           <input id="newSipPass" type="password" placeholder="Enter a secure password" style="width:100%;box-sizing:border-box">
         </div>
         <div style="margin-bottom:16px">
-          <label style="display:block;margin-bottom:4px;font-size:13px">Caller ID * <span class="muted">(numbers only, max 11 digits)</span></label>
-          <input id="newSipCID" type="text" placeholder="e.g. 12025551234" inputmode="numeric" pattern="\d{1,11}" style="width:100%;box-sizing:border-box">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Caller ID * <span class="muted">(numbers only, 11 digits)</span></label>
+          <input id="newSipCID" type="text" placeholder="e.g. 12025551234" inputmode="numeric" pattern="\d{11}" style="width:100%;box-sizing:border-box">
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
           <button id="cancelSipBtn" style="background:#6b7280">Cancel</button>
@@ -328,8 +328,8 @@
           <input id="newTrunkName" type="text" placeholder="e.g. Office Forward" style="width:100%;box-sizing:border-box">
         </div>
         <div style="margin-bottom:12px">
-          <label style="display:block;margin-bottom:4px;font-size:13px">PSTN Number * <span class="muted">(10-11 digits)</span></label>
-          <input id="newTrunkDst" type="tel" placeholder="e.g. 12125551234" inputmode="tel" pattern="\d{10,11}" style="width:100%;box-sizing:border-box">
+          <label style="display:block;margin-bottom:4px;font-size:13px">PSTN Number * <span class="muted">(11 digits)</span></label>
+          <input id="newTrunkDst" type="tel" placeholder="e.g. 12125551234" inputmode="tel" pattern="\d{11}" style="width:100%;box-sizing:border-box">
         </div>
         <div style="margin-bottom:12px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Description</label>
@@ -744,7 +744,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     $('#confirmSipBtn').addEventListener('click', async ()=>{
       const sipUser=$('#newSipUser').value.trim(); const password=$('#newSipPass').value; const callerid=$('#newSipCID').value.trim();
       if (!sipUser || !password) return alert('SIP username and password required');
-      if (!/^\d{1,11}$/.test(callerid)) return alert('CallerID must be numbers only, maximum 11 digits');
+      if (!/^\d{11}$/.test(callerid)) return alert('CallerID must be numbers only, exactly 11 digits');
       
       $('#confirmSipBtn').disabled = true;
       $('#confirmSipBtn').textContent = 'Creating...';
@@ -781,7 +781,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       if (ev.target && ev.target.classList.contains('save-cid')){
         const id = ev.target.getAttribute('data-id'); const input = document.querySelector(`input.cid-input[data-id="${CSS.escape(id)}"]`);
         const callerid = input.value.trim();
-        if (!/^\d{1,11}$/.test(callerid)) { alert('CallerID must be numbers only, maximum 11 digits'); return; }
+        if (!/^\d{11}$/.test(callerid)) { alert('CallerID must be numbers only, exactly 11 digits'); return; }
         const r = await fetch(`/api/me/sip-users/${encodeURIComponent(id)}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ callerid }) });
         const j = await r.json(); 
         if (!j.success) return alert(j.message||'Update failed');
@@ -977,7 +977,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       
       if (!name) return alert('Trunk name is required');
       if (!dst) return alert('PSTN destination number is required');
-      if (!/^\d{10,11}$/.test(dst)) return alert('PSTN number must be 10-11 digits only');
+      if (!/^\d{11}$/.test(dst)) return alert('PSTN number must be 11 digits only');
       
       $('#confirmTrunkBtn').disabled = true;
       $('#confirmTrunkBtn').textContent = trunkEditMode ? 'Saving...' : 'Creating...';

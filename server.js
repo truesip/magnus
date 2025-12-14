@@ -2947,7 +2947,7 @@ app.post('/api/me/sip-users', requireAuth, async (req, res) => {
     
     const { sipUser, password, callerid } = req.body || {};
     if (!sipUser || !password) return res.status(400).json({ success: false, message: 'sipUser and password are required' });
-    if (!callerid || !/^\d{1,11}$/.test(String(callerid))) return res.status(400).json({ success: false, message: 'CallerID must be numbers only, maximum 11 digits.' });
+    if (!callerid || !/^\d{11}$/.test(String(callerid))) return res.status(400).json({ success: false, message: 'CallerID must be numbers only, exactly 11 digits.' });
     
     // Server-side availability check to prevent duplicates
     try {
@@ -3468,6 +3468,9 @@ app.post('/api/me/didww/trunks', requireAuth, async (req, res) => {
     if (!dst) {
       return res.status(400).json({ success: false, message: 'PSTN destination number is required' });
     }
+    if (!/^\d{11}$/.test(String(dst))) {
+      return res.status(400).json({ success: false, message: 'PSTN destination number must be 11 digits (numbers only).' });
+    }
     
     // Build attributes with required PSTN configuration
     const attributes = {
@@ -3544,6 +3547,9 @@ app.patch('/api/me/didww/trunks/:id', requireAuth, async (req, res) => {
     const { name, description, capacity_limit, dst } = req.body || {};
     
     const attributes = {};
+    if (dst && !/^\d{11}$/.test(String(dst))) {
+      return res.status(400).json({ success: false, message: 'PSTN destination number must be 11 digits (numbers only).' });
+    }
     if (name) attributes.name = name;
     if (description !== undefined) attributes.description = description;
     if (capacity_limit !== undefined) attributes.capacity_limit = capacity_limit;
@@ -4773,6 +4779,9 @@ app.post('/api/verify-email', async (req, res) => {
     const { username, password, firstname, lastname, email, phone } = req.body || {};
     if (!username || !password || !firstname || !lastname || !email) {
       return res.status(400).json({ success: false, message: 'All fields are required: username, password, firstname, lastname, email' });
+    }
+    if (!phone || !/^\d{11}$/.test(String(phone))) {
+      return res.status(400).json({ success: false, message: 'Phone number is required and must be 11 digits (numbers only).' });
     }
     if (!usernameIsAlnumMax10(username)) {
       return res.status(400).json({ success: false, message: 'Username must be letters and numbers only, maximum 10 characters.' });
