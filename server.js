@@ -18,6 +18,7 @@ const mysql = require('mysql2/promise');
 const session = require('express-session');
 const MySQLStore = require('express-mysql-session')(session);
 const bcrypt = require('bcryptjs');
+const rateLimit = require('express-rate-limit');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -324,10 +325,30 @@ app.use('/api/admin', (req, res, next) => { noCache(res); next(); });
 
 // Email verification store (MySQL)
 const OTP_TTL_MS = (parseInt(process.env.EMAIL_VERIFICATION_TTL_MINUTES) || 10) * 60 * 1000;
+const OTP_MAX_ATTEMPTS = parseInt(process.env.OTP_MAX_ATTEMPTS || '5', 10);
 function otp() { return String(Math.floor(100000 + Math.random() * 900000)); }
 function sha256(s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); }
 let pool;
 let sessionStore;
+
+// Basic rate limits (per IP)
+// Login: allow moderate retries without being too strict (20 per 15 minutes)
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many login attempts. Please try again later.' }
+});
+
+// OTP-related endpoints: keep much stricter (3 per 10 minutes)
+const otpLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many verification attempts. Please try again later.' }
+});
 async function initDb() {
   const dsn = process.env.DATABASE_URL;
   if (!dsn) return; // DB optional; if missing, endpoints will throw when used
@@ -376,6 +397,7 @@ async function initDb() {
     code_hash CHAR(64) NOT NULL,
     expires_at BIGINT NOT NULL,
     used TINYINT(1) NOT NULL DEFAULT 0,
+    attempts INT NOT NULL DEFAULT 0,
     username VARCHAR(80) NOT NULL,
     password VARCHAR(255) NOT NULL,
     firstname VARCHAR(80) NOT NULL,
@@ -383,6 +405,37 @@ async function initDb() {
     phone VARCHAR(40) NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`);
+  // Ensure email_verifications.password is large enough for bcrypt hashes and attempts column exists
+  try {
+    const [pwdCol] = await pool.query(
+      "SELECT CHARACTER_MAXIMUM_LENGTH AS len FROM information_schema.columns WHERE table_schema=? AND table_name='email_verifications' AND column_name='password' LIMIT 1",
+      [dbName]
+    );
+    const col = pwdCol && pwdCol[0];
+    if (!col || (col.len != null && col.len < 60)) {
+      try {
+        await pool.query('ALTER TABLE email_verifications MODIFY COLUMN password VARCHAR(255) NOT NULL');
+        if (DEBUG) console.log('[schema] Upgraded email_verifications.password to VARCHAR(255) for bcrypt hashes');
+      } catch (e) {
+        if (DEBUG) console.warn('[schema] Failed to alter email_verifications.password length:', e.message || e);
+      }
+    }
+    // Ensure attempts column exists for per-token OTP attempt tracking
+    try {
+      const [attemptCol] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='email_verifications' AND column_name='attempts' LIMIT 1",
+        [dbName]
+      );
+      if (!attemptCol || !attemptCol.length) {
+        await pool.query('ALTER TABLE email_verifications ADD COLUMN attempts INT NOT NULL DEFAULT 0 AFTER used');
+        if (DEBUG) console.log('[schema] Added email_verifications.attempts column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] email_verifications.attempts check failed', e.message || e);
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[schema] email_verifications.password length check failed', e.message || e);
+  }
   await pool.query(`CREATE TABLE IF NOT EXISTS signup_users (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     magnus_user_id VARCHAR(64) NULL,
@@ -671,8 +724,11 @@ async function initDb() {
 }
 async function storeVerification({ token, codeHash, email, expiresAt, fields }) {
   if (!pool) throw new Error('Database not configured');
+  // Store a bcrypt hash of the password instead of plaintext
+  const saltRounds = 10;
+  const passwordHash = await bcrypt.hash(String(fields.password || ''), saltRounds);
   const sql = `INSERT INTO email_verifications (token,email,code_hash,expires_at,used,username,password,firstname,lastname,phone) VALUES (?,?,?,?,0,?,?,?,?,?)`;
-  await pool.execute(sql, [token, email, codeHash, expiresAt, fields.username, fields.password, fields.firstname, fields.lastname, fields.phone || null]);
+  await pool.execute(sql, [token, email, codeHash, expiresAt, fields.username, passwordHash, fields.firstname, fields.lastname, fields.phone || null]);
 }
 async function fetchVerification(token) {
   if (!pool) throw new Error('Database not configured');
@@ -973,7 +1029,7 @@ app.get('/login', (req, res) => {
   if (req.session && req.session.userId) return res.redirect('/dashboard');
   res.render('login', { error: null });
 });
-app.post('/login', async (req, res) => {
+app.post('/login', loginLimiter, async (req, res) => {
   try {
     const { email, username, password } = req.body || {};
     const ident = (email || username || '').trim();
@@ -4774,7 +4830,7 @@ app.delete('/api/me/didww/dids/:id', requireAuth, async (req, res) => {
 });
 
 // Email verification: start
-app.post('/api/verify-email', async (req, res) => {
+app.post('/api/verify-email', otpLimiter, async (req, res) => {
   try {
     const { username, password, firstname, lastname, email, phone } = req.body || {};
     if (!username || !password || !firstname || !lastname || !email) {
@@ -4803,7 +4859,7 @@ app.post('/api/verify-email', async (req, res) => {
     };
     await storeVerification({ token, codeHash: record.codeHash, email, expiresAt: record.expiresAt, fields: record.fields });
     await sendVerificationEmail(email, code);
-    if (DEBUG) console.debug('Verification code sent', { email, token, code });
+    if (DEBUG) console.debug('Verification code sent', { email, token });
     return res.status(200).json({ success: true, token });
   } catch (err) {
     console.error('verify-email error', err.message || err);
@@ -4812,7 +4868,7 @@ app.post('/api/verify-email', async (req, res) => {
 });
 
 // Email verification: complete -> create account
-app.post('/api/complete-signup', async (req, res) => {
+app.post('/api/complete-signup', otpLimiter, async (req, res) => {
   try {
 const { token, code } = req.body || {};
     if (DEBUG) console.log('[complete-signup] Request received:', { token, hasCode: !!code });
@@ -4821,20 +4877,51 @@ const rec = await fetchVerification(token);
     if (!rec) { if (DEBUG) console.log('[complete-signup] No record found for token:', token); return res.status(400).json({ success: false, message: 'Invalid or expired token' }); }
     if (rec.used) { if (DEBUG) console.log('[complete-signup] Code already used:', { token, email: rec.email }); return res.status(400).json({ success: false, message: 'This code was already used' }); }
     if (Date.now() > Number(rec.expires_at)) { if (DEBUG) console.log('[complete-signup] Code expired:', { token, email: rec.email, expiresAt: rec.expires_at, now: Date.now() }); await markVerificationUsed(token); return res.status(400).json({ success: false, message: 'Code expired, please request a new one' }); }
-    if (sha256(code) !== rec.code_hash) { if (DEBUG) console.log('[complete-signup] Code mismatch:', { token, email: rec.email, submittedCode: code, submittedHash: sha256(code), storedHash: rec.code_hash }); return res.status(400).json({ success: false, message: 'Invalid code' }); }
+    const attempts = Number(rec.attempts || 0);
+    if (attempts >= OTP_MAX_ATTEMPTS) {
+      if (DEBUG) console.log('[complete-signup] Too many OTP attempts for token:', { token, email: rec.email, attempts });
+      await markVerificationUsed(token);
+      return res.status(400).json({ success: false, message: 'Too many invalid attempts. Please request a new verification code.' });
+    }
+    if (sha256(code) !== rec.code_hash) {
+      if (DEBUG) console.log('[complete-signup] Code mismatch:', { token, email: rec.email, submittedCode: code, submittedHash: sha256(code), storedHash: rec.code_hash });
+      try {
+        await pool.execute('UPDATE email_verifications SET attempts = attempts + 1 WHERE token = ?', [token]);
+      } catch (e) {
+        if (DEBUG) console.warn('[complete-signup] Failed to increment OTP attempts:', e.message || e);
+      }
+      if (attempts + 1 >= OTP_MAX_ATTEMPTS) {
+        try { await markVerificationUsed(token); } catch {}
+        return res.status(400).json({ success: false, message: 'Too many invalid attempts. Please request a new verification code.' });
+      }
+      return res.status(400).json({ success: false, message: 'Invalid code' });
+    }
     if (DEBUG) console.log('[complete-signup] Code validated successfully:', { token, email: rec.email });
     // Don't mark as used yet - only after successful account creation
 
     // proceed to create account using the same logic as /api/signup
-    const { username, password, firstname, lastname, email, phone } = rec;
+    const { username, password: storedPassword, firstname, lastname, email, phone } = rec;
     if (DEBUG) console.log('[complete-signup] Creating account for:', { username, email });
     if (!usernameIsAlnumMax10(username)) {
       if (DEBUG) console.log('[complete-signup] Username validation failed');
       return res.status(400).json({ success: false, message: 'Username must be letters and numbers only, maximum 10 characters.' });
     }
-    if (!passwordIsAlnumMax10(password)) {
+    // We now store a bcrypt hash in email_verifications.password. To remain compatible
+    // with older records that may have stored plaintext, detect the format.
+    let plainPassword = '';
+    const pwdField = String(storedPassword || '');
+    const looksLikeBcrypt = pwdField.startsWith('$2a$') || pwdField.startsWith('$2b$') || pwdField.startsWith('$2y$');
+    if (looksLikeBcrypt) {
+      // For a pure signup flow we expect plaintext at this stage. If we only have a hash,
+      // we cannot recover the original, so we reject with a clear error.
+      if (DEBUG) console.log('[complete-signup] Stored password appears to be a hash; refusing to proceed');
+      return res.status(400).json({ success: false, message: 'Stored verification record is invalid. Please restart signup.' });
+    } else {
+      plainPassword = pwdField;
+    }
+    if (!passwordIsAlnumMax10(plainPassword)) {
       if (DEBUG) console.log('[complete-signup] Password validation failed');
-      return res.status(400).json({ success: false, message: 'Password must be letters and numbers only, at least 10 characters.' });
+      return res.status(400).json({ success: false, message: 'Password must be letters and numbers only, maximum 10 characters.' });
     }
     const availability = await checkAvailability({ username, email });
     if (DEBUG) console.log('[complete-signup] Availability check:', availability);
@@ -4846,7 +4933,7 @@ const rec = await fetchVerification(token);
     // Prepare user fields (MagnusBilling expects form-encoded fields, not JSON)
     const fields = {
       username,
-      password,
+      password: plainPassword,
       active: '1',
       id_group: parseInt(process.env.DEFAULT_GROUP_ID) || 3,
       id_plan: parseInt(process.env.DEFAULT_PLAN_ID) || 1,
