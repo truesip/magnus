@@ -724,15 +724,19 @@ async function initDb() {
 }
 async function storeVerification({ token, codeHash, email, expiresAt, fields }) {
   if (!pool) throw new Error('Database not configured');
-  // Store a bcrypt hash of the password instead of plaintext
-  const saltRounds = 10;
-  const passwordHash = await bcrypt.hash(String(fields.password || ''), saltRounds);
+  // Store plaintext password (legacy behavior). NOTE: less secure; consider encrypting in future.
+  const plainPassword = String(fields.password || '');
   const sql = `INSERT INTO email_verifications (token,email,code_hash,expires_at,used,username,password,firstname,lastname,phone) VALUES (?,?,?,?,0,?,?,?,?,?)`;
-  await pool.execute(sql, [token, email, codeHash, expiresAt, fields.username, passwordHash, fields.firstname, fields.lastname, fields.phone || null]);
+  await pool.execute(sql, [token, email, codeHash, expiresAt, fields.username, plainPassword, fields.firstname, fields.lastname, fields.phone || null]);
 }
 async function fetchVerification(token) {
   if (!pool) throw new Error('Database not configured');
   const [rows] = await pool.execute('SELECT * FROM email_verifications WHERE token=?', [token]);
+  return rows[0];
+}
+async function fetchVerificationLatestByEmail(email) {
+  if (!pool) throw new Error('Database not configured');
+  const [rows] = await pool.execute('SELECT * FROM email_verifications WHERE email=? AND used=0 AND expires_at>=? ORDER BY expires_at DESC LIMIT 1', [email, Date.now()]);
   return rows[0];
 }
 async function markVerificationUsed(token) {
@@ -4870,13 +4874,24 @@ app.post('/api/verify-email', otpLimiter, async (req, res) => {
 // Email verification: complete -> create account
 app.post('/api/complete-signup', otpLimiter, async (req, res) => {
   try {
-const { token, code } = req.body || {};
-    if (DEBUG) console.log('[complete-signup] Request received:', { token, hasCode: !!code });
-    if (!token || !code) { if (DEBUG) console.log('[complete-signup] Missing token or code'); return res.status(400).json({ success: false, message: 'token and code are required' }); }
-const rec = await fetchVerification(token);
-    if (!rec) { if (DEBUG) console.log('[complete-signup] No record found for token:', token); return res.status(400).json({ success: false, message: 'Invalid or expired token' }); }
+    const { token, code, email: reqEmail } = req.body || {};
+    if (DEBUG) console.log('[complete-signup] Request received:', { token, hasCode: !!code, hasEmail: !!reqEmail });
+    if (!code) { return res.status(400).json({ success: false, message: 'code is required' }); }
+    // Support legacy flow (email+code) and token+code. Prefer token when provided.
+    let rec = null;
+    if (token) {
+      rec = await fetchVerification(token);
+      if (!rec) { if (DEBUG) console.log('[complete-signup] No record found for token:', token); return res.status(400).json({ success: false, message: 'Invalid or expired token' }); }
+    } else if (reqEmail) {
+      rec = await fetchVerificationLatestByEmail(reqEmail);
+      if (!rec) { if (DEBUG) console.log('[complete-signup] No active record for email:', reqEmail); return res.status(400).json({ success: false, message: 'Invalid or expired code' }); }
+    } else {
+      return res.status(400).json({ success: false, message: 'email or token is required with code' });
+    }
+    // Ensure we have token for attempts/used updates
+    const activeToken = rec.token;
     if (rec.used) { if (DEBUG) console.log('[complete-signup] Code already used:', { token, email: rec.email }); return res.status(400).json({ success: false, message: 'This code was already used' }); }
-    if (Date.now() > Number(rec.expires_at)) { if (DEBUG) console.log('[complete-signup] Code expired:', { token, email: rec.email, expiresAt: rec.expires_at, now: Date.now() }); await markVerificationUsed(token); return res.status(400).json({ success: false, message: 'Code expired, please request a new one' }); }
+    if (Date.now() > Number(rec.expires_at)) { if (DEBUG) console.log('[complete-signup] Code expired:', { token: activeToken, email: rec.email, expiresAt: rec.expires_at, now: Date.now() }); await markVerificationUsed(activeToken); return res.status(400).json({ success: false, message: 'Code expired, please request a new one' }); }
     const attempts = Number(rec.attempts || 0);
     if (attempts >= OTP_MAX_ATTEMPTS) {
       if (DEBUG) console.log('[complete-signup] Too many OTP attempts for token:', { token, email: rec.email, attempts });
@@ -4884,49 +4899,39 @@ const rec = await fetchVerification(token);
       return res.status(400).json({ success: false, message: 'Too many invalid attempts. Please request a new verification code.' });
     }
     if (sha256(code) !== rec.code_hash) {
-      if (DEBUG) console.log('[complete-signup] Code mismatch:', { token, email: rec.email, submittedCode: code, submittedHash: sha256(code), storedHash: rec.code_hash });
+      if (DEBUG) console.log('[complete-signup] Code mismatch:', { token: activeToken, email: rec.email, submittedCode: code, submittedHash: sha256(code), storedHash: rec.code_hash });
       try {
-        await pool.execute('UPDATE email_verifications SET attempts = attempts + 1 WHERE token = ?', [token]);
+        await pool.execute('UPDATE email_verifications SET attempts = attempts + 1 WHERE token = ?', [activeToken]);
       } catch (e) {
         if (DEBUG) console.warn('[complete-signup] Failed to increment OTP attempts:', e.message || e);
       }
       if (attempts + 1 >= OTP_MAX_ATTEMPTS) {
-        try { await markVerificationUsed(token); } catch {}
+        try { await markVerificationUsed(activeToken); } catch {}
         return res.status(400).json({ success: false, message: 'Too many invalid attempts. Please request a new verification code.' });
       }
       return res.status(400).json({ success: false, message: 'Invalid code' });
     }
-    if (DEBUG) console.log('[complete-signup] Code validated successfully:', { token, email: rec.email });
+    if (DEBUG) console.log('[complete-signup] Code validated successfully:', { token: activeToken, email: rec.email });
     // Don't mark as used yet - only after successful account creation
 
   // proceed to create account using the same logic as /api/signup
   const { username, firstname, lastname, email, phone } = rec;
-  const providedPassword = String((req.body && req.body.password) || '');
   if (DEBUG) console.log('[complete-signup] Creating account for:', { username, email });
   if (!usernameIsAlnumMax10(username)) {
     if (DEBUG) console.log('[complete-signup] Username validation failed');
     return res.status(400).json({ success: false, message: 'Username must be letters and numbers only, maximum 10 characters.' });
   }
-  // Password handling: we stored a bcrypt hash during verify-email. Require the user
-  // to send the same plaintext password again and verify it against the stored hash.
-  if (!providedPassword) {
-    return res.status(400).json({ success: false, message: 'Password is required to complete signup.' });
+  // Using stored plaintext password (legacy behavior)
+  let plainPassword = String(rec.password || '');
+  const looksLikeBcrypt = plainPassword.startsWith('$2a$') || plainPassword.startsWith('$2b$') || plainPassword.startsWith('$2y$');
+  if (looksLikeBcrypt || !plainPassword) {
+    if (DEBUG) console.log('[complete-signup] Stored password appears to be a hash/empty; cannot proceed');
+    return res.status(400).json({ success: false, message: 'Stored verification record is invalid. Please restart signup.' });
   }
-  if (!passwordIsAlnumMax10(providedPassword)) {
+  if (!passwordIsAlnumMax10(plainPassword)) {
     if (DEBUG) console.log('[complete-signup] Password validation failed');
     return res.status(400).json({ success: false, message: 'Password must be letters and numbers only, maximum 10 characters.' });
   }
-  try {
-    const matches = await bcrypt.compare(providedPassword, String(rec.password || ''));
-    if (!matches) {
-      if (DEBUG) console.log('[complete-signup] Provided password does not match stored hash');
-      return res.status(400).json({ success: false, message: 'Password mismatch. Please use the same password you verified earlier.' });
-    }
-  } catch (e) {
-    if (DEBUG) console.warn('[complete-signup] bcrypt compare failed:', e.message || e);
-    return res.status(500).json({ success: false, message: 'Server error validating password' });
-  }
-  const plainPassword = providedPassword;
 
   const availability = await checkAvailability({ username, email });
   if (DEBUG) console.log('[complete-signup] Availability check:', availability);
@@ -4994,7 +4999,7 @@ if (response.status >= 200 && response.status < 300) {
         const createdId = result?.data?.id || result?.data?.id_user || result?.id || result?.rows?.[0]?.id_user;
         if (DEBUG) console.log('[complete-signup] Account created in MagnusBilling:', { userId: createdId, username });
         // Mark verification as used now that account creation succeeded
-        try { await markVerificationUsed(token); } catch (e) { if (DEBUG) console.warn('Failed to mark verification as used:', e.message); }
+        try { await markVerificationUsed(activeToken); } catch (e) { if (DEBUG) console.warn('Failed to mark verification as used:', e.message); }
         try { await purgeExpired(); } catch {}
         // Save to local DB for future availability checks (store password hash for app login)
         let passwordHash = null; try { passwordHash = await bcrypt.hash(plainPassword, 12); } catch {}

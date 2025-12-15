@@ -490,7 +490,7 @@ const result = await response.json();
                 if (!code) return showAlert('Enter the verification code.', 'error');
                 submitBtn.disabled = true;
                 try {
-                    const resp = await fetch('/api/complete-signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: data.token, code }) });
+const resp = await fetch('/api/complete-signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: data.email, code }) });
                     const resj = await resp.json();
                     if (resj.success) {
                         renderSuccess({ username: resj.data?.username, password: resj.data?.password, sipDomain: resj.data?.sipDomain, portalUrl: resj.data?.portalUrl });
