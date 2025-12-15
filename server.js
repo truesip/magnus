@@ -4899,36 +4899,41 @@ const rec = await fetchVerification(token);
     if (DEBUG) console.log('[complete-signup] Code validated successfully:', { token, email: rec.email });
     // Don't mark as used yet - only after successful account creation
 
-    // proceed to create account using the same logic as /api/signup
-    const { username, password: storedPassword, firstname, lastname, email, phone } = rec;
-    if (DEBUG) console.log('[complete-signup] Creating account for:', { username, email });
-    if (!usernameIsAlnumMax10(username)) {
-      if (DEBUG) console.log('[complete-signup] Username validation failed');
-      return res.status(400).json({ success: false, message: 'Username must be letters and numbers only, maximum 10 characters.' });
+  // proceed to create account using the same logic as /api/signup
+  const { username, firstname, lastname, email, phone } = rec;
+  const providedPassword = String((req.body && req.body.password) || '');
+  if (DEBUG) console.log('[complete-signup] Creating account for:', { username, email });
+  if (!usernameIsAlnumMax10(username)) {
+    if (DEBUG) console.log('[complete-signup] Username validation failed');
+    return res.status(400).json({ success: false, message: 'Username must be letters and numbers only, maximum 10 characters.' });
+  }
+  // Password handling: we stored a bcrypt hash during verify-email. Require the user
+  // to send the same plaintext password again and verify it against the stored hash.
+  if (!providedPassword) {
+    return res.status(400).json({ success: false, message: 'Password is required to complete signup.' });
+  }
+  if (!passwordIsAlnumMax10(providedPassword)) {
+    if (DEBUG) console.log('[complete-signup] Password validation failed');
+    return res.status(400).json({ success: false, message: 'Password must be letters and numbers only, maximum 10 characters.' });
+  }
+  try {
+    const matches = await bcrypt.compare(providedPassword, String(rec.password || ''));
+    if (!matches) {
+      if (DEBUG) console.log('[complete-signup] Provided password does not match stored hash');
+      return res.status(400).json({ success: false, message: 'Password mismatch. Please use the same password you verified earlier.' });
     }
-    // We now store a bcrypt hash in email_verifications.password. To remain compatible
-    // with older records that may have stored plaintext, detect the format.
-    let plainPassword = '';
-    const pwdField = String(storedPassword || '');
-    const looksLikeBcrypt = pwdField.startsWith('$2a$') || pwdField.startsWith('$2b$') || pwdField.startsWith('$2y$');
-    if (looksLikeBcrypt) {
-      // For a pure signup flow we expect plaintext at this stage. If we only have a hash,
-      // we cannot recover the original, so we reject with a clear error.
-      if (DEBUG) console.log('[complete-signup] Stored password appears to be a hash; refusing to proceed');
-      return res.status(400).json({ success: false, message: 'Stored verification record is invalid. Please restart signup.' });
-    } else {
-      plainPassword = pwdField;
-    }
-    if (!passwordIsAlnumMax10(plainPassword)) {
-      if (DEBUG) console.log('[complete-signup] Password validation failed');
-      return res.status(400).json({ success: false, message: 'Password must be letters and numbers only, maximum 10 characters.' });
-    }
-    const availability = await checkAvailability({ username, email });
-    if (DEBUG) console.log('[complete-signup] Availability check:', availability);
-    if (!availability.usernameAvailable || !availability.emailAvailable) {
-      if (DEBUG) console.log('[complete-signup] Username or email already taken');
-      return res.status(409).json({ success: false, message: 'Username or email already exists', availability });
-    }
+  } catch (e) {
+    if (DEBUG) console.warn('[complete-signup] bcrypt compare failed:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Server error validating password' });
+  }
+  const plainPassword = providedPassword;
+
+  const availability = await checkAvailability({ username, email });
+  if (DEBUG) console.log('[complete-signup] Availability check:', availability);
+  if (!availability.usernameAvailable || !availability.emailAvailable) {
+    if (DEBUG) console.log('[complete-signup] Username or email already taken');
+    return res.status(409).json({ success: false, message: 'Username or email already exists', availability });
+  }
 
     // Prepare user fields (MagnusBilling expects form-encoded fields, not JSON)
     const fields = {
@@ -4992,11 +4997,11 @@ if (response.status >= 200 && response.status < 300) {
         try { await markVerificationUsed(token); } catch (e) { if (DEBUG) console.warn('Failed to mark verification as used:', e.message); }
         try { await purgeExpired(); } catch {}
         // Save to local DB for future availability checks (store password hash for app login)
-        let passwordHash = null; try { passwordHash = await bcrypt.hash(password, 12); } catch {}
+        let passwordHash = null; try { passwordHash = await bcrypt.hash(plainPassword, 12); } catch {}
         try { await saveUserRow({ magnusUserId: createdId, username, email, firstname, lastname, phone, passwordHash }); } catch (e) { if (DEBUG) console.warn('Save user failed', e.message || e); }
-        try { await sendWelcomeEmail(email, username, sipDomain, process.env.MAGNUSBILLING_URL, password); } catch (e) { if (DEBUG) console.warn('Welcome email failed', e.message || e); }
+        try { await sendWelcomeEmail(email, username, sipDomain, process.env.MAGNUSBILLING_URL, plainPassword); } catch (e) { if (DEBUG) console.warn('Welcome email failed', e.message || e); }
         if (DEBUG) console.log('[complete-signup] Signup complete! Returning success.');
-        return res.status(200).json({ success: true, message: 'Account created successfully!', data: { username, userId: createdId, sipDomain, portalUrl: process.env.MAGNUSBILLING_URL, password } });
+        return res.status(200).json({ success: true, message: 'Account created successfully!', data: { username, userId: createdId, sipDomain, portalUrl: process.env.MAGNUSBILLING_URL, password: plainPassword } });
       }
       if (DEBUG) console.log('[complete-signup] MagnusBilling returned non-success:', result);
       // Extract error message from MagnusBilling response
