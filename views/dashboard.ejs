@@ -142,13 +142,13 @@
   <div class="wrap">
     <aside>
       <a href="#overview" id="tab-overview" class="active">📊 Overview</a>
-      <a href="#profile" id="tab-profile">👤 Profile</a>
       <a href="#sip" id="tab-sip">📞 SIP Account</a>
       <a href="#mydids" id="tab-mydids">📱 My Numbers</a>
       <a href="#buydid" id="tab-buydid">🛒 Buy Numbers</a>
       <a href="#trunk" id="tab-trunk">↪️ Call Forwarding</a>
       <a href="#cdr" id="tab-cdr">📈 Call History</a>
       <a href="#billing" id="tab-billing">💳 Billing History</a>
+      <a href="#profile" id="tab-profile">👤 Profile</a>
       <div class="sidebar-user">Signed in as <strong><%= username %></strong></div>
     </aside>
     <main>
@@ -163,10 +163,12 @@
             <div class="kpi-card">
               <div class="kpi-label">Inbound Calls</div>
               <div class="kpi-value" id="kpiInbound">–</div>
+              <div class="kpi-sub" id="kpiInboundToday"></div>
             </div>
             <div class="kpi-card">
               <div class="kpi-label">Outbound Calls</div>
               <div class="kpi-value" id="kpiOutbound">–</div>
+              <div class="kpi-sub" id="kpiOutboundToday"></div>
             </div>
             <div class="kpi-card">
               <div class="kpi-label">SIP Accounts</div>
@@ -439,12 +441,22 @@
         const elTotalDids = document.getElementById('kpiTotalDids');
         const elInbound = document.getElementById('kpiInbound');
         const elOutbound = document.getElementById('kpiOutbound');
+        const elInboundToday = document.getElementById('kpiInboundToday');
+        const elOutboundToday = document.getElementById('kpiOutboundToday');
         const elSipTotal = document.getElementById('kpiSipTotal');
         const elSipOnline = document.getElementById('kpiSipOnline');
         const elRange = document.getElementById('statsRangeText');
         if (elTotalDids) elTotalDids.textContent = (k.totalDids != null ? String(k.totalDids) : '–');
         if (elInbound) elInbound.textContent = (k.inboundCount != null ? String(k.inboundCount) : '–');
         if (elOutbound) elOutbound.textContent = (k.outboundCount != null ? String(k.outboundCount) : '–');
+        if (elInboundToday) {
+          if (k.inboundToday != null) elInboundToday.textContent = `Today: ${k.inboundToday}`;
+          else elInboundToday.textContent = '';
+        }
+        if (elOutboundToday) {
+          if (k.outboundToday != null) elOutboundToday.textContent = `Today: ${k.outboundToday}`;
+          else elOutboundToday.textContent = '';
+        }
         if (elSipTotal) elSipTotal.textContent = (k.totalSip != null ? String(k.totalSip) : '–');
         if (elSipOnline){
           if (k.totalSip != null && k.onlineSip != null){

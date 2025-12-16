@@ -1820,6 +1820,11 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
         outbound: outboundByDayMap.get(d) || 0
       }));
 
+    // "Today" is interpreted as the end of the selected range ("to" date)
+    const todayKey = to;
+    const inboundToday = inboundByDayMap.get(todayKey) || 0;
+    const outboundToday = outboundByDayMap.get(todayKey) || 0;
+
     return res.json({
       success: true,
       range: { from, to },
@@ -1827,6 +1832,8 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
         totalDids,
         inboundCount,
         outboundCount,
+        inboundToday,
+        outboundToday,
         totalSip,
         onlineSip
       },
