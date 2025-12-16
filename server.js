@@ -4716,9 +4716,15 @@ app.get('/api/me/didww/dids', requireAuth, async (req, res) => {
           }
         }
       } catch (pendingErr) {
-        // Table might not exist yet, that's fine
-        if (DEBUG && !pendingErr.message?.includes('doesn\'t exist')) {
-          console.warn('[didww.reconcile] Error checking pending orders:', pendingErr.message);
+        // Table might not exist yet, that's fine. Only log in DEBUG when it's
+        // not the expected "table does not exist" condition.
+        if (DEBUG) {
+          const code = pendingErr && pendingErr.code;
+          const msg = String(pendingErr && pendingErr.message || '');
+          const isMissingTable = code === 'ER_NO_SUCH_TABLE' || /doesn['’]t exist/i.test(msg);
+          if (!isMissingTable) {
+            console.warn('[didww.reconcile] Error checking pending orders:', msg);
+          }
         }
       }
     }
@@ -4798,11 +4804,12 @@ app.get('/api/me/didww/dids', requireAuth, async (req, res) => {
 
               if (isAdditionalChannelsError) {
                 if (DEBUG) {
+                  const didAttrs = did.attributes || {};
                   console.warn(
                     '[didww.dids.autoCapacity] DID does not allow additional channels, skipping auto capacity for this number:',
                     {
                       didId: did.id,
-                      number: attrs.number,
+                      number: didAttrs.number || null,
                       errors
                     }
                   );
