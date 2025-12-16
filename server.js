@@ -30,6 +30,11 @@ const MB_SIP_MODULE = process.env.MB_SIP_MODULE || 'sip';
 let didwwGunzipWarned = false;
 const MB_CDR_MODULE = process.env.MB_CDR_MODULE || 'call';
 const MB_PAGE_SIZE = parseInt(process.env.MB_PAGE_SIZE || '50', 10);
+// Background MagnusBilling CDR import tuning
+const MB_CDR_IMPORT_PAGE_SIZE = parseInt(process.env.MB_CDR_IMPORT_PAGE_SIZE || '500', 10);
+const MB_CDR_IMPORT_MAX_PAGES = parseInt(process.env.MB_CDR_IMPORT_MAX_PAGES || '20', 10);
+// When no prior import cursor exists, look back this many minutes for initial backfill
+const MB_CDR_IMPORT_LOOKBACK_MINUTES = parseInt(process.env.MB_CDR_IMPORT_LOOKBACK_MINUTES || '1440', 10); // default 24h
 const CHECKOUT_MIN_AMOUNT = parseFloat(process.env.CHECKOUT_MIN_AMOUNT || '100');
 const CHECKOUT_MAX_AMOUNT = parseFloat(process.env.CHECKOUT_MAX_AMOUNT || '500');
 
@@ -153,9 +158,13 @@ async function fetchUserRow({ idUser, username, email, httpsAgent, hostHeader })
     return undefined;
   }
 }
-async function fetchCdr({ idUser, username, from, to, httpsAgent, hostHeader }){
+async function fetchCdr({ idUser, username, from, to, httpsAgent, hostHeader, start = 0, limit }){
   const p = new URLSearchParams();
-  p.append('module', MB_CDR_MODULE); p.append('action','read'); p.append('start','0'); p.append('limit', String(MB_PAGE_SIZE));
+  const pageLimit = limit != null ? Number(limit) || MB_PAGE_SIZE : MB_PAGE_SIZE;
+  p.append('module', MB_CDR_MODULE);
+  p.append('action','read');
+  p.append('start', String(start));
+  p.append('limit', String(pageLimit));
   if (idUser) { p.append('id_user', String(idUser)); p.append('idUser', String(idUser)); p.append('userid', String(idUser)); }
   if (username) { p.append('username', String(username)); p.append('user', String(username)); }
   if (from) { p.append('startdate', from); p.append('starttime', from); p.append('date_from', from); }
@@ -163,6 +172,17 @@ async function fetchCdr({ idUser, username, from, to, httpsAgent, hostHeader }){
   const path = `/index.php/${MB_CDR_MODULE}/read`;
   const resp = await mbSignedCall({ relPath: path, params: p, httpsAgent, hostHeader });
   return resp.data;
+}
+// Format JS Date to MagnusBilling-compatible "YYYY-MM-DD HH:MM:SS" in local time
+function formatMagnusDateTime(d) {
+  const pad = (n) => String(n).padStart(2, '0');
+  const year = d.getFullYear();
+  const month = pad(d.getMonth() + 1);
+  const day = pad(d.getDate());
+  const hours = pad(d.getHours());
+  const mins = pad(d.getMinutes());
+  const secs = pad(d.getSeconds());
+  return `${year}-${month}-${day} ${hours}:${mins}:${secs}`;
 }
 function belongsToUser(row, idUser, username, email){
   const idStr = String(idUser || '');
@@ -548,6 +568,14 @@ async function initDb() {
     KEY idx_mb_magnus_user (magnus_user_id),
     KEY idx_mb_time_start (time_start),
     CONSTRAINT fk_user_mb_cdrs_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+  // CDR import cursors - tracks last imported MagnusBilling CDR timestamp per magnus_user_id
+  await pool.query(`CREATE TABLE IF NOT EXISTS cdr_import_cursors (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    magnus_user_id VARCHAR(64) NOT NULL,
+    last_time_start_ms BIGINT NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_magnus (magnus_user_id)
   )`);
   // Ensure uniq_user_did_cycle index exists even if table was created on an older schema
   try {
@@ -1241,6 +1269,87 @@ app.get('/api/me/billing-history', requireAuth, async (req, res) => {
 // ========== Per-user CDR history (from streamed DIDWW Voice IN CDRs) ==========
 // Returns CDRs for the logged-in user based on user_did_cdrs table.
 // Supports pagination (?page, ?pageSize) and optional filters: ?from, ?to, ?did.
+
+// Shared helper to build a unified CDR timeline (inbound from user_did_cdrs + outbound
+// from user_mb_cdrs) with sorting and pagination. Used by both /api/me/cdrs and
+// /api/me/cdrs/local so they stay in sync.
+async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, didFilter }) {
+  if (!pool) throw new Error('Database not configured');
+  if (!userId) throw new Error('Missing userId');
+
+  const filters = ['user_id = ?'];
+  const params = [userId];
+
+  if (fromRaw) {
+    filters.push('DATE(time_start) >= ?');
+    params.push(fromRaw);
+  }
+  if (toRaw) {
+    filters.push('DATE(time_start) <= ?');
+    params.push(toRaw);
+  }
+  if (didFilter) {
+    filters.push('did_number = ?');
+    params.push(didFilter);
+  }
+  const whereSql = filters.length ? 'WHERE ' + filters.join(' AND ') : '';
+
+  // Inbound from user_did_cdrs (local DIDWW mirror)
+  const [inboundRows] = await pool.query(
+    `SELECT id, cdr_id, user_id, did_number, direction, src_number, dst_number,
+            time_start, time_connect, time_end, duration, billsec, price, created_at
+     FROM user_did_cdrs
+     ${whereSql}
+     ORDER BY time_start DESC, id DESC`,
+    params
+  );
+
+  const inbound = inboundRows.map(r => ({
+    id: r.id,
+    cdrId: r.cdr_id,
+    didNumber: r.did_number,
+    direction: r.direction,
+    srcNumber: r.src_number,
+    dstNumber: r.dst_number,
+    timeStart: r.time_start ? r.time_start.toISOString() : null,
+    timeConnect: r.time_connect ? r.time_connect.toISOString() : null,
+    timeEnd: r.time_end ? r.time_end.toISOString() : null,
+    duration: r.duration != null ? Number(r.duration) : null,
+    billsec: r.billsec != null ? Number(r.billsec) : null,
+    price: r.price != null ? Number(r.price) : null,
+    createdAt: r.created_at ? r.created_at.toISOString() : null
+  }));
+
+  // Outbound from user_mb_cdrs (local MagnusBilling mirror)
+  let outbound = [];
+  try {
+    outbound = await loadLocalOutboundCdrs({ userId, fromRaw, toRaw, didFilter });
+  } catch (e) {
+    if (DEBUG) console.warn('[cdr.timeline] Failed to load outbound from user_mb_cdrs:', e.message || e);
+    outbound = [];
+  }
+
+  let all = inbound.concat(outbound);
+
+  // Sort newest first by timeStart (fallback to createdAt)
+  all.sort((a, b) => {
+    const aTs = a.timeStart ? Date.parse(a.timeStart) : (a.createdAt ? Date.parse(a.createdAt) : 0);
+    const bTs = b.timeStart ? Date.parse(b.timeStart) : (b.createdAt ? Date.parse(b.createdAt) : 0);
+    if (bTs !== aTs) return bTs - aTs;
+    const aId = String(a.id || '');
+    const bId = String(b.id || '');
+    return bId.localeCompare(aId);
+  });
+
+  const total = all.length;
+  const startIndex = page * pageSize;
+  const endIndex = startIndex + pageSize;
+  const pageRows = all.slice(startIndex, endIndex);
+
+  if (DEBUG) console.log('[cdr.timeline]', { userId, count: pageRows.length, total });
+
+  return { rows: pageRows, total };
+}
 app.get('/api/me/cdrs', requireAuth, async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
@@ -1250,352 +1359,20 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
     const page = Math.max(0, parseInt(req.query.page || '0', 10));
     const pageSize = Math.max(1, Math.min(200, parseInt(req.query.pageSize || '50', 10)));
 
-    const filters = ['user_id = ?'];
-    const params = [userId];
-
     const fromRaw = (req.query.from || '').toString().trim();
     const toRaw = (req.query.to || '').toString().trim();
     const didFilter = (req.query.did || '').toString().trim();
 
-    // Treat from/to as calendar dates (YYYY-MM-DD) in the DB's local timezone.
-    // Using DATE(time_start) avoids JS/UTC timezone edge cases when comparing.
-    if (fromRaw) {
-      filters.push('DATE(time_start) >= ?');
-      params.push(fromRaw);
-    }
-    if (toRaw) {
-      filters.push('DATE(time_start) <= ?');
-      params.push(toRaw);
-    }
-    if (didFilter) {
-      filters.push('did_number = ?');
-      params.push(didFilter);
-    }
-
-    const whereSql = filters.length ? 'WHERE ' + filters.join(' AND ') : '';
-
-    // --- Inbound CDRs from DIDWW (local table) ---
-    const [inboundRows] = await pool.query(
-      `SELECT id, cdr_id, user_id, did_number, direction, src_number, dst_number,
-              time_start, time_connect, time_end, duration, billsec, price, created_at
-       FROM user_did_cdrs
-       ${whereSql}
-       ORDER BY time_start DESC, id DESC`,
-      params
-    );
-
-    const inbound = inboundRows.map(r => ({
-      id: r.id,
-      cdrId: r.cdr_id,
-      didNumber: r.did_number,
-      direction: r.direction,
-      srcNumber: r.src_number,
-      dstNumber: r.dst_number,
-      timeStart: r.time_start ? r.time_start.toISOString() : null,
-      timeConnect: r.time_connect ? r.time_connect.toISOString() : null,
-      timeEnd: r.time_end ? r.time_end.toISOString() : null,
-      duration: r.duration != null ? Number(r.duration) : null,
-      billsec: r.billsec != null ? Number(r.billsec) : null,
-      price: r.price != null ? Number(r.price) : null,
-      createdAt: r.created_at ? r.created_at.toISOString() : null
-    }));
-
-    // --- Outbound (and possibly inbound) CDRs from MagnusBilling ---
-    let outbound = [];
-    let outboundRaw = [];
-    let hadMagnusError = false;
-    try {
-      const httpsAgent = new https.Agent({
-        rejectUnauthorized: process.env.MAGNUSBILLING_TLS_INSECURE !== '1',
-        ...(process.env.MAGNUSBILLING_TLS_SERVERNAME ? { servername: process.env.MAGNUSBILLING_TLS_SERVERNAME } : {})
-      });
-      const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
-      const idUser = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
-      const username = req.session.username;
-
-      // Optional: fetch SIP users for this Magnus account so we can treat
-      // calls from any of their SIP logins as "owned" even if the CDR's
-      // user id or username is not a direct match.
-      let sipNameSet = new Set();
-      if (idUser) {
-        try {
-          const sipsData = await fetchSipUsers({ idUser, httpsAgent, hostHeader });
-          const rawSipRows = sipsData?.rows || sipsData?.data || [];
-          const sipRows = rawSipRows.filter(r => sipBelongsToUser(r, idUser));
-          sipNameSet = new Set(
-            sipRows
-              .flatMap(r => [r.name, r.accountcode, r.defaultuser])
-              .filter(Boolean)
-              .map(v => String(v).toLowerCase())
-          );
-          if (DEBUG) {
-            console.log('[me.cdrs.magnus.sips]', {
-              idUser,
-              sipCount: sipRows.length,
-              sipNames: Array.from(sipNameSet).slice(0, 10)
-            });
-          }
-        } catch (sipErr) {
-          if (DEBUG) console.warn('[me.cdrs.magnus] fetchSipUsers failed:', sipErr.message || sipErr);
-        }
-      }
-
-      if (idUser || username) {
-        const rngDefault = defaultRange();
-        const mbFrom = fromRaw || rngDefault.from;
-        const mbTo = toRaw || rngDefault.to;
-
-        const dataRaw = await fetchCdr({ idUser, username, from: mbFrom, to: mbTo, httpsAgent, hostHeader });
-        const rawRows = dataRaw?.rows || dataRaw?.data || [];
-
-        const ownedRows = rawRows.filter(r => {
-          if (belongsToUser(r, idUser, username, req.session.email)) return true;
-          if (!sipNameSet || !sipNameSet.size) return false;
-          const acc = String(
-            r.accountcode ||
-            r.sipiax ||
-            r.username ||
-            r.user ||
-            r.src ||
-            ''
-          ).toLowerCase();
-          return acc && sipNameSet.has(acc);
-        });
-        outboundRaw = ownedRows;
-
-        outbound = ownedRows.map(r => {
-          // Direction: try to infer from common MagnusBilling fields, default to outbound
-          const dirRaw = String(
-            r.direction || r.calltype || r.call_type || r.call_direction || ''
-          ).toLowerCase();
-          let direction = 'outbound';
-          if (dirRaw.includes('in') && !dirRaw.includes('out')) direction = 'inbound';
-          if (dirRaw.includes('out')) direction = 'outbound';
-
-          // Start time
-          const startStr =
-            r.starttime ||
-            r.start_time ||
-            r.calldate ||
-            r.callstart ||
-            r.start_date ||
-            r.date ||
-            null;
-          const startDate = startStr ? new Date(startStr) : null;
-
-          // Numbers
-          // For the "From" field we want the public caller ID (CLI), not the SIP
-          // login/extension. Many MagnusBilling CDRs expose CLI in callerid/clid/cli,
-          // while src/accountcode is the SIP username.
-          let callerRaw =
-            r.callerid ||
-            r.cid ||
-            r.clid ||
-            r.cli ||
-            r.callingnumber ||
-            r.src_number ||
-            r.src ||
-            '';
-
-          // Normalise common formats like "1234567890" <546788> or 1234567890 <546788>
-          callerRaw = String(callerRaw || '').trim();
-          const angleMatch = /<([^>]+)>/.exec(callerRaw);
-          if (angleMatch) {
-            callerRaw = angleMatch[1];
-          }
-          callerRaw = callerRaw.replace(/\"/g, '').trim();
-
-          const extRaw =
-            r.src ||
-            r.accountcode ||
-            r.sipiax ||
-            '';
-
-          const src = callerRaw || extRaw || '';
-
-          const dst =
-            r.dst ||
-            r.calledstation ||
-            r.destination ||
-            r.dest ||
-            r.dst_number ||
-            '';
-
-          // Duration / billsec
-          let billsec = null;
-          if (r.billsec != null) billsec = Number(r.billsec) || 0;
-          else if (r.sessiontime != null) billsec = Number(r.sessiontime) || 0;
-          else if (r.duration != null) billsec = Number(r.duration) || 0;
-          if (billsec != null && billsec < 0) billsec = 0;
-
-          // Price (customer debited amount in MagnusBilling)
-          let price = null;
-          if (r.sessionbill != null) price = Number(r.sessionbill);
-          else if (r.debit != null) price = Number(r.debit);
-          else if (r.cost != null) price = Number(r.cost);
-
-          const idVal = r.id || r.id_call || r.uniqueid || r.unique_id || null;
-
-          // Optional DID association if available on the CDR
-          const didNumber = r.did || r.did_number || r.didnumber || null;
-
-          return {
-            id: idVal != null ? `mb-${idVal}` : `mb-${Math.random().toString(36).slice(2)}`,
-            cdrId: idVal != null ? String(idVal) : null,
-            didNumber,
-            direction,
-            srcNumber: src || '',
-            dstNumber: dst || '',
-            timeStart: startDate ? startDate.toISOString() : null,
-            timeConnect: null,
-            timeEnd: null,
-            duration: billsec,
-            billsec,
-            price: price != null && Number.isFinite(price) ? price : null,
-            createdAt: startDate ? startDate.toISOString() : null
-          };
-        });
-
-        // If DID filter is applied, try to restrict Magnus CDRs using it as well
-        if (didFilter) {
-          const wantDigits = didFilter.replace(/\D/g, '');
-          outbound = outbound.filter(c => {
-            const combined = `${c.srcNumber || ''}${c.dstNumber || ''}${c.didNumber || ''}`.replace(/\D/g, '');
-            return combined.includes(wantDigits);
-          });
-        }
-
-        if (DEBUG) {
-          console.log('[me.cdrs.magnus]', {
-            idUser,
-            username,
-            from: mbFrom,
-            to: mbTo,
-            totalRaw: rawRows.length,
-            owned: ownedRows.length,
-            normalized: outbound.length,
-            sample: outbound[0] || null
-          });
-        }
-      }
-
-      // Best-effort: persist outbound MagnusBilling CDRs into local DB for history
-      try {
-        const magnusIdStr = idUser ? String(idUser) : '';
-        if (magnusIdStr && outbound.length) {
-          await saveMagnusCdrsToDb({
-            localUserId: userId,
-            magnusUserId: magnusIdStr,
-            rows: outbound,
-            rawRows: outboundRaw
-          });
-        }
-      } catch (storeErr) {
-        if (DEBUG) console.warn('[me.cdrs.magnus.store] Failed to persist outbound CDRs:', storeErr.message || storeErr);
-      }
-    } catch (e) {
-      hadMagnusError = true;
-      if (DEBUG) console.warn('[me.cdrs.magnus] fetch failed:', e.message || e);
-    }
-
-    // Always load outbound CDRs from the local mirror and merge with Magnus results.
-    const magnusOutboundCount = outbound.length;
-    let localOutbound = [];
-    try {
-      localOutbound = await loadLocalOutboundCdrs({ userId, fromRaw, toRaw, didFilter });
-    } catch (localErr) {
-      if (DEBUG) console.warn(
-        '[me.cdrs.local.merge] Failed to load outbound from user_mb_cdrs:',
-        localErr.message || localErr
-      );
-      localOutbound = [];
-    }
-
-    // If MagnusBilling is unreachable or returned no owned rows, fall back to
-    // outbound CDRs stored locally in user_mb_cdrs so Call History continues to work.
-    if (hadMagnusError || !outbound.length) {
-      outbound = localOutbound;
-
-      if (DEBUG) {
-        console.log('[me.cdrs.local.merge]', {
-          userId,
-          from: fromRaw || null,
-          to: toRaw || null,
-          did: didFilter || null,
-          magnusOutbound: magnusOutboundCount,
-          localOutbound: localOutbound.length,
-          merged: outbound.length,
-          reason: hadMagnusError ? 'magnusError' : 'noMagnusOwned'
-        });
-      }
-
-      if (hadMagnusError && DEBUG) {
-        console.log('[me.cdrs.magnus.fallback]', {
-          userId,
-          from: fromRaw || null,
-          to: toRaw || null,
-          did: didFilter || null,
-          count: outbound.length
-        });
-      }
-    } else {
-      // Merge live Magnus CDRs with local history, de-duplicating on cdrId when available.
-      const mergedMap = new Map();
-
-      const makeKey = (row) => {
-        if (row.cdrId) return `cdr:${row.cdrId}`;
-        const ts = row.timeStart || row.createdAt || '';
-        return `row:${row.direction || ''}:${ts}:${row.srcNumber || ''}:${row.dstNumber || ''}`;
-      };
-
-      for (const r of outbound) {
-        const key = makeKey(r);
-        if (!mergedMap.has(key)) mergedMap.set(key, r);
-      }
-
-      for (const r of localOutbound) {
-        const key = makeKey(r);
-        if (!mergedMap.has(key)) mergedMap.set(key, r);
-      }
-
-      outbound = Array.from(mergedMap.values());
-
-      if (DEBUG) {
-        console.log('[me.cdrs.local.merge]', {
-          userId,
-          from: fromRaw || null,
-          to: toRaw || null,
-          did: didFilter || null,
-          magnusOutbound: magnusOutboundCount,
-          localOutbound: localOutbound.length,
-          merged: outbound.length,
-          reason: 'mergeMagnusAndLocal'
-        });
-      }
-    }
-
-    // Merge inbound + MagnusBilling (or local) CDRs into a single timeline
-    let all = inbound.concat(outbound);
-
-    // Sort newest first by timeStart (fallback to createdAt)
-    all.sort((a, b) => {
-      const aTs = a.timeStart ? Date.parse(a.timeStart) : (a.createdAt ? Date.parse(a.createdAt) : 0);
-      const bTs = b.timeStart ? Date.parse(b.timeStart) : (b.createdAt ? Date.parse(b.createdAt) : 0);
-      if (bTs !== aTs) return bTs - aTs;
-      // Stable-ish fallback using id string
-      const aId = String(a.id || '');
-      const bId = String(b.id || '');
-      return bId.localeCompare(aId);
+    const { rows, total } = await loadUserCdrTimeline({
+      userId,
+      page,
+      pageSize,
+      fromRaw,
+      toRaw,
+      didFilter
     });
 
-    const total = all.length;
-    const startIndex = page * pageSize;
-    const endIndex = startIndex + pageSize;
-    const pageRows = all.slice(startIndex, endIndex);
-
-    if (DEBUG) console.log('[me.cdrs]', { userId, count: pageRows.length, total });
-
-    return res.json({ success: true, data: pageRows, total, page, pageSize });
+    return res.json({ success: true, data: rows, total, page, pageSize });
   } catch (e) {
     if (DEBUG) console.error('[me.cdrs] error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to fetch CDRs' });
@@ -1689,6 +1466,252 @@ async function loadLocalOutboundCdrs({ userId, fromRaw, toRaw, didFilter }) {
     price: r.price != null ? Number(r.price) : null,
     createdAt: r.created_at ? r.created_at.toISOString() : null
   }));
+}
+
+// Normalize a raw MagnusBilling CDR row into the local CDR shape used by user_mb_cdrs
+function normalizeMagnusCdrRow(r) {
+  if (!r) return null;
+
+  const dirRaw = String(
+    r.direction || r.calltype || r.call_type || r.call_direction || ''
+  ).toLowerCase();
+  let direction = 'outbound';
+  if (dirRaw.includes('in') && !dirRaw.includes('out')) direction = 'inbound';
+  if (dirRaw.includes('out')) direction = 'outbound';
+
+  const startStr =
+    r.starttime ||
+    r.start_time ||
+    r.calldate ||
+    r.callstart ||
+    r.start_date ||
+    r.date ||
+    null;
+  const startDate = startStr ? new Date(startStr) : null;
+
+  let callerRaw =
+    r.callerid ||
+    r.cid ||
+    r.clid ||
+    r.cli ||
+    r.callingnumber ||
+    r.src_number ||
+    r.src ||
+    '';
+  callerRaw = String(callerRaw || '').trim();
+  const angleMatch = /<([^>]+)>/.exec(callerRaw);
+  if (angleMatch) callerRaw = angleMatch[1];
+  callerRaw = callerRaw.replace(/\"/g, '').trim();
+
+  const extRaw =
+    r.src ||
+    r.accountcode ||
+    r.sipiax ||
+    '';
+
+  const src = callerRaw || extRaw || '';
+
+  const dst =
+    r.dst ||
+    r.calledstation ||
+    r.destination ||
+    r.dest ||
+    r.dst_number ||
+    '';
+
+  let billsec = null;
+  if (r.billsec != null) billsec = Number(r.billsec) || 0;
+  else if (r.sessiontime != null) billsec = Number(r.sessiontime) || 0;
+  else if (r.duration != null) billsec = Number(r.duration) || 0;
+  if (billsec != null && billsec < 0) billsec = 0;
+
+  let price = null;
+  if (r.sessionbill != null) price = Number(r.sessionbill);
+  else if (r.debit != null) price = Number(r.debit);
+  else if (r.cost != null) price = Number(r.cost);
+
+  const idVal = r.id || r.id_call || r.uniqueid || r.unique_id || null;
+  const didNumber = r.did || r.did_number || r.didnumber || null;
+  const timeIso = startDate ? startDate.toISOString() : null;
+
+  return {
+    id: idVal != null ? `mb-${idVal}` : `mb-${Math.random().toString(36).slice(2)}`,
+    cdrId: idVal != null ? String(idVal) : null,
+    didNumber,
+    direction,
+    srcNumber: src || '',
+    dstNumber: dst || '',
+    timeStart: timeIso,
+    timeConnect: null,
+    timeEnd: null,
+    duration: billsec,
+    billsec,
+    price: price != null && Number.isFinite(price) ? price : null,
+    createdAt: timeIso
+  };
+}
+
+// Incrementally import MagnusBilling CDRs for a single user into user_mb_cdrs
+async function importMagnusCdrsForUser({ localUserId, magnusUserId, username, email, httpsAgent, hostHeader }) {
+  if (!pool || !localUserId || !magnusUserId) return;
+  const magnusIdStr = String(magnusUserId);
+
+  const now = new Date();
+  const nowMs = now.getTime();
+  const defaultSinceMs = nowMs - MB_CDR_IMPORT_LOOKBACK_MINUTES * 60 * 1000;
+  let sinceMs = defaultSinceMs;
+
+  // Load previous cursor, if any
+  try {
+    const [rows] = await pool.execute(
+      'SELECT last_time_start_ms FROM cdr_import_cursors WHERE magnus_user_id = ? LIMIT 1',
+      [magnusIdStr]
+    );
+    if (rows && rows[0] && rows[0].last_time_start_ms != null) {
+      const lastMs = Number(rows[0].last_time_start_ms) || 0;
+      if (lastMs > 0) {
+        // Small overlap (60s) to be resilient to clock skew / late CDRs
+        const overlapMs = 60 * 1000;
+        sinceMs = Math.max(lastMs - overlapMs, defaultSinceMs);
+      }
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[cdr.import.cursor.load] failed:', e.message || e);
+  }
+
+  const fromStr = formatMagnusDateTime(new Date(sinceMs));
+  const toStr = formatMagnusDateTime(now);
+
+  let start = 0;
+  const pageLimit = MB_CDR_IMPORT_PAGE_SIZE;
+  const maxPages = MB_CDR_IMPORT_MAX_PAGES;
+  let imported = 0;
+  let maxSeenMs = sinceMs;
+
+  for (let page = 0; page < maxPages; page++, start += pageLimit) {
+    let dataRaw;
+    try {
+      dataRaw = await fetchCdr({
+        idUser: magnusIdStr,
+        username,
+        from: fromStr,
+        to: toStr,
+        httpsAgent,
+        hostHeader,
+        start,
+        limit: pageLimit
+      });
+    } catch (e) {
+      if (DEBUG) console.warn('[cdr.import.fetch] failed:', e.message || e);
+      break;
+    }
+
+    const rawRows = (dataRaw && (dataRaw.rows || dataRaw.data)) || [];
+    if (!rawRows.length) break;
+
+    const normalized = [];
+    const rawForSave = [];
+    for (const r of rawRows) {
+      const n = normalizeMagnusCdrRow(r);
+      if (!n || !n.cdrId) continue;
+      normalized.push(n);
+      rawForSave.push(r);
+      const ts = Date.parse(n.timeStart || n.createdAt || toStr);
+      if (!Number.isNaN(ts) && ts > maxSeenMs) maxSeenMs = ts;
+    }
+
+    if (normalized.length) {
+      await saveMagnusCdrsToDb({
+        localUserId,
+        magnusUserId: magnusIdStr,
+        rows: normalized,
+        rawRows: rawForSave
+      });
+      imported += normalized.length;
+    }
+
+    if (rawRows.length < pageLimit) break;
+  }
+
+  if (imported && maxSeenMs > sinceMs) {
+    try {
+      await pool.execute(
+        'INSERT INTO cdr_import_cursors (magnus_user_id, last_time_start_ms) VALUES (?, ?) ON DUPLICATE KEY UPDATE last_time_start_ms = VALUES(last_time_start_ms), updated_at = CURRENT_TIMESTAMP',
+        [magnusIdStr, maxSeenMs]
+      );
+    } catch (e) {
+      if (DEBUG) console.warn('[cdr.import.cursor.save] failed:', e.message || e);
+    }
+  }
+
+  if (DEBUG && imported) {
+    console.log('[cdr.import.user]', {
+      localUserId,
+      magnusUserId: magnusIdStr,
+      imported,
+      from: fromStr,
+      to: toStr
+    });
+  }
+}
+
+let cdrImportRunning = false;
+async function runCdrImportTick() {
+  if (!pool) return;
+  if (cdrImportRunning) {
+    if (DEBUG) console.log('[cdr.import] tick skipped (already running)');
+    return;
+  }
+  cdrImportRunning = true;
+  try {
+    const [users] = await pool.execute(
+      'SELECT id, magnus_user_id, username, email FROM signup_users WHERE magnus_user_id IS NOT NULL'
+    );
+    if (!users || users.length === 0) {
+      if (DEBUG) console.log('[cdr.import] No users with magnus_user_id; skipping tick');
+      return;
+    }
+
+    const httpsAgent = new https.Agent({
+      rejectUnauthorized: process.env.MAGNUSBILLING_TLS_INSECURE !== '1',
+      ...(process.env.MAGNUSBILLING_TLS_SERVERNAME ? { servername: process.env.MAGNUSBILLING_TLS_SERVERNAME } : {})
+    });
+    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+
+    for (const u of users) {
+      const localUserId = String(u.id);
+      const magnusUserId = String(u.magnus_user_id || '').trim();
+      if (!magnusUserId) continue;
+      try {
+        await importMagnusCdrsForUser({
+          localUserId,
+          magnusUserId,
+          username: u.username || '',
+          email: u.email || '',
+          httpsAgent,
+          hostHeader
+        });
+      } catch (e) {
+        if (DEBUG) console.warn('[cdr.import.user.error]', { localUserId, magnusUserId, error: e.message || e });
+      }
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[cdr.import.tick] error:', e.message || e);
+  } finally {
+    cdrImportRunning = false;
+  }
+}
+
+function startCdrImportScheduler() {
+  const intervalMs = (parseInt(process.env.MB_CDR_IMPORT_INTERVAL_SECONDS || '0', 10) || 0) * 1000;
+  if (!intervalMs) {
+    if (DEBUG) console.log('[cdr.import.scheduler] Disabled (no interval set)');
+    return;
+  }
+  if (DEBUG) console.log('[cdr.import.scheduler] Enabled with interval (ms):', intervalMs);
+  setInterval(() => {
+    runCdrImportTick();
+  }, intervalMs);
 }
 
 // Simple list of the logged-in user's DIDs from local DB (used for Call History DID filter)
@@ -1859,81 +1882,20 @@ app.get('/api/me/cdrs/local', requireAuth, async (req, res) => {
     const page = Math.max(0, parseInt(req.query.page || '0', 10));
     const pageSize = Math.max(1, Math.min(200, parseInt(req.query.pageSize || '50', 10)));
 
-    const filters = ['user_id = ?'];
-    const params = [userId];
-
     const fromRaw = (req.query.from || '').toString().trim();
     const toRaw = (req.query.to || '').toString().trim();
     const didFilter = (req.query.did || '').toString().trim();
 
-    if (fromRaw) {
-      filters.push('DATE(time_start) >= ?');
-      params.push(fromRaw);
-    }
-    if (toRaw) {
-      filters.push('DATE(time_start) <= ?');
-      params.push(toRaw);
-    }
-    if (didFilter) {
-      filters.push('did_number = ?');
-      params.push(didFilter);
-    }
-    const whereSql = filters.length ? 'WHERE ' + filters.join(' AND ') : '';
-
-    // Inbound from user_did_cdrs
-    const [inboundRows] = await pool.query(
-      `SELECT id, cdr_id, user_id, did_number, direction, src_number, dst_number,
-              time_start, time_connect, time_end, duration, billsec, price, created_at
-       FROM user_did_cdrs
-       ${whereSql}
-       ORDER BY time_start DESC, id DESC`,
-      params
-    );
-
-    const inbound = inboundRows.map(r => ({
-      id: r.id,
-      cdrId: r.cdr_id,
-      didNumber: r.did_number,
-      direction: r.direction,
-      srcNumber: r.src_number,
-      dstNumber: r.dst_number,
-      timeStart: r.time_start ? r.time_start.toISOString() : null,
-      timeConnect: r.time_connect ? r.time_connect.toISOString() : null,
-      timeEnd: r.time_end ? r.time_end.toISOString() : null,
-      duration: r.duration != null ? Number(r.duration) : null,
-      billsec: r.billsec != null ? Number(r.billsec) : null,
-      price: r.price != null ? Number(r.price) : null,
-      createdAt: r.created_at ? r.created_at.toISOString() : null
-    }));
-
-    // Outbound from user_mb_cdrs
-    let outbound = [];
-    try {
-      outbound = await loadLocalOutboundCdrs({ userId, fromRaw, toRaw, didFilter });
-    } catch (e) {
-      if (DEBUG) console.warn('[me.cdrs.local] Failed to load outbound from user_mb_cdrs:', e.message || e);
-      outbound = [];
-    }
-
-    let all = inbound.concat(outbound);
-
-    all.sort((a, b) => {
-      const aTs = a.timeStart ? Date.parse(a.timeStart) : (a.createdAt ? Date.parse(a.createdAt) : 0);
-      const bTs = b.timeStart ? Date.parse(b.timeStart) : (b.createdAt ? Date.parse(b.createdAt) : 0);
-      if (bTs !== aTs) return bTs - aTs;
-      const aId = String(a.id || '');
-      const bId = String(b.id || '');
-      return bId.localeCompare(aId);
+    const { rows, total } = await loadUserCdrTimeline({
+      userId,
+      page,
+      pageSize,
+      fromRaw,
+      toRaw,
+      didFilter
     });
 
-    const total = all.length;
-    const startIndex = page * pageSize;
-    const endIndex = startIndex + pageSize;
-    const pageRows = all.slice(startIndex, endIndex);
-
-    if (DEBUG) console.log('[me.cdrs.local]', { userId, count: pageRows.length, total });
-
-    return res.json({ success: true, data: pageRows, total, page, pageSize });
+    return res.json({ success: true, data: rows, total, page, pageSize });
   } catch (e) {
     if (DEBUG) console.error('[me.cdrs.local] error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to fetch local CDRs' });
@@ -5467,6 +5429,7 @@ async function startServer() {
       console.log(`Environment: ${process.env.NODE_ENV}`);
       if (DEBUG) console.log('Debug logging enabled');
       startBillingScheduler();
+      startCdrImportScheduler();
     });
   } catch (e) {
     console.error('Fatal startup error', e.message || e);
