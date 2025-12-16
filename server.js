@@ -1609,9 +1609,30 @@ async function importMagnusCdrsForUser({ localUserId, magnusUserId, username, em
     const rawRows = (dataRaw && (dataRaw.rows || dataRaw.data)) || [];
     if (!rawRows.length) break;
 
+    // IMPORTANT: MagnusBilling "call" module often ignores id_user filters when
+    // queried with admin credentials, returning CDRs for many users. We must
+    // therefore apply the same belongsToUser filter we use in request-time
+    // code, otherwise this importer would mirror *everyone's* calls into the
+    // current user's history.
+    const ownedRows = rawRows.filter(r => belongsToUser(r, magnusIdStr, username, email));
+    if (!ownedRows.length) {
+      if (DEBUG) {
+        console.log('[cdr.import.user.skipPage]', {
+          localUserId,
+          magnusUserId: magnusIdStr,
+          rawCount: rawRows.length,
+          ownedCount: 0,
+          page,
+          start
+        });
+      }
+      // Do not advance cursor based on foreign users' CDRs.
+      continue;
+    }
+
     const normalized = [];
     const rawForSave = [];
-    for (const r of rawRows) {
+    for (const r of ownedRows) {
       const n = normalizeMagnusCdrRow(r);
       if (!n || !n.cdrId) continue;
       normalized.push(n);
