@@ -521,7 +521,21 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           const callLimitDisplay = d.callLimit !== null && d.callLimit !== undefined ? String(d.callLimit) : '0';
           const cpsLimitDisplay = d.cpsLimit !== null && d.cpsLimit !== undefined ? String(d.cpsLimit) : '0';
           const fields = [['Name', d.name||''],['Email', d.email||''],['Phone', d.phone||''],['Username', d.username||''],['SIP Domain', d.sipDomain||new URL(location.href).hostname],['Balance', balanceDisplay],['Channel Limit', callLimitDisplay],['CPS Limit', cpsLimitDisplay]];
-          for (const [k,v] of fields){ const tr=document.createElement('tr'); tr.innerHTML = `<th>${escapeHtml(k)}</th><td>${escapeHtml(String(v||''))}</td>`; body.appendChild(tr); }
+          for (const [k,v] of fields){
+            const tr=document.createElement('tr');
+            tr.innerHTML = `<th>${escapeHtml(k)}</th><td>${escapeHtml(String(v||''))}</td>`;
+            body.appendChild(tr);
+          }
+          // Append Disabled DNC row with an informational button
+          const dncTr = document.createElement('tr');
+          dncTr.innerHTML = '<th>Disabled DNC</th><td><button id="dncInfoBtn" type="button">Disabled DNC</button></td>';
+          body.appendChild(dncTr);
+          const dncBtn = document.getElementById('dncInfoBtn');
+          if (dncBtn){
+            dncBtn.addEventListener('click', () => {
+              alert('Disabling Do Not Call (DNC) protections for this account costs a one-time fee of $700. This change will allow your account to call numbers that are on DNC lists. Please contact support if you want to proceed.');
+            });
+          }
           $('#profile-empty').style.display='none'; $('#profile-table').style.display='table';
         } else { $('#profile-empty').textContent='No profile'; }
       }catch{ $('#profile-empty').textContent='Failed to load profile'; }
