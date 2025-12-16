@@ -50,6 +50,13 @@
     .toast{position:fixed;top:20px;right:20px;background:#10b981;color:#fff;padding:12px 20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);z-index:9999;animation:slideIn 0.3s ease-out}
     @keyframes slideIn{from{transform:translateX(400px);opacity:0}to{transform:translateX(0);opacity:1}}
     @keyframes btnClick{0%{transform:scale(1)}50%{transform:scale(0.95);background:#3730a3}100%{transform:scale(1)}}
+    .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:8px 0 16px 0}
+    .kpi-card{background:#ffffff;border-radius:12px;padding:10px 12px;border:1px solid #e5e7eb;box-shadow:0 1px 2px rgba(15,23,42,0.05)}
+    .kpi-label{font-size:12px;color:#6b7280;margin-bottom:4px}
+    .kpi-value{font-size:20px;font-weight:600;color:#111827}
+    .kpi-sub{font-size:11px;color:#9ca3af}
+    #callsChartContainer{margin-top:8px;margin-bottom:16px;background:#ffffff;border-radius:12px;border:1px solid #e5e7eb;padding:12px}
+    #callsChart{width:100%;max-height:220px}
 
     /* Mobile optimizations */
     @media (max-width: 768px) {
@@ -134,17 +141,46 @@
   </header>
   <div class="wrap">
     <aside>
-      <a href="#profile" id="tab-profile" class="active">👤 Profile</a>
+      <a href="#overview" id="tab-overview" class="active">📊 Overview</a>
+      <a href="#profile" id="tab-profile">👤 Profile</a>
       <a href="#sip" id="tab-sip">📞 SIP Account</a>
       <a href="#mydids" id="tab-mydids">📱 My Numbers</a>
       <a href="#buydid" id="tab-buydid">🛒 Buy Numbers</a>
       <a href="#trunk" id="tab-trunk">↪️ Call Forwarding</a>
-      <a href="#cdr" id="tab-cdr">📊 Call History</a>
+      <a href="#cdr" id="tab-cdr">📈 Call History</a>
       <a href="#billing" id="tab-billing">💳 Billing History</a>
       <div class="sidebar-user">Signed in as <strong><%= username %></strong></div>
     </aside>
     <main>
-      <section id="view-profile">
+      <section id="view-overview">
+        <h2>Overview</h2>
+        <div id="overviewStats">
+          <div class="kpi-grid">
+            <div class="kpi-card">
+              <div class="kpi-label">Total DIDs</div>
+              <div class="kpi-value" id="kpiTotalDids">–</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-label">Inbound Calls</div>
+              <div class="kpi-value" id="kpiInbound">–</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-label">Outbound Calls</div>
+              <div class="kpi-value" id="kpiOutbound">–</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-label">SIP Accounts</div>
+              <div class="kpi-value" id="kpiSipTotal">–</div>
+              <div class="kpi-sub" id="kpiSipOnline"></div>
+            </div>
+          </div>
+          <div id="callsChartContainer">
+            <div class="muted" id="statsRangeText" style="margin-bottom:4px;"></div>
+            <canvas id="callsChart"></canvas>
+          </div>
+        </div>
+      </section>
+      <section id="view-profile" style="display:none">
         <h2>Profile</h2>
         <table id="profile-table" style="display:none"><tbody></tbody></table>
         <div class="toolbar">
@@ -347,6 +383,7 @@
       </div>
     </div>
   </div>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
     const LOCAL_DID_MARKUP = <%= typeof localDidMarkup !== 'undefined' ? localDidMarkup : 10.20 %> || 0;
     const TOLLFREE_DID_MARKUP = <%= typeof tollfreeDidMarkup !== 'undefined' ? tollfreeDidMarkup : 25.20 %> || 0;
@@ -356,11 +393,12 @@
     const $ = (s)=>document.querySelector(s);
     var billingPage = 0;
     var billingPageSize = 20;
-    const tabs = {profile:$('#tab-profile'), sip:$('#tab-sip'), trunk:$('#tab-trunk'), billing:$('#tab-billing'), buydid:$('#tab-buydid'), mydids:$('#tab-mydids'), cdr:$('#tab-cdr')};
-    const views = {profile:$('#view-profile'), sip:$('#view-sip'), trunk:$('#view-trunk'), billing:$('#view-billing'), buydid:$('#view-buydid'), mydids:$('#view-mydids'), cdr:$('#view-cdr')};
+    const tabs = {overview:$('#tab-overview'), profile:$('#tab-profile'), sip:$('#tab-sip'), trunk:$('#tab-trunk'), billing:$('#tab-billing'), buydid:$('#tab-buydid'), mydids:$('#tab-mydids'), cdr:$('#tab-cdr')};
+    const views = {overview:$('#view-overview'), profile:$('#view-profile'), sip:$('#view-sip'), trunk:$('#view-trunk'), billing:$('#view-billing'), buydid:$('#view-buydid'), mydids:$('#view-mydids'), cdr:$('#view-cdr')};
     function activate(name){
       Object.keys(tabs).forEach(k=>{ tabs[k].classList.toggle('active',k===name); views[k].style.display = (k===name?'block':'none'); });
     }
+    tabs.overview.addEventListener('click',e=>{e.preventDefault();activate('overview');loadStats();});
     tabs.profile.addEventListener('click',e=>{e.preventDefault();activate('profile');loadProfile();});
     tabs.sip.addEventListener('click',e=>{e.preventDefault();activate('sip');sipPage=0;loadSip();});
     tabs.trunk.addEventListener('click',e=>{e.preventDefault();activate('trunk');trunkPage=0;loadTrunks();});
@@ -377,6 +415,84 @@
       if (payload && Array.isArray(payload.rows)) return payload.rows;
       if (Array.isArray(payload)) return payload;
       return [];
+    }
+
+    let callsChart = null;
+    async function loadStats(){
+      try{
+        const fromInput = document.getElementById('from');
+        const toInput = document.getElementById('to');
+        let from = fromInput && fromInput.value;
+        let to = toInput && toInput.value;
+        if (!from || !to){
+          const rng = defaultRange();
+          from = rng.from; to = rng.to;
+        }
+        const q = new URLSearchParams();
+        q.set('from', from);
+        q.set('to', to);
+        const r = await fetch('/api/me/stats?'+q.toString());
+        const j = await r.json();
+        if (!j || j.success === false) return;
+        const k = j.kpis || {};
+        const range = j.range || {};
+        const elTotalDids = document.getElementById('kpiTotalDids');
+        const elInbound = document.getElementById('kpiInbound');
+        const elOutbound = document.getElementById('kpiOutbound');
+        const elSipTotal = document.getElementById('kpiSipTotal');
+        const elSipOnline = document.getElementById('kpiSipOnline');
+        const elRange = document.getElementById('statsRangeText');
+        if (elTotalDids) elTotalDids.textContent = (k.totalDids != null ? String(k.totalDids) : '–');
+        if (elInbound) elInbound.textContent = (k.inboundCount != null ? String(k.inboundCount) : '–');
+        if (elOutbound) elOutbound.textContent = (k.outboundCount != null ? String(k.outboundCount) : '–');
+        if (elSipTotal) elSipTotal.textContent = (k.totalSip != null ? String(k.totalSip) : '–');
+        if (elSipOnline){
+          if (k.totalSip != null && k.onlineSip != null){
+            elSipOnline.textContent = `${k.onlineSip} online`;
+          } else {
+            elSipOnline.textContent = '';
+          }
+        }
+        if (elRange && range.from && range.to){
+          elRange.textContent = `Calls from ${range.from} to ${range.to}`;
+        }
+        const series = j.series || {};
+        const byDay = Array.isArray(series.callsByDay) ? series.callsByDay : [];
+        const labels = byDay.map(p=>p.date);
+        const inboundData = byDay.map(p=>Number(p.inbound||0));
+        const outboundData = byDay.map(p=>Number(p.outbound||0));
+        const canvas = document.getElementById('callsChart');
+        if (!canvas || !window.Chart) return;
+        const ctx = canvas.getContext('2d');
+        if (!callsChart){
+          callsChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+              labels,
+              datasets: [
+                { label: 'Inbound', data: inboundData, backgroundColor: 'rgba(34,197,94,0.7)' },
+                { label: 'Outbound', data: outboundData, backgroundColor: 'rgba(59,130,246,0.7)' }
+              ]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              scales: {
+                x: { stacked: false },
+                y: { beginAtZero: true, ticks: { precision: 0 } }
+              },
+              plugins: { legend: { position: 'bottom' } }
+            }
+          });
+        } else {
+          callsChart.data.labels = labels;
+          if (callsChart.data.datasets[0]) callsChart.data.datasets[0].data = inboundData;
+          if (callsChart.data.datasets[1]) callsChart.data.datasets[1].data = outboundData;
+          callsChart.update();
+        }
+      }catch(e){
+        console.error('[loadStats]', e);
+      }
     }
 
     async function loadProfile(){
@@ -672,9 +788,10 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     document.addEventListener('click', (e)=>{
       if (e.target && e.target.tagName === 'BUTTON') animateButton(e.target);
     });
+
     // init
     const rng = defaultRange(); $('#from').value = rng.from; $('#to').value = rng.to;
-    loadProfile(); loadSip(); loadCdrDidOptions(); loadCdr();
+    loadProfile(); loadSip(); loadCdrDidOptions(); loadCdr(); loadStats();
 
     // If redirected back from NOWPayments with ?payment=success or ?payment=cancel, handle it
     (function handlePaymentReturn() {
@@ -710,7 +827,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         console.error('[paymentReturn]', e);
       }
     })();
-    $('#loadCdr').addEventListener('click', e=>{ e.preventDefault(); cdrPage=0; loadCdr(); });
+    $('#loadCdr').addEventListener('click', e=>{ e.preventDefault(); cdrPage=0; loadCdr(); loadStats(); });
     document.getElementById('cdrPrev').addEventListener('click', ()=>{ if (cdrPage>0) { cdrPage--; loadCdr(); } });
     document.getElementById('cdrNext').addEventListener('click', ()=>{ cdrPage++; loadCdr(); });
     document.getElementById('sipPrev').addEventListener('click', ()=>{ if (sipPage>0){ sipPage--; loadSip(); } });

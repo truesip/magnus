@@ -1710,6 +1710,136 @@ app.get('/api/me/dids', requireAuth, async (req, res) => {
   }
 });
 
+// Lightweight per-user stats endpoint for dashboard (totals + daily counts)
+// Query params: optional from, to (YYYY-MM-DD). Defaults to PREFETCH_DAYS window.
+app.get('/api/me/stats', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    if (!userId) return res.status(401).json({ success: false, message: 'Not authenticated' });
+
+    const fromRaw = (req.query.from || '').toString().trim();
+    const toRaw = (req.query.to || '').toString().trim();
+    let from = fromRaw;
+    let to = toRaw;
+    if (!from || !to) {
+      const rng = defaultRange();
+      if (!from) from = rng.from;
+      if (!to) to = rng.to;
+    }
+
+    // Total DIDs for this user
+    let totalDids = 0;
+    try {
+      const [[row]] = await pool.execute(
+        'SELECT COUNT(*) AS total FROM user_dids WHERE user_id = ?',
+        [userId]
+      );
+      totalDids = Number(row?.total || 0);
+    } catch (e) {
+      if (DEBUG) console.warn('[me.stats.dids] failed:', e.message || e);
+    }
+
+    // Inbound calls grouped by day from user_did_cdrs
+    let inboundCount = 0;
+    const inboundByDayMap = new Map();
+    try {
+      const [rows] = await pool.query(
+        `SELECT DATE(time_start) AS d, COUNT(*) AS calls
+         FROM user_did_cdrs
+         WHERE user_id = ? AND DATE(time_start) BETWEEN ? AND ?
+         GROUP BY DATE(time_start)
+         ORDER BY DATE(time_start)`,
+        [userId, from, to]
+      );
+      for (const r of rows) {
+        const dObj = r.d instanceof Date ? r.d : null;
+        const day = dObj ? dObj.toISOString().slice(0, 10) : String(r.d || '');
+        const c = Number(r.calls || 0);
+        inboundCount += c;
+        inboundByDayMap.set(day, (inboundByDayMap.get(day) || 0) + c);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[me.stats.inbound] failed:', e.message || e);
+    }
+
+    // Outbound calls grouped by day from user_mb_cdrs
+    let outboundCount = 0;
+    const outboundByDayMap = new Map();
+    try {
+      const [rows] = await pool.query(
+        `SELECT DATE(time_start) AS d, COUNT(*) AS calls
+         FROM user_mb_cdrs
+         WHERE user_id = ? AND DATE(time_start) BETWEEN ? AND ?
+         GROUP BY DATE(time_start)
+         ORDER BY DATE(time_start)`,
+        [userId, from, to]
+      );
+      for (const r of rows) {
+        const dObj = r.d instanceof Date ? r.d : null;
+        const day = dObj ? dObj.toISOString().slice(0, 10) : String(r.d || '');
+        const c = Number(r.calls || 0);
+        outboundCount += c;
+        outboundByDayMap.set(day, (outboundByDayMap.get(day) || 0) + c);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[me.stats.outbound] failed:', e.message || e);
+    }
+
+    // SIP users: count total + online (lineStatus starts with OK)
+    let totalSip = null;
+    let onlineSip = null;
+    try {
+      const httpsAgent = new https.Agent({
+        rejectUnauthorized: process.env.MAGNUSBILLING_TLS_INSECURE !== '1',
+        ...(process.env.MAGNUSBILLING_TLS_SERVERNAME ? { servername: process.env.MAGNUSBILLING_TLS_SERVERNAME } : {})
+      });
+      const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+      const idUser = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
+      if (idUser) {
+        const sipData = await fetchSipUsers({ idUser, httpsAgent, hostHeader });
+        const rawRows = sipData?.rows || sipData?.data || [];
+        const sipRows = rawRows.filter(r => sipBelongsToUser(r, idUser));
+        totalSip = sipRows.length;
+        onlineSip = sipRows.filter(r => {
+          const status = String(r.lineStatus || r.linestatus || r.status || '').toUpperCase();
+          return status.startsWith('OK');
+        }).length;
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[me.stats.sip] failed:', e.message || e);
+    }
+
+    // Merge daily inbound/outbound into a single series
+    const allDays = new Set([...inboundByDayMap.keys(), ...outboundByDayMap.keys()]);
+    const callsByDay = Array.from(allDays)
+      .sort()
+      .map(d => ({
+        date: d,
+        inbound: inboundByDayMap.get(d) || 0,
+        outbound: outboundByDayMap.get(d) || 0
+      }));
+
+    return res.json({
+      success: true,
+      range: { from, to },
+      kpis: {
+        totalDids,
+        inboundCount,
+        outboundCount,
+        totalSip,
+        onlineSip
+      },
+      series: {
+        callsByDay
+      }
+    });
+  } catch (e) {
+    if (DEBUG) console.error('[me.stats] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to fetch stats' });
+  }
+});
+
 // Local CDR history endpoint: reads outbound from user_mb_cdrs instead of MagnusBilling
 // and inbound from user_did_cdrs. Same query params as /api/me/cdrs: page, pageSize,
 // optional from, to, did. Useful for long history and when MagnusBilling is offline.
