@@ -256,17 +256,21 @@ async function prefetchUserData(req){
     const idUser = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
     const username = req.session.username;
     const rng = defaultRange();
-    const [sipsData, cdrData] = await Promise.all([
-      fetchSipUsers({ idUser, httpsAgent, hostHeader }),
-      fetchCdr({ idUser, username, from: rng.from, to: rng.to, httpsAgent, hostHeader })
-    ]);
+
+    // Only prefetch SIP users for this Magnus account. We no longer prefetch
+    // CDRs from MagnusBilling at login; all CDR history is served from the
+    // local mirrors (user_did_cdrs + user_mb_cdrs) populated by background
+    // importers.
+    const sipsData = await fetchSipUsers({ idUser, httpsAgent, hostHeader });
     const rawSipRows = (sipsData?.rows || sipsData?.data || []);
-    const sipsRows = (idUser ? rawSipRows.filter(r => sipBelongsToUser(r, idUser)) : rawSipRows.filter(r => belongsToUser(r, idUser, username, req.session.email)));
-    const cdrRows = (cdrData?.rows || cdrData?.data || []).filter(r => belongsToUser(r, idUser, username, req.session.email));
+    const sipsRows = (idUser
+      ? rawSipRows.filter(r => sipBelongsToUser(r, idUser))
+      : rawSipRows.filter(r => belongsToUser(r, idUser, username, req.session.email))
+    );
     const sips = { rows: sipsRows };
-    const cdr = { rows: cdrRows };
-    req.session.prefetch = { range: rng, sips, cdr, fetchedAt: Date.now() };
-    console.log('[me.prefetch]', { userId: idUser || null, username, sipRows: sipsRows.length, cdrRows: cdrRows.length });
+
+    req.session.prefetch = { range: rng, sips, fetchedAt: Date.now() };
+    console.log('[me.prefetch]', { userId: idUser || null, username, sipRows: sipsRows.length });
   } catch (e) { console.warn('prefetch failed', e.message || e); }
 }
 
