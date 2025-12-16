@@ -3280,34 +3280,6 @@ app.put('/api/me/sip-users/:id', requireAuth, async (req, res) => {
     return res.status(400).json({ success: false, message: 'Failed to update SIP user' });
   } catch (e) { return res.status(500).json({ success: false, message: 'SIP user update failed' }); }
 });
-app.get('/api/me/cdr', requireAuth, async (req, res) => {
-  try {
-    const idUser = req.session.magnusUserId;
-    const username = req.session.username;
-    const page = Math.max(0, parseInt(req.query.page || '0', 10));
-    const pageSize = Math.max(1, parseInt(req.query.pageSize || String(MB_PAGE_SIZE), 10));
-    const { from, to } = req.query || {};
-    // If no explicit date range and we have cache, return page 0 only from cache
-    if (!from && !to && page === 0 && req.session.prefetch?.cdr) {
-      console.log('[me.cdr.cache]', { userId: idUser, username, rows: (req.session.prefetch.cdr?.rows||[]).length });
-      return res.json({ success: true, data: { rows: req.session.prefetch.cdr.rows || [], page, pageSize } , cached: true, range: req.session.prefetch.range });
-    }
-    const httpsAgent = new https.Agent({ rejectUnauthorized: process.env.MAGNUSBILLING_TLS_INSECURE !== '1', ...(process.env.MAGNUSBILLING_TLS_SERVERNAME ? { servername: process.env.MAGNUSBILLING_TLS_SERVERNAME } : {}) });
-    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
-    const rng = { from: from || defaultRange().from, to: to || defaultRange().to };
-    // use start/limit pagination on each request
-    const params = { idUser: idUser, username, from: rng.from, to: rng.to, httpsAgent, hostHeader };
-    const dataRaw = await fetchCdr(params);
-    const rawRows = dataRaw?.rows || dataRaw?.data || [];
-    // client-side page window from rawRows in case upstream ignores start/limit
-    const start = page * pageSize;
-    const windowRows = rawRows.slice(start, start + pageSize);
-    const rows = windowRows.filter(r => belongsToUser(r, idUser, username, req.session.email));
-    console.log('[me.cdr]', { userId: idUser, username, email: req.session.email || null, page, pageSize, in: rawRows.length, out: rows.length, from: rng.from, to: rng.to });
-    return res.json({ success: true, data: { rows, page, pageSize } });
-  } catch (e) { return res.status(500).json({ success: false, message: 'CDR fetch failed' }); }
-});
-
 // DIDWW API helpers
 const DIDWW_API_KEY = process.env.DIDWW_API_KEY;
 const DIDWW_API_URL = process.env.DIDWW_API_URL || 'https://api.didww.com/v3';
