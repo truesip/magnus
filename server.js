@@ -1644,6 +1644,25 @@ async function importMagnusCdrsForUser({ localUserId, magnusUserId, username, em
     const rawRows = (dataRaw && (dataRaw.rows || dataRaw.data)) || [];
     if (!rawRows.length) break;
 
+    // For debugging: log a small sample of raw CDR rows for magnusUserId where
+    // we are currently seeing ownedCount=0 so we can tune the filter safely.
+    if (DEBUG && magnusIdStr === '2' && page === 0 && rawRows.length) {
+      const s = rawRows[0] || {};
+      console.log('[cdr.import.sample]', {
+        magnusUserId: magnusIdStr,
+        id_user: s.id_user,
+        user_id: s.user_id,
+        uid: s.uid,
+        idUser: s.idUser,
+        userid: s.userid,
+        username: s.username,
+        name: s.name,
+        user: s.user,
+        accountcode: s.accountcode,
+        idUserusername: s.idUserusername
+      });
+    }
+
     // IMPORTANT: MagnusBilling "call" module often ignores id_user filters when
     // queried with admin credentials, returning CDRs for many users. We must
     // therefore apply a strict per-row ownership check, otherwise this importer
