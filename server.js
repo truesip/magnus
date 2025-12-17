@@ -186,12 +186,43 @@ function formatMagnusDateTime(d) {
 }
 function belongsToUser(row, idUser, username, email){
   const idStr = String(idUser || '');
-  // Check 'id' FIRST (for user endpoint), then id_user (for SIP/CDR endpoints)
+  // Generic helper used mainly for /user endpoint lookups. For CDRs we use
+  // cdrRowBelongsToUser instead so we don't accidentally treat row.id (CDR ID)
+  // as a user identifier.
   const idMatches = idStr && [row?.id, row?.user_id, row?.uid, row?.id_user, row?.idUser, row?.userid].some(v => String(v||'') === idStr);
   const u = (username||'').toString().toLowerCase();
   const userMatches = u && [row?.username, row?.name, row?.sipuser, row?.user].some(v => String(v||'').toLowerCase() === u);
   const em = (email||'').toString().toLowerCase();
   const emailMatches = em && [row?.email, row?.mail, row?.user_email].some(v => String(v||'').toLowerCase() === em);
+  return Boolean(idMatches || userMatches || emailMatches);
+}
+// CDR-specific ownership check. Magnus CDR rows often include per-call
+// id_user plus helper fields like accountcode and idUserusername. We avoid
+// looking at row.id here because that's the CDR primary key, not the user.
+function cdrRowBelongsToUser(row, idUser, username, email){
+  const idStr = String(idUser || '');
+  const u = (username||'').toString().toLowerCase();
+  const em = (email||'').toString().toLowerCase();
+
+  const idMatches = idStr && [
+    row?.id_user,
+    row?.user_id,
+    row?.uid,
+    row?.idUser,
+    row?.userid
+  ].some(v => String(v || '') === idStr);
+
+  const userMatches = u && [
+    row?.username,
+    row?.name,
+    row?.sipuser,
+    row?.user,
+    row?.accountcode,
+    row?.idUserusername
+  ].some(v => String(v || '').toLowerCase() === u);
+
+  const emailMatches = em && [row?.email, row?.mail, row?.user_email].some(v => String(v||'').toLowerCase() === em);
+
   return Boolean(idMatches || userMatches || emailMatches);
 }
 // Strict SIP ownership check: require row id_user to equal current id
@@ -1615,10 +1646,9 @@ async function importMagnusCdrsForUser({ localUserId, magnusUserId, username, em
 
     // IMPORTANT: MagnusBilling "call" module often ignores id_user filters when
     // queried with admin credentials, returning CDRs for many users. We must
-    // therefore apply the same belongsToUser filter we use in request-time
-    // code, otherwise this importer would mirror *everyone's* calls into the
-    // current user's history.
-    const ownedRows = rawRows.filter(r => belongsToUser(r, magnusIdStr, username, email));
+    // therefore apply a strict per-row ownership check, otherwise this importer
+    // would mirror *everyone's* calls into the current user's history.
+    const ownedRows = rawRows.filter(r => cdrRowBelongsToUser(r, magnusIdStr, username, email));
     if (!ownedRows.length) {
       if (DEBUG) {
         console.log('[cdr.import.user.skipPage]', {
