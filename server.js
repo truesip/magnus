@@ -26,8 +26,6 @@ const DEBUG = process.env.DEBUG === '1' || process.env.LOG_LEVEL === 'debug';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-change-this';
 const MB_SIP_MODULE = process.env.MB_SIP_MODULE || 'sip';
 
-// One-time flags
-let didwwGunzipWarned = false;
 const MB_CDR_MODULE = process.env.MB_CDR_MODULE || 'call';
 const MB_PAGE_SIZE = parseInt(process.env.MB_PAGE_SIZE || '50', 10);
 // Background MagnusBilling CDR import tuning
@@ -35,6 +33,9 @@ const MB_CDR_IMPORT_PAGE_SIZE = parseInt(process.env.MB_CDR_IMPORT_PAGE_SIZE || 
 const MB_CDR_IMPORT_MAX_PAGES = parseInt(process.env.MB_CDR_IMPORT_MAX_PAGES || '20', 10);
 // When no prior import cursor exists, look back this many minutes for initial backfill
 const MB_CDR_IMPORT_LOOKBACK_MINUTES = parseInt(process.env.MB_CDR_IMPORT_LOOKBACK_MINUTES || '1440', 10); // default 24h
+// If a user has no new CDRs in the queried window, advance their cursor close to "now"
+// to avoid repeatedly scanning the same foreign-user pages.
+const MB_CDR_IMPORT_EMPTY_ADVANCE_SLACK_SECONDS = parseInt(process.env.MB_CDR_IMPORT_EMPTY_ADVANCE_SLACK_SECONDS || '300', 10);
 const CHECKOUT_MIN_AMOUNT = parseFloat(process.env.CHECKOUT_MIN_AMOUNT || '100');
 const CHECKOUT_MAX_AMOUNT = parseFloat(process.env.CHECKOUT_MAX_AMOUNT || '500');
 
@@ -225,6 +226,12 @@ function cdrRowBelongsToUser(row, idUser, username, email){
 
   return Boolean(idMatches || userMatches || emailMatches);
 }
+
+function extractMagnusUserIdFromCdrRow(row) {
+  const v = row?.id_user ?? row?.user_id ?? row?.uid ?? row?.idUser ?? row?.userid;
+  const s = String(v || '').trim();
+  return s;
+}
 // Strict SIP ownership check: require row id_user to equal current id
 function sipBelongsToUser(row, idUser){
   const idStr = String(idUser || '');
@@ -351,7 +358,19 @@ app.use(bodyParser.urlencoded({ extended: true }));
 app.use((req, res, next) => {
   const t0 = process.hrtime.bigint();
   const wantsLog = req.path.startsWith('/api/') || req.path === '/login' || req.path === '/dashboard';
-  const redact = (obj)=>{ try { const c = Object.assign({}, obj||{}); if ('password' in c) c.password='***'; if ('secret' in c) c.secret='***'; if ('api_key' in c) c.api_key='***'; return c; } catch { return {}; } };
+  const redact = (obj)=>{
+    try {
+      const c = Object.assign({}, obj||{});
+      if ('password' in c) c.password='***';
+      if ('secret' in c) c.secret='***';
+      if ('api_key' in c) c.api_key='***';
+      if ('code' in c) c.code='***';
+      if ('token' in c) c.token='***';
+      return c;
+    } catch {
+      return {};
+    }
+  };
   res.on('finish', () => {
     if (!wantsLog) return;
     const ms = Number(process.hrtime.bigint() - t0)/1e6;
@@ -396,10 +415,19 @@ const loginLimiter = rateLimit({
   message: { success: false, message: 'Too many login attempts. Please try again later.' }
 });
 
-// OTP-related endpoints: keep much stricter (3 per 10 minutes)
-const otpLimiter = rateLimit({
+// OTP-related endpoints
+// - Sending codes must be strict (prevents email flooding)
+// - Verifying codes can be more lenient (attempts are also limited per token in DB)
+const otpSendLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
-  max: 3,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many verification code requests. Please try again later.' }
+});
+const otpVerifyLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 20,
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: 'Too many verification attempts. Please try again later.' }
@@ -1729,6 +1757,204 @@ async function importMagnusCdrsForUser({ localUserId, magnusUserId, username, em
   }
 }
 
+// Batch import MagnusBilling CDRs once per tick and distribute to local users.
+// This avoids N_users * N_pages scans when the upstream endpoint ignores id_user filters.
+async function importMagnusCdrsForUsersBatch({ users, httpsAgent, hostHeader }) {
+  if (!pool || !Array.isArray(users) || !users.length) return;
+
+  const now = new Date();
+  const nowMs = now.getTime();
+  const defaultSinceMs = nowMs - MB_CDR_IMPORT_LOOKBACK_MINUTES * 60 * 1000;
+  const overlapMs = 60 * 1000;
+  const slackMs = (Number.isFinite(MB_CDR_IMPORT_EMPTY_ADVANCE_SLACK_SECONDS) ? MB_CDR_IMPORT_EMPTY_ADVANCE_SLACK_SECONDS : 300) * 1000;
+
+  // Load all cursors once (table is small) and build a per-user sinceMs map.
+  const cursorByMagnus = new Map();
+  try {
+    const [rows] = await pool.query('SELECT magnus_user_id, last_time_start_ms FROM cdr_import_cursors');
+    for (const r of rows || []) {
+      const mid = String(r.magnus_user_id || '').trim();
+      if (!mid) continue;
+      const lastMs = Number(r.last_time_start_ms) || 0;
+      cursorByMagnus.set(mid, lastMs);
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[cdr.import.cursor.loadAll] failed:', e.message || e);
+  }
+
+  const userByMagnus = new Map();
+  let globalSinceMs = nowMs;
+
+  for (const u of users) {
+    const magnusUserId = String(u.magnus_user_id || '').trim();
+    if (!magnusUserId) continue;
+    const localUserId = String(u.id);
+
+    const lastMs = cursorByMagnus.get(magnusUserId) || 0;
+    const sinceMs = lastMs > 0
+      ? Math.max(lastMs - overlapMs, defaultSinceMs)
+      : defaultSinceMs;
+
+    if (sinceMs < globalSinceMs) globalSinceMs = sinceMs;
+
+    userByMagnus.set(magnusUserId, {
+      localUserId,
+      magnusUserId,
+      username: u.username || '',
+      email: u.email || '',
+      sinceMs
+    });
+  }
+
+  if (!userByMagnus.size) return;
+
+  const fromStr = formatMagnusDateTime(new Date(globalSinceMs));
+  const toStr = formatMagnusDateTime(now);
+
+  const pageLimit = MB_CDR_IMPORT_PAGE_SIZE;
+  const maxPages = MB_CDR_IMPORT_MAX_PAGES;
+
+  const importedByMagnus = new Map();
+  const maxSeenByMagnus = new Map();
+  const sawNewByMagnus = new Map();
+  for (const [mid, info] of userByMagnus.entries()) {
+    importedByMagnus.set(mid, 0);
+    maxSeenByMagnus.set(mid, info.sinceMs);
+    sawNewByMagnus.set(mid, false);
+  }
+
+  let completedWindow = false;
+  let pagesFetched = 0;
+  let start = 0;
+
+  for (let page = 0; page < maxPages; page++, start += pageLimit) {
+    pagesFetched++;
+
+    let dataRaw;
+    try {
+      dataRaw = await fetchCdr({
+        from: fromStr,
+        to: toStr,
+        httpsAgent,
+        hostHeader,
+        start,
+        limit: pageLimit
+      });
+    } catch (e) {
+      if (DEBUG) console.warn('[cdr.import.batch.fetch] failed:', e.message || e);
+      break;
+    }
+
+    const rawRows = (dataRaw && (dataRaw.rows || dataRaw.data)) || [];
+    if (!rawRows.length) {
+      completedWindow = true;
+      break;
+    }
+
+    // Group by magnus_user_id to reduce DB roundtrips.
+    const buckets = new Map(); // magnusUserId -> { localUserId, magnusUserId, rows, rawRows }
+
+    for (const r of rawRows) {
+      const mid = extractMagnusUserIdFromCdrRow(r);
+      if (!mid) continue;
+
+      const user = userByMagnus.get(mid);
+      if (!user) continue;
+
+      let n;
+      try {
+        n = normalizeMagnusCdrRow(r);
+      } catch (e) {
+        if (DEBUG) console.warn('[cdr.import.batch.normalize] failed:', e.message || e);
+        continue;
+      }
+      if (!n || !n.cdrId) continue;
+
+      const ts = Date.parse(n.timeStart || n.createdAt || '');
+      if (!Number.isNaN(ts) && ts < user.sinceMs) {
+        // Outside this user's effective window (likely already imported on prior ticks).
+        continue;
+      }
+
+      if (!Number.isNaN(ts)) {
+        sawNewByMagnus.set(mid, true);
+        if (ts > (maxSeenByMagnus.get(mid) || user.sinceMs)) maxSeenByMagnus.set(mid, ts);
+      } else {
+        // If timestamp is missing/unparseable, treat as "new" so we don't advance the cursor incorrectly.
+        sawNewByMagnus.set(mid, true);
+      }
+
+      let b = buckets.get(mid);
+      if (!b) {
+        b = { localUserId: user.localUserId, magnusUserId: mid, rows: [], rawRows: [] };
+        buckets.set(mid, b);
+      }
+      b.rows.push(n);
+      b.rawRows.push(r);
+    }
+
+    for (const [mid, b] of buckets.entries()) {
+      if (!b.rows.length) continue;
+      await saveMagnusCdrsToDb({
+        localUserId: b.localUserId,
+        magnusUserId: b.magnusUserId,
+        rows: b.rows,
+        rawRows: b.rawRows
+      });
+      importedByMagnus.set(mid, (importedByMagnus.get(mid) || 0) + b.rows.length);
+    }
+
+    if (rawRows.length < pageLimit) {
+      completedWindow = true;
+      break;
+    }
+  }
+
+  // Cursor updates: update per-user on success; if window completed and user had no new rows,
+  // advance close to now to prevent repeated scans of foreign-user pages.
+  for (const [mid, info] of userByMagnus.entries()) {
+    const imported = importedByMagnus.get(mid) || 0;
+    const maxSeenMs = maxSeenByMagnus.get(mid) || info.sinceMs;
+
+    if (imported > 0 && maxSeenMs > info.sinceMs) {
+      try {
+        await pool.execute(
+          'INSERT INTO cdr_import_cursors (magnus_user_id, last_time_start_ms) VALUES (?, ?) ON DUPLICATE KEY UPDATE last_time_start_ms = VALUES(last_time_start_ms), updated_at = CURRENT_TIMESTAMP',
+          [mid, maxSeenMs]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[cdr.import.cursor.save] failed:', e.message || e);
+      }
+      continue;
+    }
+
+    if (completedWindow && !sawNewByMagnus.get(mid)) {
+      // No calls for this user in the completed window: move the cursor near now.
+      const advanceTo = Math.max(nowMs - slackMs, defaultSinceMs);
+      try {
+        await pool.execute(
+          'INSERT INTO cdr_import_cursors (magnus_user_id, last_time_start_ms) VALUES (?, ?) ON DUPLICATE KEY UPDATE last_time_start_ms = VALUES(last_time_start_ms), updated_at = CURRENT_TIMESTAMP',
+          [mid, advanceTo]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[cdr.import.cursor.advanceEmpty] failed:', e.message || e);
+      }
+    }
+  }
+
+  if (DEBUG) {
+    const totalImported = [...importedByMagnus.values()].reduce((a, b) => a + (Number(b) || 0), 0);
+    console.log('[cdr.import.batch]', {
+      users: userByMagnus.size,
+      pagesFetched,
+      completedWindow,
+      from: fromStr,
+      to: toStr,
+      imported: totalImported
+    });
+  }
+}
+
 let cdrImportRunning = false;
 async function runCdrImportTick() {
   if (!pool) return;
@@ -1746,28 +1972,13 @@ async function runCdrImportTick() {
       return;
     }
 
-    const httpsAgent = new https.Agent({
-      rejectUnauthorized: process.env.MAGNUSBILLING_TLS_INSECURE !== '1',
-      ...(process.env.MAGNUSBILLING_TLS_SERVERNAME ? { servername: process.env.MAGNUSBILLING_TLS_SERVERNAME } : {})
-    });
+    const httpsAgent = magnusBillingAgent;
     const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
 
-    for (const u of users) {
-      const localUserId = String(u.id);
-      const magnusUserId = String(u.magnus_user_id || '').trim();
-      if (!magnusUserId) continue;
-      try {
-        await importMagnusCdrsForUser({
-          localUserId,
-          magnusUserId,
-          username: u.username || '',
-          email: u.email || '',
-          httpsAgent,
-          hostHeader
-        });
-      } catch (e) {
-        if (DEBUG) console.warn('[cdr.import.user.error]', { localUserId, magnusUserId, error: e.message || e });
-      }
+    try {
+      await importMagnusCdrsForUsersBatch({ users, httpsAgent, hostHeader });
+    } catch (e) {
+      if (DEBUG) console.warn('[cdr.import.batch.error]', e.message || e);
     }
   } catch (e) {
     if (DEBUG) console.warn('[cdr.import.tick] error:', e.message || e);
@@ -2925,20 +3136,27 @@ app.post(
       if (!Buffer.isBuffer(bodyBuffer)) {
         bodyBuffer = Buffer.from(bodyBuffer || '');
       }
-      // Some deployments or proxies may strip gzip encoding or send plain JSON
-      // while still setting Content-Encoding. Be tolerant: if gunzip fails,
-      // fall back to treating the body as plain text instead of 4xx.
-      if (encoding.includes('gzip')) {
+
+      // Some deployments or proxies may send plain JSON while still setting
+      // Content-Encoding: gzip. Only gunzip when it is *actually* gzip.
+      const looksGzip =
+        bodyBuffer.length >= 2 &&
+        bodyBuffer[0] === 0x1f &&
+        bodyBuffer[1] === 0x8b;
+      const headerSaysGzip = encoding.includes('gzip');
+
+      if (headerSaysGzip && looksGzip) {
         try {
           bodyBuffer = zlib.gunzipSync(bodyBuffer);
         } catch (e) {
-          if (DEBUG && !didwwGunzipWarned) {
-            console.warn('[didww.cdr] Failed to gunzip body, treating as plain text:', e.message || e);
-            didwwGunzipWarned = true;
-          }
-          // leave bodyBuffer as-is (raw JSON / NDJSON)
+          // If it really looks like gzip but we can't decode it, return 5xx so DIDWW can retry.
+          if (DEBUG) console.warn('[didww.cdr] Failed to gunzip gzipped body:', e.message || e);
+          return res.status(500).end();
         }
       }
+
+      // If the header claims gzip but body isn't gzipped, treat as plain text.
+      // (No warning; still parse as JSON/NDJSON.)
 
       const text = bodyBuffer.toString('utf8');
       if (!text.trim()) {
@@ -4639,9 +4857,52 @@ app.post('/api/me/didww/orders', requireAuth, async (req, res) => {
     
     return res.json({ success: true, data: order, dids: includedDids });
   } catch (e) {
-    if (DEBUG) console.error('[didww.order] error:', e.response?.data || e.message || e);
-    const errMsg = e.response?.data?.errors?.[0]?.detail || 'Failed to place order';
-    return res.status(500).json({ success: false, message: errMsg });
+    const upstreamStatus = e && e.response ? e.response.status : undefined;
+    const didwwErrors = e && e.response && e.response.data ? e.response.data.errors : undefined;
+
+    const errorTexts = [];
+    if (Array.isArray(didwwErrors)) {
+      for (const er of didwwErrors) {
+        if (er && er.detail) errorTexts.push(String(er.detail));
+        if (er && er.title) errorTexts.push(String(er.title));
+      }
+    }
+    const joined = errorTexts.join(' | ').toLowerCase();
+    const first = Array.isArray(didwwErrors) && didwwErrors.length ? didwwErrors[0] : null;
+    const fallbackMsg = (first && (first.detail || first.title)) ? String(first.detail || first.title) : (e && e.message ? String(e.message) : 'Failed to place order');
+
+    if (DEBUG) {
+      console.error('[didww.order] error:', {
+        upstreamStatus,
+        errors: didwwErrors,
+        message: e && e.message ? e.message : undefined
+      });
+    }
+
+    // DIDWW "Insufficient funds" refers to the provider (TalkUSA) DIDWW account balance.
+    // Do not tell the customer to "add funds" (that's for MagnusBilling balance) — instead
+    // treat as a temporary service issue.
+    if (joined.includes('insufficient funds')) {
+      return res.status(503).json({
+        success: false,
+        message: 'Number ordering is temporarily unavailable. Please try again later or contact support.'
+      });
+    }
+
+    // Pass through common provider validation errors as 400 so the UI shows the message.
+    if (upstreamStatus && upstreamStatus >= 400 && upstreamStatus < 500) {
+      if (upstreamStatus === 429) {
+        return res.status(503).json({ success: false, message: 'Provider is rate limiting requests. Please try again in a moment.' });
+      }
+      // Treat auth/permission/not-found as an upstream/config problem.
+      if (upstreamStatus === 401 || upstreamStatus === 403 || upstreamStatus === 404) {
+        return res.status(502).json({ success: false, message: 'Number provider error. Please try again later or contact support.' });
+      }
+      return res.status(400).json({ success: false, message: fallbackMsg });
+    }
+
+    // Provider or network failure.
+    return res.status(502).json({ success: false, message: fallbackMsg });
   }
 });
 
@@ -4986,7 +5247,7 @@ app.delete('/api/me/didww/dids/:id', requireAuth, async (req, res) => {
 });
 
 // Email verification: start
-app.post('/api/verify-email', otpLimiter, async (req, res) => {
+app.post('/api/verify-email', otpSendLimiter, async (req, res) => {
   try {
     const { username, password, firstname, lastname, email, phone } = req.body || {};
     if (!username || !password || !firstname || !lastname || !email) {
@@ -5024,7 +5285,7 @@ app.post('/api/verify-email', otpLimiter, async (req, res) => {
 });
 
 // Email verification: complete -> create account
-app.post('/api/complete-signup', otpLimiter, async (req, res) => {
+app.post('/api/complete-signup', otpVerifyLimiter, async (req, res) => {
   try {
     const { token, code, email: reqEmail } = req.body || {};
     if (DEBUG) console.log('[complete-signup] Request received:', { token, hasCode: !!code, hasEmail: !!reqEmail });
@@ -5046,12 +5307,12 @@ app.post('/api/complete-signup', otpLimiter, async (req, res) => {
     if (Date.now() > Number(rec.expires_at)) { if (DEBUG) console.log('[complete-signup] Code expired:', { token: activeToken, email: rec.email, expiresAt: rec.expires_at, now: Date.now() }); await markVerificationUsed(activeToken); return res.status(400).json({ success: false, message: 'Code expired, please request a new one' }); }
     const attempts = Number(rec.attempts || 0);
     if (attempts >= OTP_MAX_ATTEMPTS) {
-      if (DEBUG) console.log('[complete-signup] Too many OTP attempts for token:', { token, email: rec.email, attempts });
-      await markVerificationUsed(token);
+      if (DEBUG) console.log('[complete-signup] Too many OTP attempts for token:', { token: activeToken, email: rec.email, attempts });
+      await markVerificationUsed(activeToken);
       return res.status(400).json({ success: false, message: 'Too many invalid attempts. Please request a new verification code.' });
     }
     if (sha256(code) !== rec.code_hash) {
-      if (DEBUG) console.log('[complete-signup] Code mismatch:', { token: activeToken, email: rec.email, submittedCode: code, submittedHash: sha256(code), storedHash: rec.code_hash });
+      if (DEBUG) console.log('[complete-signup] Code mismatch:', { token: activeToken, email: rec.email, attempts: attempts + 1 });
       try {
         await pool.execute('UPDATE email_verifications SET attempts = attempts + 1 WHERE token = ?', [activeToken]);
       } catch (e) {

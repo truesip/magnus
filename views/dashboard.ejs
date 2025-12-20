@@ -526,16 +526,6 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
             tr.innerHTML = `<th>${escapeHtml(k)}</th><td>${escapeHtml(String(v||''))}</td>`;
             body.appendChild(tr);
           }
-          // Append Disabled DNC row with an informational button
-          const dncTr = document.createElement('tr');
-          dncTr.innerHTML = '<th>Disabled DNC</th><td><button id="dncInfoBtn" type="button">Disabled DNC</button></td>';
-          body.appendChild(dncTr);
-          const dncBtn = document.getElementById('dncInfoBtn');
-          if (dncBtn){
-            dncBtn.addEventListener('click', () => {
-              alert('Disabling Do Not Call (DNC) protections for this account costs a one-time fee of $700. This change will allow your account to call numbers that are on DNC lists. Please contact support if you want to proceed.');
-            });
-          }
           $('#profile-empty').style.display='none'; $('#profile-table').style.display='table';
         } else { $('#profile-empty').textContent='No profile'; }
       }catch{ $('#profile-empty').textContent='Failed to load profile'; }
@@ -1470,7 +1460,9 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           availableDidsData.forEach(did => {
             const da = did.attributes || {};
             const tr = document.createElement('tr');
-            tr.innerHTML = `<td>${escapeHtml(da.number || '')}</td><td>${escapeHtml(isTollfree ? 'Toll-Free' : (da.did_type || ''))}</td><td>$${markupMonthly.toFixed(2)}</td><td>$${markupSetup.toFixed(2)}</td><td><button class=\"buy-did\" data-id=\"${did.id}\">Buy</button></td>`;
+            const rawType = da.did_type || da.didType || da.number_type || da.numberType || '';
+            const typeLabel = isTollfree ? 'Toll-Free' : (rawType ? String(rawType) : 'Local');
+            tr.innerHTML = `<td>${escapeHtml(da.number || '')}</td><td>${escapeHtml(typeLabel)}</td><td>$${markupMonthly.toFixed(2)}</td><td>$${markupSetup.toFixed(2)}</td><td><button class=\"buy-did\" data-id=\"${did.id}\">Buy</button></td>`;
             tbody.appendChild(tr);
           });
           $('#available-dids-table').style.display = 'table';

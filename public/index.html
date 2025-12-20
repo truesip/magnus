@@ -362,11 +362,16 @@
     <script>
         const form = document.getElementById('signupForm');
         const submitBtn = document.getElementById('submitBtn');
-        const alertBox = document.getElementById('alert');
         const usernameHelp = document.getElementById('usernameHelp');
         const emailHelp = document.getElementById('emailHelp');
 
         function showAlert(message, type) {
+            const alertBox = document.getElementById('alert');
+            if (!alertBox) {
+                // Fallback if the current step doesn't render an alert element.
+                try { window.alert(message); } catch {}
+                return;
+            }
             alertBox.textContent = message;
             alertBox.className = `alert alert-${type} show`;
             
@@ -455,6 +460,7 @@ const result = await response.json();
                     <h1>Verify your email</h1>
                     <p>We sent a 6‑digit code to <b>${data.email}</b>. Enter it below to complete your signup.</p>
                 </div>
+                <div id="alert" class="alert"></div>
                 <div class="form-group">
                     <label for="code">Verification code</label>
                     <input type="text" id="code" maxlength="6" placeholder="123456" inputmode="numeric" pattern="[0-9]*" />
@@ -485,12 +491,20 @@ const result = await response.json();
                 }, 1000);
             };
             startCooldown();
-            document.getElementById('verifyBtn').addEventListener('click', async () => {
+            document.getElementById('verifyBtn').addEventListener('click', async (ev) => {
+                const verifyBtn = ev.currentTarget;
                 const code = document.getElementById('code').value.trim();
                 if (!code) return showAlert('Enter the verification code.', 'error');
-                submitBtn.disabled = true;
+
+                verifyBtn.disabled = true;
+                const oldText = verifyBtn.textContent;
+                verifyBtn.innerHTML = '<span class="loading"></span>Verifying...';
                 try {
-const resp = await fetch('/api/complete-signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: data.email, code }) });
+                    const resp = await fetch('/api/complete-signup', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ token: data.token, email: data.email, code })
+                    });
                     const resj = await resp.json();
                     if (resj.success) {
                         renderSuccess({ username: resj.data?.username, password: resj.data?.password, sipDomain: resj.data?.sipDomain, portalUrl: resj.data?.portalUrl });
@@ -499,7 +513,10 @@ const resp = await fetch('/api/complete-signup', { method: 'POST', headers: { 'C
                     }
                 } catch (e) {
                     showAlert('Network error. Please try again.', 'error');
-                } finally { submitBtn.disabled = false; }
+                } finally {
+                    verifyBtn.disabled = false;
+                    verifyBtn.textContent = oldText;
+                }
             });
             document.getElementById('resendBtn').addEventListener('click', async (ev) => {
                 const btn = ev.currentTarget;
