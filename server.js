@@ -857,6 +857,71 @@ async function checkAvailability({ username, email }) {
   }
   return { usernameAvailable, emailAvailable };
 }
+
+function parseSmtp2goSendResult(payload) {
+  try {
+    const root = (payload && typeof payload === 'object') ? payload : {};
+    const data = (root.data && typeof root.data === 'object') ? root.data : root;
+    const succeeded = (typeof data.succeeded === 'number') ? data.succeeded : (typeof root.succeeded === 'number' ? root.succeeded : undefined);
+    const failed = (typeof data.failed === 'number') ? data.failed : (typeof root.failed === 'number' ? root.failed : undefined);
+    const requestId = root.request_id || root.requestId || data.request_id || data.requestId;
+    const errors = Array.isArray(root.errors) ? root.errors : (Array.isArray(data.errors) ? data.errors : undefined);
+    const failureReasons = Array.isArray(root.failures) ? root.failures : (Array.isArray(data.failures) ? data.failures : undefined);
+    return { succeeded, failed, requestId, errors, failureReasons, raw: root };
+  } catch {
+    return { succeeded: undefined, failed: undefined, requestId: undefined, errors: undefined, failureReasons: undefined, raw: payload };
+  }
+}
+
+async function smtp2goSendEmail(payload, { kind, to, subject } = {}) {
+  const url = 'https://api.smtp2go.com/v3/email/send';
+  let resp;
+  try {
+    // SMTP2GO may return HTTP 200 even when some recipients fail. We always
+    // inspect the response body to ensure the send actually succeeded.
+    resp = await axios.post(url, payload, { timeout: 15000, validateStatus: () => true });
+  } catch (e) {
+    const msg = e?.code === 'ECONNABORTED' ? 'SMTP2GO request timed out' : (e?.message || 'SMTP2GO request failed');
+    if (DEBUG) console.warn('[smtp2go.send] network error', { kind, to, subject, code: e?.code, message: e?.message });
+    throw new Error(msg);
+  }
+
+  const parsed = parseSmtp2goSendResult(resp.data);
+
+  if (DEBUG) {
+    console.log('[smtp2go.send]', {
+      kind,
+      to,
+      subject,
+      status: resp.status,
+      requestId: parsed.requestId,
+      succeeded: parsed.succeeded,
+      failed: parsed.failed,
+      hasErrors: Array.isArray(parsed.errors) ? parsed.errors.length : 0,
+      hasFailures: Array.isArray(parsed.failureReasons) ? parsed.failureReasons.length : 0
+    });
+  }
+
+  // Hard fail on non-2xx
+  if (!(resp.status >= 200 && resp.status < 300)) {
+    const details = (resp.data && typeof resp.data === 'object') ? JSON.stringify(resp.data) : String(resp.data || '');
+    throw new Error(`SMTP2GO HTTP ${resp.status}${details ? `: ${details}` : ''}`);
+  }
+
+  // Fail fast if API reports recipient failures/errors in the body
+  if (Array.isArray(parsed.errors) && parsed.errors.length) {
+    throw new Error(`SMTP2GO send error: ${JSON.stringify(parsed.raw)}`);
+  }
+  if (typeof parsed.failed === 'number' && parsed.failed > 0) {
+    throw new Error(`SMTP2GO send had failures (failed=${parsed.failed}): ${JSON.stringify(parsed.raw)}`);
+  }
+  if (typeof parsed.succeeded === 'number' && parsed.succeeded < 1) {
+    throw new Error(`SMTP2GO send did not succeed (succeeded=${parsed.succeeded}): ${JSON.stringify(parsed.raw)}`);
+  }
+
+  return resp.data;
+}
+
 async function sendVerificationEmail(toEmail, code) {
   const apiKey = process.env.SMTP2GO_API_KEY;
   const sender = process.env.SMTP2GO_SENDER || `no-reply@${(process.env.SENDER_DOMAIN || 'talkusa.net')}`;
@@ -866,7 +931,7 @@ async function sendVerificationEmail(toEmail, code) {
   const text = `Your verification code is ${code}. It expires in ${minutes} minutes.`;
   const html = `<p>Your verification code is <b>${code}</b>.</p><p>This code expires in ${minutes} minutes.</p>`;
   const payload = { api_key: apiKey, to: [toEmail], sender, subject, text_body: text, html_body: html };
-  await axios.post('https://api.smtp2go.com/v3/email/send', payload, { timeout: 15000 });
+  await smtp2goSendEmail(payload, { kind: 'verification', to: toEmail, subject });
 }
 
 async function sendWelcomeEmail(toEmail, username, sipDomain, portalUrl, password = '') {
@@ -899,7 +964,7 @@ async function sendWelcomeEmail(toEmail, username, sipDomain, portalUrl, passwor
     text_body: text,
     html_body: html
   };
-  await axios.post('https://api.smtp2go.com/v3/email/send', payload, { timeout: 15000 });
+  await smtp2goSendEmail(payload, { kind: 'welcome', to: toEmail, subject });
 }
 
 // Send a refill receipt email when funds are added
@@ -931,7 +996,7 @@ async function sendRefillReceiptEmail({ toEmail, username, amount, description }
     text_body: text,
     html_body: html
   };
-  await axios.post('https://api.smtp2go.com/v3/email/send', payload, { timeout: 15000 });
+  await smtp2goSendEmail(payload, { kind: 'refill-receipt', to: toEmail, subject });
 }
 
 // Send a DID purchase receipt email when new numbers are purchased
@@ -1009,7 +1074,7 @@ async function sendDidPurchaseReceiptEmail({ toEmail, displayName, items, totalA
     text_body: text,
     html_body: html
   };
-  await axios.post('https://api.smtp2go.com/v3/email/send', payload, { timeout: 15000 });
+  await smtp2goSendEmail(payload, { kind: 'did-purchase-receipt', to: toEmail, subject });
 }
 
 // Build location and pricing information for DID purchase receipt items
@@ -5279,7 +5344,7 @@ app.post('/api/verify-email', otpSendLimiter, async (req, res) => {
     if (DEBUG) console.debug('Verification code sent', { email, token });
     return res.status(200).json({ success: true, token });
   } catch (err) {
-    console.error('verify-email error', err.message || err);
+    console.error('verify-email error', err.response?.data || err.message || err);
     return res.status(500).json({ success: false, message: 'Failed to send verification code' });
   }
 });
