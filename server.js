@@ -730,6 +730,44 @@ async function initDb() {
     KEY idx_sq_local_order (order_id),
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
+
+  // AI Agents (Pipecat Cloud)
+  await pool.query(`CREATE TABLE IF NOT EXISTS ai_agents (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    display_name VARCHAR(120) NOT NULL,
+    greeting TEXT NULL,
+    prompt TEXT NULL,
+    cartesia_voice_id VARCHAR(191) NULL,
+    pipecat_agent_name VARCHAR(191) NOT NULL,
+    pipecat_secret_set VARCHAR(191) NOT NULL,
+    pipecat_region VARCHAR(64) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_pipecat_agent (pipecat_agent_name),
+    KEY idx_ai_agents_user (user_id),
+    FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
+  // AI Phone Numbers (Daily Telephony)
+  // One number can be assigned to at most one agent, and an agent can have at most one number.
+  await pool.query(`CREATE TABLE IF NOT EXISTS ai_numbers (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    daily_number_id VARCHAR(191) NOT NULL,
+    phone_number VARCHAR(64) NOT NULL,
+    agent_id BIGINT NULL,
+    dialin_config_id VARCHAR(191) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_daily_number (daily_number_id),
+    UNIQUE KEY uniq_phone_number (phone_number),
+    UNIQUE KEY uniq_agent_number (agent_id),
+    KEY idx_ai_numbers_user (user_id),
+    CONSTRAINT fk_ai_numbers_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_ai_numbers_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL
+  )`);
+
   // One-time migration: drop legacy per-user API columns if present and add password_hash if missing
   try {
     const toDrop = ['api_key','api_secret'];
@@ -748,6 +786,20 @@ async function initDb() {
     );
     if (!hasPwd || !hasPwd.length) {
       try { await pool.query('ALTER TABLE signup_users ADD COLUMN password_hash VARCHAR(255) NULL AFTER phone'); } catch (e) { if (DEBUG) console.warn('Add password_hash failed', e.message || e); }
+    }
+
+    // Ensure ai_agents.cartesia_voice_id exists (per-agent Cartesia voice selection)
+    try {
+      const [hasVoiceId] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_agents' AND column_name='cartesia_voice_id' LIMIT 1",
+        [dbName]
+      );
+      if (!hasVoiceId || !hasVoiceId.length) {
+        await pool.query('ALTER TABLE ai_agents ADD COLUMN cartesia_voice_id VARCHAR(191) NULL AFTER prompt');
+        if (DEBUG) console.log('[schema] Added ai_agents.cartesia_voice_id column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_agents.cartesia_voice_id check failed', e.message || e);
     }
     // Add dst column to user_trunks if missing
     const [hasDst] = await pool.query(
@@ -1338,11 +1390,552 @@ app.get('/api/me/profile', requireAuth, async (req, res) => {
   } catch (e) { return res.status(500).json({ success: false, message: 'Profile fetch failed' }); }
 });
 
+// ========== AI Agents (Pipecat Cloud) ==========
+const AI_MAX_AGENTS = Math.max(1, parseInt(process.env.AI_MAX_AGENTS || '5', 10) || 5);
+const AI_MAX_NUMBERS = Math.max(1, parseInt(process.env.AI_MAX_NUMBERS || '5', 10) || 5);
+
+function slugifyName(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32) || 'agent';
+}
+
+function assertConfiguredOrThrow(name, val) {
+  if (!val) throw new Error(`${name} not configured`);
+}
+
+function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId }) {
+  const deepgram = process.env.DEEPGRAM_API_KEY || '';
+  const cartesia = process.env.CARTESIA_API_KEY || '';
+  const xai = process.env.XAI_API_KEY || '';
+  // Platform-owned keys are required.
+  assertConfiguredOrThrow('DEEPGRAM_API_KEY', deepgram);
+  assertConfiguredOrThrow('CARTESIA_API_KEY', cartesia);
+  assertConfiguredOrThrow('XAI_API_KEY', xai);
+
+  return {
+    DEEPGRAM_API_KEY: deepgram,
+    CARTESIA_API_KEY: cartesia,
+    CARTESIA_VOICE_ID: String(cartesiaVoiceId || ''),
+    XAI_API_KEY: xai,
+    AGENT_GREETING: String(greeting || ''),
+    AGENT_PROMPT: String(prompt || '')
+  };
+}
+
+function pipecatSecretsObjectToArray(secretsObj) {
+  const obj = (secretsObj && typeof secretsObj === 'object') ? secretsObj : {};
+  return Object.entries(obj).map(([k, v]) => ({
+    secretKey: String(k),
+    secretValue: String(v ?? '')
+  }));
+}
+
+function buildPipecatSecretSetName(agentName) {
+  // Secret set names are length-limited in Pipecat Cloud.
+  const suffix = '-secrets';
+  const maxLen = 63;
+  const maxBase = Math.max(1, maxLen - suffix.length);
+  let base = String(agentName || 'agent');
+  if (base.length > maxBase) base = base.slice(0, maxBase);
+  base = base.replace(/-+$/g, '');
+  return (base + suffix).slice(0, maxLen);
+}
+
+async function pipecatUpsertSecretSet(setName, secretsObj, regionOverride) {
+  const region = String(regionOverride || PIPECAT_REGION || 'us-west');
+  const secrets = pipecatSecretsObjectToArray(secretsObj);
+  return pipecatApiCall({
+    method: 'PUT',
+    path: `/secrets/${encodeURIComponent(setName)}`,
+    body: { region, secrets }
+  });
+}
+
+async function pipecatCreateAgent({ agentName, secretSetName }) {
+  assertConfiguredOrThrow('PIPECAT_AGENT_IMAGE', PIPECAT_AGENT_IMAGE);
+
+  const body = {
+    serviceName: agentName,
+    image: PIPECAT_AGENT_IMAGE,
+    nodeType: 'arm',
+    region: PIPECAT_REGION,
+    secretSet: secretSetName,
+    agentProfile: PIPECAT_AGENT_PROFILE,
+    enableManagedKeys: false,
+    ...(PIPECAT_IMAGE_PULL_SECRET_SET ? { imagePullSecretSet: PIPECAT_IMAGE_PULL_SECRET_SET } : {})
+  };
+
+  return pipecatApiCall({ method: 'POST', path: '/agents', body });
+}
+
+async function pipecatUpdateAgent({ agentName, secretSetName, regionOverride }) {
+  assertConfiguredOrThrow('PIPECAT_AGENT_IMAGE', PIPECAT_AGENT_IMAGE);
+  // Pipecat Cloud update endpoint expects a subset of the agent configuration.
+  const body = {
+    image: PIPECAT_AGENT_IMAGE,
+    nodeType: 'arm',
+    secretSet: secretSetName,
+    agentProfile: PIPECAT_AGENT_PROFILE,
+    enableManagedKeys: false,
+    ...(PIPECAT_IMAGE_PULL_SECRET_SET ? { imagePullSecretSet: PIPECAT_IMAGE_PULL_SECRET_SET } : {})
+  };
+  return pipecatApiCall({ method: 'POST', path: `/agents/${encodeURIComponent(agentName)}`, body });
+}
+
+async function pipecatDeleteAgent(agentName) {
+  try {
+    await pipecatApiCall({ method: 'DELETE', path: `/agents/${encodeURIComponent(agentName)}` });
+    return true;
+  } catch (e) {
+    if (e && e.status === 404) return true;
+    throw e;
+  }
+}
+
+async function pipecatDeleteSecretSet(setName) {
+  try {
+    await pipecatApiCall({ method: 'DELETE', path: `/secrets/${encodeURIComponent(setName)}` });
+    return true;
+  } catch (e) {
+    if (e && e.status === 404) return true;
+    throw e;
+  }
+}
+
+function buildPipecatDialinWebhookUrl({ agentName }) {
+  assertConfiguredOrThrow('PIPECAT_ORG_ID', PIPECAT_ORG_ID);
+  // Pipecat public webhook URL used by Daily pinless dial-in config.
+  return `${PIPECAT_DIALIN_WEBHOOK_BASE.replace(/\/$/, '')}/${encodeURIComponent(PIPECAT_ORG_ID)}/${encodeURIComponent(agentName)}/dialin`;
+}
+
+async function dailyBuyAnyAvailableNumber() {
+  // Daily Phone Numbers
+  // GET /list-available-numbers -> { total_count, data: [{ number, region, ... }] }
+  let pickNumber = null;
+
+  try {
+    const avail = await dailyApiCall({ method: 'GET', path: '/list-available-numbers' });
+    const items = Array.isArray(avail?.data)
+      ? avail.data
+      : (Array.isArray(avail?.numbers) ? avail.numbers : (Array.isArray(avail) ? avail : []));
+
+    const pick = (Array.isArray(items) && items.length > 0) ? (items[0] || {}) : null;
+    pickNumber = pick ? (pick.number || pick.phone_number || pick.phoneNumber) : null;
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.number.buy] list-available-numbers failed:', e?.message || e);
+    pickNumber = null;
+  }
+
+  // POST /buy-phone-number: pass { number } if we found one; otherwise omit to buy a random CA number.
+  const buyBody = pickNumber ? { number: String(pickNumber) } : {};
+  const buy = await dailyApiCall({ method: 'POST', path: '/buy-phone-number', body: buyBody });
+
+  const dailyNumberId = buy?.id || buy?.data?.id;
+  const phoneNumber = buy?.number || buy?.data?.number || pickNumber;
+
+  if (!dailyNumberId || !phoneNumber) {
+    if (DEBUG) console.warn('[ai.number.buy] Unexpected Daily response:', buy);
+    throw new Error('Phone number purchase succeeded but the response was missing id/number');
+  }
+
+  return { dailyNumberId: String(dailyNumberId), phoneNumber: String(phoneNumber) };
+}
+
+function normalizePhoneNumber(s) {
+  return String(s || '').replace(/\s+/g, '');
+}
+
+async function dailyFindDialinConfigIdByPhoneNumber(phoneNumber) {
+  try {
+    // Query directly by phone number (avoid pagination issues).
+    const list = await dailyApiCall({
+      method: 'GET',
+      path: '/domain-dialin-config',
+      params: {
+        phone_number: String(phoneNumber),
+        limit: 1
+      }
+    });
+
+    const arr = Array.isArray(list?.data)
+      ? list.data
+      : (Array.isArray(list) ? list : []);
+
+    const item = arr[0];
+    const id = item?.id || item?.config_id || item?.domain_dialin_config_id;
+    return id ? String(id) : null;
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.dialin.list] Failed to list domain dial-in configs:', e?.message || e);
+  }
+  return null;
+}
+
+async function dailyUpsertDialinConfig({ phoneNumber, roomCreationApi }) {
+  // Daily Domain Dial-In Config
+  // POST /domain-dialin-config body params include: phone_number, room_creation_api, name_prefix, ...
+  const existingId = await dailyFindDialinConfigIdByPhoneNumber(phoneNumber);
+
+  const payload = {
+    phone_number: String(phoneNumber),
+    room_creation_api: String(roomCreationApi),
+    name_prefix: 'TalkUSA'
+  };
+
+  if (existingId) {
+    const updated = await dailyApiCall({ method: 'PUT', path: `/domain-dialin-config/${encodeURIComponent(existingId)}`, body: payload });
+    const id = updated?.id || updated?.data?.id || existingId;
+    return { dialinConfigId: String(id) };
+  }
+
+  const created = await dailyApiCall({ method: 'POST', path: '/domain-dialin-config', body: payload });
+  const createdId = created?.id || created?.data?.id;
+  if (!createdId) {
+    if (DEBUG) console.warn('[ai.dialin.create] Unexpected Daily response:', created);
+    throw new Error('Failed to create dial-in config (missing id)');
+  }
+  return { dialinConfigId: String(createdId) };
+}
+
+async function dailyDeleteDialinConfig(dialinConfigId) {
+  if (!dialinConfigId) return true;
+  try {
+    await dailyApiCall({ method: 'DELETE', path: `/domain-dialin-config/${encodeURIComponent(dialinConfigId)}` });
+    return true;
+  } catch (e) {
+    if (e && e.status === 404) return true;
+    throw e;
+  }
+}
+
+// List Cartesia voices (used by the dashboard voice picker)
+const CARTESIA_VOICES_CACHE_MS = 10 * 60 * 1000;
+let cartesiaVoicesCache = { at: 0, data: null };
+app.get('/api/me/ai/cartesia/voices', requireAuth, async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const limitRaw = parseInt(String(req.query.limit || '100'), 10);
+    const limit = Math.max(1, Math.min(200, Number.isFinite(limitRaw) ? limitRaw : 100));
+
+    if (!q && cartesiaVoicesCache.data && (Date.now() - cartesiaVoicesCache.at) < CARTESIA_VOICES_CACHE_MS) {
+      return res.json({ success: true, data: cartesiaVoicesCache.data });
+    }
+
+    const params = { limit };
+    if (q) params.q = q;
+
+    const raw = await cartesiaApiCall({ method: 'GET', path: '/voices', params });
+    const arr = Array.isArray(raw?.data) ? raw.data : (Array.isArray(raw) ? raw : []);
+
+    const data = (arr || [])
+      .map(v => ({
+        id: v?.id,
+        name: v?.name || v?.display_name || v?.displayName || '',
+        language: v?.language || v?.lang || '',
+        gender: v?.gender || ''
+      }))
+      .filter(v => v && v.id);
+
+    if (!q) {
+      cartesiaVoicesCache = { at: Date.now(), data };
+    }
+
+    return res.json({ success: true, data });
+  } catch (e) {
+    const msg = e?.message || 'Failed to load Cartesia voices';
+    if (DEBUG) console.warn('[ai.cartesia.voices] error:', msg);
+    return res.status(502).json({ success: false, message: msg });
+  }
+});
+
+// List agents
+app.get('/api/me/ai/agents', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const [rows] = await pool.execute(
+      `SELECT a.id, a.display_name, a.greeting, a.prompt, a.cartesia_voice_id, a.pipecat_agent_name, a.pipecat_region, a.created_at, a.updated_at,
+              n.id AS number_id, n.phone_number AS phone_number
+       FROM ai_agents a
+       LEFT JOIN ai_numbers n ON n.agent_id = a.id
+       WHERE a.user_id = ?
+       ORDER BY a.created_at DESC`,
+      [userId]
+    );
+    return res.json({ success: true, data: rows || [] });
+  } catch (e) {
+    if (DEBUG) console.error('[ai.agents.list] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load agents' });
+  }
+});
+
+// Create agent
+app.post('/api/me/ai/agents', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const { display_name, greeting, prompt, cartesia_voice_id, cartesiaVoiceId } = req.body || {};
+    const name = String(display_name || '').trim();
+    const voiceIdRaw = (cartesia_voice_id != null ? cartesia_voice_id : cartesiaVoiceId);
+    const cartesiaVoiceIdClean = (voiceIdRaw != null ? String(voiceIdRaw) : '').trim();
+    if (!name) return res.status(400).json({ success: false, message: 'display_name is required' });
+
+    const [[cnt]] = await pool.execute('SELECT COUNT(*) AS total FROM ai_agents WHERE user_id = ?', [userId]);
+    const total = Number(cnt?.total || 0);
+    if (total >= AI_MAX_AGENTS) {
+      return res.status(400).json({ success: false, message: `You can create up to ${AI_MAX_AGENTS} agents.` });
+    }
+
+    const slug = slugifyName(name);
+    const rand = crypto.randomBytes(3).toString('hex');
+    const agentName = `u${userId}-${slug}-${rand}`;
+    const secretSetName = buildPipecatSecretSetName(agentName);
+
+    // Provision Pipecat secret set + agent
+    try {
+      const secrets = buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId: cartesiaVoiceIdClean });
+      await pipecatUpsertSecretSet(secretSetName, secrets, PIPECAT_REGION);
+      await pipecatCreateAgent({ agentName, secretSetName });
+    } catch (provErr) {
+      // Best-effort cleanup
+      try { await pipecatDeleteSecretSet(secretSetName); } catch {}
+      const msg = provErr?.message || 'Failed to provision agent';
+      return res.status(502).json({ success: false, message: msg, error: provErr?.data });
+    }
+
+    // Persist
+    const [ins] = await pool.execute(
+      'INSERT INTO ai_agents (user_id, display_name, greeting, prompt, cartesia_voice_id, pipecat_agent_name, pipecat_secret_set, pipecat_region) VALUES (?,?,?,?,?,?,?,?)',
+      [userId, name, String(greeting || ''), String(prompt || ''), cartesiaVoiceIdClean || null, agentName, secretSetName, PIPECAT_REGION]
+    );
+
+    return res.json({
+      success: true,
+      data: {
+        id: ins.insertId,
+        display_name: name,
+        greeting: String(greeting || ''),
+        prompt: String(prompt || ''),
+        cartesia_voice_id: cartesiaVoiceIdClean || null,
+        pipecat_agent_name: agentName,
+        pipecat_secret_set: secretSetName,
+        pipecat_region: PIPECAT_REGION
+      }
+    });
+  } catch (e) {
+    if (DEBUG) console.error('[ai.agents.create] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to create agent' });
+  }
+});
+
+// Update agent
+app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const agentId = req.params.id;
+    const { display_name, greeting, prompt, cartesia_voice_id, cartesiaVoiceId } = req.body || {};
+
+    const [rows] = await pool.execute('SELECT * FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1', [agentId, userId]);
+    const agent = rows && rows[0];
+    if (!agent) return res.status(404).json({ success: false, message: 'Agent not found' });
+
+    const nextName = display_name != null ? String(display_name || '').trim() : agent.display_name;
+    const nextGreeting = greeting != null ? String(greeting || '') : (agent.greeting || '');
+    const nextPrompt = prompt != null ? String(prompt || '') : (agent.prompt || '');
+    const voiceIdRaw = (cartesia_voice_id != null ? cartesia_voice_id : cartesiaVoiceId);
+    const nextVoiceId = voiceIdRaw != null ? String(voiceIdRaw).trim() : (agent.cartesia_voice_id || '');
+    const nextVoiceIdClean = nextVoiceId ? String(nextVoiceId).trim() : '';
+    if (!nextName) return res.status(400).json({ success: false, message: 'display_name cannot be empty' });
+
+    await pool.execute(
+      'UPDATE ai_agents SET display_name = ?, greeting = ?, prompt = ?, cartesia_voice_id = ? WHERE id = ? AND user_id = ?',
+      [nextName, nextGreeting, nextPrompt, nextVoiceIdClean || null, agentId, userId]
+    );
+
+    // Update secret set + redeploy
+    try {
+      const secrets = buildPipecatSecrets({ greeting: nextGreeting, prompt: nextPrompt, cartesiaVoiceId: nextVoiceIdClean });
+      await pipecatUpsertSecretSet(agent.pipecat_secret_set, secrets, agent.pipecat_region || PIPECAT_REGION);
+      await pipecatUpdateAgent({
+        agentName: agent.pipecat_agent_name,
+        secretSetName: agent.pipecat_secret_set,
+        regionOverride: agent.pipecat_region || PIPECAT_REGION
+      });
+    } catch (provErr) {
+      const msg = provErr?.message || 'Failed to update agent in Pipecat';
+      return res.status(502).json({ success: false, message: msg, error: provErr?.data });
+    }
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[ai.agents.update] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to update agent' });
+  }
+});
+
+// Delete agent
+app.delete('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const agentId = req.params.id;
+
+    const [rows] = await pool.execute('SELECT * FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1', [agentId, userId]);
+    const agent = rows && rows[0];
+    if (!agent) return res.status(404).json({ success: false, message: 'Agent not found' });
+
+    // Unassign any number first (and remove Daily dial-in config)
+    const [nums] = await pool.execute('SELECT id, dialin_config_id FROM ai_numbers WHERE user_id = ? AND agent_id = ?', [userId, agentId]);
+    for (const n of nums || []) {
+      try { await dailyDeleteDialinConfig(n.dialin_config_id); } catch (e) { if (DEBUG) console.warn('[ai.agent.delete] dialin delete failed', e.message || e); }
+      try { await pool.execute('UPDATE ai_numbers SET agent_id = NULL, dialin_config_id = NULL WHERE id = ? AND user_id = ?', [n.id, userId]); } catch {}
+    }
+
+    // Delete Pipecat agent + secret set
+    try {
+      await pipecatDeleteAgent(agent.pipecat_agent_name);
+      await pipecatDeleteSecretSet(agent.pipecat_secret_set);
+    } catch (provErr) {
+      const msg = provErr?.message || 'Failed to delete agent in Pipecat';
+      return res.status(502).json({ success: false, message: msg, error: provErr?.data });
+    }
+
+    await pool.execute('DELETE FROM ai_agents WHERE id = ? AND user_id = ?', [agentId, userId]);
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[ai.agents.delete] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to delete agent' });
+  }
+});
+
+// List numbers
+app.get('/api/me/ai/numbers', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const [rows] = await pool.execute(
+      `SELECT n.id, n.daily_number_id, n.phone_number, n.agent_id, n.dialin_config_id, n.created_at, n.updated_at,
+              a.display_name AS agent_name
+       FROM ai_numbers n
+       LEFT JOIN ai_agents a ON a.id = n.agent_id
+       WHERE n.user_id = ?
+       ORDER BY n.created_at DESC`,
+      [userId]
+    );
+    return res.json({ success: true, data: rows || [] });
+  } catch (e) {
+    if (DEBUG) console.error('[ai.numbers.list] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load numbers' });
+  }
+});
+
+// Buy any available number
+app.post('/api/me/ai/numbers/buy', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const [[cnt]] = await pool.execute('SELECT COUNT(*) AS total FROM ai_numbers WHERE user_id = ?', [userId]);
+    const total = Number(cnt?.total || 0);
+    if (total >= AI_MAX_NUMBERS) {
+      return res.status(400).json({ success: false, message: `You can have up to ${AI_MAX_NUMBERS} phone numbers.` });
+    }
+
+    const { dailyNumberId, phoneNumber } = await dailyBuyAnyAvailableNumber();
+
+    const [ins] = await pool.execute(
+      'INSERT INTO ai_numbers (user_id, daily_number_id, phone_number) VALUES (?,?,?)',
+      [userId, dailyNumberId, phoneNumber]
+    );
+
+    return res.json({ success: true, data: { id: ins.insertId, daily_number_id: dailyNumberId, phone_number: phoneNumber } });
+  } catch (e) {
+    if (DEBUG) console.error('[ai.numbers.buy] error:', e.data || e.message || e);
+    return res.status(500).json({ success: false, message: e.message || 'Failed to buy number' });
+  }
+});
+
+// Assign number to agent (one number per agent)
+app.post('/api/me/ai/numbers/:id/assign', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const numberId = req.params.id;
+    const agentId = req.body?.agent_id;
+    if (!agentId) return res.status(400).json({ success: false, message: 'agent_id is required' });
+
+    const [nrows] = await pool.execute('SELECT * FROM ai_numbers WHERE id = ? AND user_id = ? LIMIT 1', [numberId, userId]);
+    const num = nrows && nrows[0];
+    if (!num) return res.status(404).json({ success: false, message: 'Number not found' });
+
+    const [arows] = await pool.execute('SELECT * FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1', [agentId, userId]);
+    const agent = arows && arows[0];
+    if (!agent) return res.status(404).json({ success: false, message: 'Agent not found' });
+
+    // Enforce one number per agent
+    const [existing] = await pool.execute(
+      'SELECT id FROM ai_numbers WHERE user_id = ? AND agent_id = ? AND id <> ? LIMIT 1',
+      [userId, agentId, numberId]
+    );
+    if (existing && existing.length) {
+      return res.status(409).json({ success: false, message: 'That agent already has a number assigned. Unassign it first.' });
+    }
+
+    // If the number was previously assigned, remove its existing dial-in config
+    if (num.dialin_config_id) {
+      try { await dailyDeleteDialinConfig(num.dialin_config_id); } catch (e) { if (DEBUG) console.warn('[ai.assign] Failed to delete old dialin config', e.message || e); }
+    }
+
+    const roomCreationApi = buildPipecatDialinWebhookUrl({ agentName: agent.pipecat_agent_name });
+    const { dialinConfigId } = await dailyUpsertDialinConfig({ phoneNumber: num.phone_number, roomCreationApi });
+
+    await pool.execute(
+      'UPDATE ai_numbers SET agent_id = ?, dialin_config_id = ? WHERE id = ? AND user_id = ?',
+      [agentId, dialinConfigId, numberId, userId]
+    );
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[ai.numbers.assign] error:', e.data || e.message || e);
+    return res.status(500).json({ success: false, message: e.message || 'Failed to assign number' });
+  }
+});
+
+// Unassign number
+app.post('/api/me/ai/numbers/:id/unassign', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const numberId = req.params.id;
+
+    const [rows] = await pool.execute('SELECT * FROM ai_numbers WHERE id = ? AND user_id = ? LIMIT 1', [numberId, userId]);
+    const num = rows && rows[0];
+    if (!num) return res.status(404).json({ success: false, message: 'Number not found' });
+
+    if (num.dialin_config_id) {
+      try { await dailyDeleteDialinConfig(num.dialin_config_id); } catch (e) { if (DEBUG) console.warn('[ai.unassign] dialin delete failed', e.message || e); }
+    }
+
+    await pool.execute(
+      'UPDATE ai_numbers SET agent_id = NULL, dialin_config_id = NULL WHERE id = ? AND user_id = ?',
+      [numberId, userId]
+    );
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[ai.numbers.unassign] error:', e.data || e.message || e);
+    return res.status(500).json({ success: false, message: e.message || 'Failed to unassign number' });
+  }
+});
+
 // ========== Billing History ==========
 // Get billing history for current user
 // NOTE: We intentionally hide raw DIDWW purchase rows ("DID Purchase (Order: ...)")
 // from the customer-facing history so users only see TalkUSA-level charges
-// such as refills and DID markup fees.
+// such as refills and DID markup fees
 app.get('/api/me/billing-history', requireAuth, async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
@@ -3619,6 +4212,117 @@ app.put('/api/me/sip-users/:id', requireAuth, async (req, res) => {
 // DIDWW API helpers
 const DIDWW_API_KEY = process.env.DIDWW_API_KEY;
 const DIDWW_API_URL = process.env.DIDWW_API_URL || 'https://api.didww.com/v3';
+
+// Pipecat Cloud (Control plane)
+// NOTE: Pipecat Cloud API details can vary; keep URLs configurable via env.
+const PIPECAT_API_KEY = process.env.PIPECAT_PRIVATE_API_KEY || process.env.PIPECAT_API_KEY || '';
+const PIPECAT_API_URL = process.env.PIPECAT_API_URL || process.env.PIPECAT_BASE_URL || 'https://api.pipecat.daily.co/v1';
+const PIPECAT_ORG_ID = process.env.PIPECAT_ORG_ID || '';
+const PIPECAT_AGENT_IMAGE = process.env.PIPECAT_AGENT_IMAGE || '';
+const PIPECAT_REGION = process.env.PIPECAT_REGION || 'us-west';
+const PIPECAT_AGENT_PROFILE = process.env.PIPECAT_AGENT_PROFILE || 'agent-1x';
+const PIPECAT_IMAGE_PULL_SECRET_SET = process.env.PIPECAT_IMAGE_PULL_SECRET_SET || '';
+const PIPECAT_DIALIN_WEBHOOK_BASE = process.env.PIPECAT_DIALIN_WEBHOOK_BASE || 'https://api.pipecat.daily.co/v1/public/webhooks';
+
+// Daily Telephony
+const DAILY_API_KEY = process.env.DAILY_API_KEY || '';
+const DAILY_API_URL = process.env.DAILY_API_URL || 'https://api.daily.co/v1';
+
+// Cartesia (used to list voices in the dashboard UI)
+const CARTESIA_API_KEY = process.env.CARTESIA_API_KEY || '';
+const CARTESIA_API_URL = process.env.CARTESIA_API_URL || 'https://api.cartesia.ai';
+const CARTESIA_VERSION = process.env.CARTESIA_VERSION || '2025-04-16';
+
+function pipecatAxios() {
+  if (!PIPECAT_API_KEY) {
+    throw new Error('PIPECAT_PRIVATE_API_KEY not configured');
+  }
+  return axios.create({
+    baseURL: PIPECAT_API_URL,
+    timeout: 30000,
+    headers: {
+      'Authorization': `Bearer ${PIPECAT_API_KEY}`,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    },
+    validateStatus: () => true
+  });
+}
+
+function dailyAxios() {
+  if (!DAILY_API_KEY) {
+    throw new Error('DAILY_API_KEY not configured');
+  }
+  return axios.create({
+    baseURL: DAILY_API_URL,
+    timeout: 30000,
+    headers: {
+      'Authorization': `Bearer ${DAILY_API_KEY}`,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    },
+    validateStatus: () => true
+  });
+}
+
+function cartesiaAxios() {
+  if (!CARTESIA_API_KEY) {
+    throw new Error('CARTESIA_API_KEY not configured');
+  }
+  return axios.create({
+    baseURL: CARTESIA_API_URL,
+    timeout: 30000,
+    headers: {
+      'Authorization': `Bearer ${CARTESIA_API_KEY}`,
+      'Cartesia-Version': CARTESIA_VERSION,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    },
+    validateStatus: () => true
+  });
+}
+
+async function pipecatApiCall({ method, path, body }) {
+  const client = pipecatAxios();
+  const resp = await client.request({ method, url: path, data: body });
+  if (!(resp.status >= 200 && resp.status < 300)) {
+    if (DEBUG) console.error('[pipecatApiCall] Request failed:', { status: resp.status, path, data: resp.data });
+    const msg = (resp.data && (resp.data.message || resp.data.error)) ? (resp.data.message || resp.data.error) : `Pipecat API error (${resp.status})`;
+    const err = new Error(msg);
+    err.status = resp.status;
+    err.data = resp.data;
+    throw err;
+  }
+  return resp.data;
+}
+
+async function dailyApiCall({ method, path, body, params }) {
+  const client = dailyAxios();
+  const resp = await client.request({ method, url: path, data: body, params });
+  if (!(resp.status >= 200 && resp.status < 300)) {
+    if (DEBUG) console.error('[dailyApiCall] Request failed:', { status: resp.status, path, data: resp.data });
+    const msg = (resp.data && (resp.data.message || resp.data.error)) ? (resp.data.message || resp.data.error) : `Daily API error (${resp.status})`;
+    const err = new Error(msg);
+    err.status = resp.status;
+    err.data = resp.data;
+    throw err;
+  }
+  return resp.data;
+}
+
+async function cartesiaApiCall({ method, path, body, params }) {
+  const client = cartesiaAxios();
+  const resp = await client.request({ method, url: path, data: body, params });
+  if (!(resp.status >= 200 && resp.status < 300)) {
+    if (DEBUG) console.error('[cartesiaApiCall] Request failed:', { status: resp.status, path, data: resp.data });
+    const msg = (resp.data && (resp.data.message || resp.data.error)) ? (resp.data.message || resp.data.error) : `Cartesia API error (${resp.status})`;
+    const err = new Error(msg);
+    err.status = resp.status;
+    err.data = resp.data;
+    throw err;
+  }
+  return resp.data;
+}
 
 // NOWPayments configuration
 const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY || '';

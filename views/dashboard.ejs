@@ -28,7 +28,7 @@
     table{width:100%;border-collapse:collapse}
     th,td{border-bottom:1px solid #e5e7eb;padding:8px 6px;text-align:left;font-size:13px}
     .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:8px}
-    input,select{border:1px solid #d1d5db;border-radius:8px;padding:8px 10px}
+    input,select,textarea{border:1px solid #d1d5db;border-radius:8px;padding:8px 10px}
     .cid-input{max-width:140px}
     button{background:#4f46e5;color:#fff;border:none;border-radius:8px;padding:8px 12px;cursor:pointer;transition:all 0.15s ease}
     button:hover{background:#4338ca}
@@ -145,6 +145,7 @@
       <a href="#sip" id="tab-sip">📞 SIP Account</a>
       <a href="#mydids" id="tab-mydids">📱 My Numbers</a>
       <a href="#buydid" id="tab-buydid">🛒 Buy Numbers</a>
+      <a href="#ai" id="tab-ai">🤖 AI Agent</a>
       <a href="#trunk" id="tab-trunk">↪️ Call Forwarding</a>
       <a href="#cdr" id="tab-cdr">📈 Call History</a>
       <a href="#billing" id="tab-billing">💳 Billing History</a>
@@ -294,6 +295,39 @@
         </div>
         <div id="mydids-empty" class="muted">Loading…</div>
       </section>
+
+      <section id="view-ai" style="display:none">
+        <h2>AI Agent</h2>
+        <div class="muted" style="margin-bottom:10px">Create an AI voice agent and assign a phone number for inbound calls.</div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap">
+          <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+              <h3 style="margin:0">Agents <span id="aiAgentsCount" class="muted"></span></h3>
+              <div style="margin-left:auto"></div>
+              <button id="createAiAgentBtn" style="background:#4f46e5">➕ Create Agent</button>
+            </div>
+            <table id="ai-agents-table" style="display:none">
+              <thead><tr><th>Name</th><th>Voice</th><th>Greeting</th><th>Number</th><th>Actions</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div id="ai-agents-empty" class="muted">Loading…</div>
+          </div>
+
+          <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+              <h3 style="margin:0">Phone Numbers <span id="aiNumbersCount" class="muted"></span></h3>
+              <div style="margin-left:auto"></div>
+              <button id="buyAiNumberBtn" style="background:#059669">➕ Buy Number</button>
+            </div>
+            <table id="ai-numbers-table" style="display:none">
+              <thead><tr><th>Number</th><th>Assigned Agent</th><th>Actions</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div id="ai-numbers-empty" class="muted">Loading…</div>
+          </div>
+        </div>
+      </section>
+
       <section id="view-billing" style="display:none">
         <h2>Billing History</h2>
         <table id="billing-table" style="display:none">
@@ -384,6 +418,44 @@
         </div>
       </div>
     </div>
+
+    <!-- AI Agent Modal -->
+    <div id="aiAgentModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
+      <div style="background:#fff;padding:24px;border-radius:12px;width:480px;max-width:92%">
+        <h3 style="margin:0 0 16px 0" id="aiAgentModalTitle">🤖 Create AI Agent</h3>
+        <div style="margin-bottom:12px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Agent Name *</label>
+          <input id="aiAgentName" type="text" placeholder="e.g. Support Agent" style="width:100%;box-sizing:border-box">
+        </div>
+        <div style="margin-bottom:12px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Greeting</label>
+          <textarea id="aiAgentGreeting" rows="3" placeholder="What should the agent say when answering?" style="width:100%;box-sizing:border-box"></textarea>
+        </div>
+        <div style="margin-bottom:12px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Cartesia Voice</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="aiAgentCartesiaVoiceSelect" style="flex:1;min-width:0">
+              <option value="">Default voice</option>
+              <option value="__custom__">Custom voice id…</option>
+            </select>
+            <button id="aiLoadVoicesBtn" type="button" style="background:#6b7280">Load Voices</button>
+          </div>
+          <div id="aiAgentCartesiaVoiceCustomWrap" style="display:none;margin-top:8px">
+            <input id="aiAgentCartesiaVoiceCustom" type="text" placeholder="Paste Cartesia voice_id" style="width:100%;box-sizing:border-box">
+          </div>
+          <div class="muted" style="margin-top:6px">Leave as Default to use the voice configured in your agent image.</div>
+        </div>
+        <div style="margin-bottom:16px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Custom Prompt</label>
+          <textarea id="aiAgentPrompt" rows="6" placeholder="Instructions for the agent..." style="width:100%;box-sizing:border-box"></textarea>
+        </div>
+        <input type="hidden" id="aiAgentId">
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button id="cancelAiAgentBtn" style="background:#6b7280">Cancel</button>
+          <button id="confirmAiAgentBtn" style="background:#4f46e5">Save Agent</button>
+        </div>
+      </div>
+    </div>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
@@ -395,8 +467,8 @@
     const $ = (s)=>document.querySelector(s);
     var billingPage = 0;
     var billingPageSize = 20;
-    const tabs = {overview:$('#tab-overview'), profile:$('#tab-profile'), sip:$('#tab-sip'), trunk:$('#tab-trunk'), billing:$('#tab-billing'), buydid:$('#tab-buydid'), mydids:$('#tab-mydids'), cdr:$('#tab-cdr')};
-    const views = {overview:$('#view-overview'), profile:$('#view-profile'), sip:$('#view-sip'), trunk:$('#view-trunk'), billing:$('#view-billing'), buydid:$('#view-buydid'), mydids:$('#view-mydids'), cdr:$('#view-cdr')};
+    const tabs = {overview:$('#tab-overview'), profile:$('#tab-profile'), sip:$('#tab-sip'), trunk:$('#tab-trunk'), billing:$('#tab-billing'), buydid:$('#tab-buydid'), mydids:$('#tab-mydids'), ai:$('#tab-ai'), cdr:$('#tab-cdr')};
+    const views = {overview:$('#view-overview'), profile:$('#view-profile'), sip:$('#view-sip'), trunk:$('#view-trunk'), billing:$('#view-billing'), buydid:$('#view-buydid'), mydids:$('#view-mydids'), ai:$('#view-ai'), cdr:$('#view-cdr')};
     function activate(name){
       Object.keys(tabs).forEach(k=>{ tabs[k].classList.toggle('active',k===name); views[k].style.display = (k===name?'block':'none'); });
     }
@@ -407,6 +479,7 @@
     tabs.billing.addEventListener('click',e=>{e.preventDefault();activate('billing');billingPage=0;loadBillingHistory();});
     tabs.buydid.addEventListener('click',e=>{e.preventDefault();activate('buydid');loadCountries();});
     tabs.mydids.addEventListener('click',e=>{e.preventDefault();activate('mydids');mydidsPage=0;loadMyDids();});
+    tabs.ai.addEventListener('click',e=>{e.preventDefault();activate('ai');loadAiAgents();loadAiNumbers();});
     tabs.cdr.addEventListener('click',e=>{e.preventDefault();activate('cdr');cdrPage=0;loadCdrDidOptions();loadCdr();});
 
     function grabRows(payload){
@@ -418,6 +491,404 @@
       if (Array.isArray(payload)) return payload;
       return [];
     }
+
+    // ========== AI Agents ==========
+    let aiAgentsData = [];
+    let aiNumbersData = [];
+    let cartesiaVoicesLoaded = false;
+
+    function getSelectedCartesiaVoiceId(){
+      const sel = $('#aiAgentCartesiaVoiceSelect');
+      const custom = $('#aiAgentCartesiaVoiceCustom');
+      if (!sel) return '';
+      const v = String(sel.value || '');
+      if (v === '__custom__') return String(custom && custom.value ? custom.value : '').trim();
+      return v.trim();
+    }
+
+    function setCartesiaCustomVisible(on){
+      const wrap = $('#aiAgentCartesiaVoiceCustomWrap');
+      if (!wrap) return;
+      wrap.style.display = on ? 'block' : 'none';
+    }
+
+    function applyAiVoiceSelection(voiceId){
+      const sel = $('#aiAgentCartesiaVoiceSelect');
+      const custom = $('#aiAgentCartesiaVoiceCustom');
+      if (!sel) return;
+      const id = String(voiceId || '').trim();
+
+      if (!id) {
+        sel.value = '';
+        if (custom) custom.value = '';
+        setCartesiaCustomVisible(false);
+        return;
+      }
+
+      const found = Array.from(sel.options || []).some(o => String(o.value) === id);
+      if (found) {
+        sel.value = id;
+        if (custom) custom.value = '';
+        setCartesiaCustomVisible(false);
+      } else {
+        sel.value = '__custom__';
+        if (custom) custom.value = id;
+        setCartesiaCustomVisible(true);
+      }
+    }
+
+    async function loadCartesiaVoices(force=false){
+      if (cartesiaVoicesLoaded && !force) return;
+      const sel = $('#aiAgentCartesiaVoiceSelect');
+      const btn = $('#aiLoadVoicesBtn');
+      if (!sel || !btn) return;
+
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = 'Loading...';
+      try {
+        const r = await fetch('/api/me/ai/cartesia/voices?limit=200');
+        const j = await r.json();
+        if (!j || j.success === false) {
+          showToast(j?.message || 'Failed to load Cartesia voices', 'error');
+          return;
+        }
+        const voices = Array.isArray(j.data) ? j.data : [];
+
+        // Preserve current selection before rebuilding options
+        const currentId = getSelectedCartesiaVoiceId();
+
+        sel.innerHTML = '';
+        sel.appendChild(new Option('Default voice', ''));
+        sel.appendChild(new Option('Custom voice id…', '__custom__'));
+
+        for (const v of voices){
+          const id = v && v.id ? String(v.id) : '';
+          if (!id) continue;
+          const name = String(v.name || '').trim();
+          const lang = String(v.language || '').trim();
+          const label = (name ? name : id) + (lang ? ` (${lang})` : '');
+          sel.appendChild(new Option(label, id));
+        }
+
+        cartesiaVoicesLoaded = true;
+        applyAiVoiceSelection(currentId);
+      } catch (e) {
+        showToast('Failed to load Cartesia voices', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    }
+
+    function renderAiAgents(){
+      const table = $('#ai-agents-table');
+      const empty = $('#ai-agents-empty');
+      const count = $('#aiAgentsCount');
+      if (count) count.textContent = `(${aiAgentsData.length}/5)`;
+      if (!table || !empty) return;
+      const tbody = table.querySelector('tbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+
+      if (!aiAgentsData.length){
+        table.style.display = 'none';
+        empty.style.display = 'block';
+        empty.textContent = 'No agents yet. Click “Create Agent”.';
+        return;
+      }
+
+      for (const a of aiAgentsData){
+        const greeting = String(a.greeting || '');
+        const greetShort = greeting.length > 44 ? (greeting.slice(0,44) + '…') : greeting;
+        const voiceId = String(a.cartesia_voice_id || '');
+        const voiceShort = voiceId ? (voiceId.length > 18 ? (voiceId.slice(0,18) + '…') : voiceId) : '-';
+        const num = a.phone_number || '';
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+          `<td>${escapeHtml(a.display_name || '')}</td>`+
+          `<td title="${escapeHtml(voiceId)}">${escapeHtml(voiceShort)}</td>`+
+          `<td>${escapeHtml(greetShort)}</td>`+
+          `<td>${escapeHtml(num || '-')}</td>`+
+          `<td>`+
+            `<button class="edit-ai-agent" data-id="${escapeHtml(String(a.id))}">Edit</button> `+
+            `<button class="del-ai-agent" data-id="${escapeHtml(String(a.id))}" style="background:#ef4444">Delete</button>`+
+          `</td>`;
+        tbody.appendChild(tr);
+      }
+
+      empty.style.display = 'none';
+      table.style.display = 'table';
+    }
+
+    function renderAiNumbers(){
+      const table = $('#ai-numbers-table');
+      const empty = $('#ai-numbers-empty');
+      const count = $('#aiNumbersCount');
+      if (count) count.textContent = `(${aiNumbersData.length}/5)`;
+      if (!table || !empty) return;
+      const tbody = table.querySelector('tbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+
+      if (!aiNumbersData.length){
+        table.style.display = 'none';
+        empty.style.display = 'block';
+        empty.textContent = 'No phone numbers yet. Click “Buy Number”.';
+        return;
+      }
+
+      const agentOptions = ['<option value="">-- Unassigned --</option>']
+        .concat(aiAgentsData.map(a => `<option value="${escapeHtml(String(a.id))}">${escapeHtml(a.display_name || '')}</option>`))
+        .join('');
+
+      for (const n of aiNumbersData){
+        const tr = document.createElement('tr');
+        const unassignBtn = n.agent_id
+          ? `<button class="ai-number-unassign" data-number-id="${escapeHtml(String(n.id))}" style="background:#6b7280">Unassign</button>`
+          : '';
+        tr.innerHTML =
+          `<td>${escapeHtml(n.phone_number || '')}</td>`+
+          `<td><select class="ai-number-agent-select" data-number-id="${escapeHtml(String(n.id))}" style="width:200px">${agentOptions}</select></td>`+
+          `<td>${unassignBtn}</td>`;
+        tbody.appendChild(tr);
+        const sel = tr.querySelector('select');
+        if (sel) sel.value = n.agent_id ? String(n.agent_id) : '';
+      }
+
+      empty.style.display = 'none';
+      table.style.display = 'table';
+    }
+
+    async function loadAiAgents(){
+      const empty = $('#ai-agents-empty');
+      const table = $('#ai-agents-table');
+      if (empty) { empty.style.display = 'block'; empty.textContent = 'Loading…'; }
+      if (table) table.style.display = 'none';
+      try {
+        const r = await fetch('/api/me/ai/agents');
+        const j = await r.json();
+        if (!j || j.success === false) {
+          aiAgentsData = [];
+          renderAiAgents();
+          if (empty) empty.textContent = j?.message || 'Failed to load agents';
+          return;
+        }
+        aiAgentsData = Array.isArray(j.data) ? j.data : [];
+        renderAiAgents();
+        // agent list impacts number assignment dropdowns
+        renderAiNumbers();
+      } catch (e) {
+        aiAgentsData = [];
+        renderAiAgents();
+        if (empty) empty.textContent = 'Failed to load agents';
+      }
+    }
+
+    async function loadAiNumbers(){
+      const empty = $('#ai-numbers-empty');
+      const table = $('#ai-numbers-table');
+      if (empty) { empty.style.display = 'block'; empty.textContent = 'Loading…'; }
+      if (table) table.style.display = 'none';
+      try {
+        const r = await fetch('/api/me/ai/numbers');
+        const j = await r.json();
+        if (!j || j.success === false) {
+          aiNumbersData = [];
+          renderAiNumbers();
+          if (empty) empty.textContent = j?.message || 'Failed to load numbers';
+          return;
+        }
+        aiNumbersData = Array.isArray(j.data) ? j.data : [];
+        renderAiNumbers();
+      } catch (e) {
+        aiNumbersData = [];
+        renderAiNumbers();
+        if (empty) empty.textContent = 'Failed to load numbers';
+      }
+    }
+
+    function openAiAgentModal(agent){
+      const modal = $('#aiAgentModal');
+      if (!modal) return;
+      $('#aiAgentId').value = agent ? String(agent.id) : '';
+      $('#aiAgentModalTitle').textContent = agent ? '🤖 Edit AI Agent' : '🤖 Create AI Agent';
+      $('#aiAgentName').value = agent ? String(agent.display_name || '') : '';
+      $('#aiAgentGreeting').value = agent ? String(agent.greeting || '') : '';
+      $('#aiAgentPrompt').value = agent ? String(agent.prompt || '') : '';
+
+      // Voice selection
+      const desiredVoiceId = agent ? String(agent.cartesia_voice_id || '') : '';
+      applyAiVoiceSelection(desiredVoiceId);
+      loadCartesiaVoices(false).then(()=>applyAiVoiceSelection(desiredVoiceId));
+
+      modal.style.display = 'flex';
+      try { $('#aiAgentName').focus(); } catch {}
+    }
+
+    function closeAiAgentModal(){
+      const modal = $('#aiAgentModal');
+      if (modal) modal.style.display = 'none';
+    }
+
+    // AI modal handlers
+    $('#createAiAgentBtn').addEventListener('click', () => openAiAgentModal(null));
+    $('#cancelAiAgentBtn').addEventListener('click', () => closeAiAgentModal());
+    $('#aiAgentModal').addEventListener('click', (e) => { if (e.target === $('#aiAgentModal')) closeAiAgentModal(); });
+
+    // Voice picker handlers
+    $('#aiLoadVoicesBtn').addEventListener('click', () => loadCartesiaVoices(true));
+    $('#aiAgentCartesiaVoiceSelect').addEventListener('change', () => {
+      const sel = $('#aiAgentCartesiaVoiceSelect');
+      const custom = $('#aiAgentCartesiaVoiceCustom');
+      const isCustom = sel && sel.value === '__custom__';
+      setCartesiaCustomVisible(Boolean(isCustom));
+      if (!isCustom && custom) custom.value = '';
+    });
+
+    $('#confirmAiAgentBtn').addEventListener('click', async () => {
+      const id = ($('#aiAgentId').value || '').trim();
+      const display_name = ($('#aiAgentName').value || '').trim();
+      const greeting = ($('#aiAgentGreeting').value || '');
+      const prompt = ($('#aiAgentPrompt').value || '');
+      const cartesia_voice_id = getSelectedCartesiaVoiceId();
+      if (!display_name) return showToast('Agent name is required.', 'error');
+
+      const btn = $('#confirmAiAgentBtn');
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = id ? 'Saving...' : 'Creating...';
+
+      try {
+        const url = id ? `/api/me/ai/agents/${encodeURIComponent(id)}` : '/api/me/ai/agents';
+        const method = id ? 'PATCH' : 'POST';
+        const r = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ display_name, greeting, prompt, cartesia_voice_id: (cartesia_voice_id || null) })
+        });
+        const j = await r.json();
+        if (!j || j.success === false) {
+          showToast(j?.message || 'Failed to save agent', 'error');
+          return;
+        }
+        showToast(id ? 'Agent updated.' : 'Agent created.');
+        closeAiAgentModal();
+        await loadAiAgents();
+        await loadAiNumbers();
+      } catch (e) {
+        showToast('Failed to save agent', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    });
+
+    // Buy number
+    $('#buyAiNumberBtn').addEventListener('click', async () => {
+      const btn = $('#buyAiNumberBtn');
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = 'Buying...';
+      try {
+        const r = await fetch('/api/me/ai/numbers/buy', { method: 'POST' });
+        const j = await r.json();
+        if (!j || j.success === false) {
+          showToast(j?.message || 'Failed to buy number', 'error');
+          return;
+        }
+        showToast('Number purchased.');
+        await loadAiNumbers();
+      } catch (e) {
+        showToast('Failed to buy number', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    });
+
+    // Delegated handlers for edit/delete + assign/unassign
+    document.addEventListener('click', async (ev) => {
+      if (ev.target && ev.target.classList.contains('edit-ai-agent')) {
+        const id = ev.target.getAttribute('data-id');
+        const agent = aiAgentsData.find(a => String(a.id) === String(id));
+        openAiAgentModal(agent || null);
+      }
+      if (ev.target && ev.target.classList.contains('del-ai-agent')) {
+        const id = ev.target.getAttribute('data-id');
+        if (!confirm('Delete this agent?')) return;
+        try {
+          const r = await fetch(`/api/me/ai/agents/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          const j = await r.json();
+          if (!j || j.success === false) {
+            showToast(j?.message || 'Failed to delete agent', 'error');
+            return;
+          }
+          showToast('Agent deleted.');
+          await loadAiAgents();
+          await loadAiNumbers();
+        } catch {
+          showToast('Failed to delete agent', 'error');
+        }
+      }
+      if (ev.target && ev.target.classList.contains('ai-number-unassign')) {
+        const numberId = ev.target.getAttribute('data-number-id');
+        try {
+          const r = await fetch(`/api/me/ai/numbers/${encodeURIComponent(numberId)}/unassign`, { method: 'POST' });
+          const j = await r.json();
+          if (!j || j.success === false) {
+            showToast(j?.message || 'Failed to unassign number', 'error');
+            return;
+          }
+          showToast('Number unassigned.');
+          await loadAiAgents();
+          await loadAiNumbers();
+        } catch {
+          showToast('Failed to unassign number', 'error');
+        }
+      }
+    });
+
+    document.addEventListener('change', async (ev) => {
+      if (!ev.target || !ev.target.classList.contains('ai-number-agent-select')) return;
+      const select = ev.target;
+      const numberId = select.getAttribute('data-number-id');
+      const agentId = select.value;
+
+      select.disabled = true;
+      try {
+        if (!agentId) {
+          const r = await fetch(`/api/me/ai/numbers/${encodeURIComponent(numberId)}/unassign`, { method: 'POST' });
+          const j = await r.json();
+          if (!j || j.success === false) {
+            showToast(j?.message || 'Failed to unassign number', 'error');
+            await loadAiNumbers();
+            return;
+          }
+          showToast('Number unassigned.');
+        } else {
+          const r = await fetch(`/api/me/ai/numbers/${encodeURIComponent(numberId)}/assign`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent_id: agentId })
+          });
+          const j = await r.json();
+          if (!j || j.success === false) {
+            showToast(j?.message || 'Failed to assign number', 'error');
+            await loadAiNumbers();
+            return;
+          }
+          showToast('Number assigned.');
+        }
+        await loadAiAgents();
+        await loadAiNumbers();
+      } catch (e) {
+        showToast('Failed to update assignment', 'error');
+        await loadAiNumbers();
+      } finally {
+        select.disabled = false;
+      }
+    });
 
     let callsChart = null;
     async function loadStats(){
