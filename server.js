@@ -1579,6 +1579,9 @@ async function dailyUpsertDialinConfig({ phoneNumber, roomCreationApi }) {
   const existingId = await dailyFindDialinConfigIdByPhoneNumber(phoneNumber);
 
   const payload = {
+    // Daily requires explicitly specifying the dial-in config type.
+    // For inbound agent calls we use pinless dial-in.
+    type: 'pinless_dialin',
     phone_number: String(phoneNumber),
     room_creation_api: String(roomCreationApi),
     name_prefix: 'TalkUSA'
