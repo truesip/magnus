@@ -1,3 +1,4 @@
+import inspect
 import os
 from typing import Any, Optional
 
@@ -193,7 +194,7 @@ async def bot(session_args: Any):
         audio_out_enabled=True,
         audio_in_sample_rate=sample_rate,
         audio_out_sample_rate=sample_rate,
-        vad_enabled=True,
+        # NOTE: vad_enabled is deprecated in Pipecat 0.0.98; supplying a vad_analyzer is sufficient.
         vad_analyzer=SileroVADAnalyzer(),
     )
 
@@ -208,7 +209,10 @@ async def bot(session_args: Any):
     stt = DeepgramSTTService(api_key=deepgram_key, sample_rate=sample_rate)
     deepgram_model = _env("DEEPGRAM_MODEL", "nova-3-general").strip()
     if deepgram_model:
-        stt.set_model(deepgram_model)
+        # In Pipecat 0.0.98, set_model may be async; handle both sync + async implementations.
+        maybe = stt.set_model(deepgram_model)
+        if inspect.isawaitable(maybe):
+            await maybe
 
     llm = OpenAILLMService(
         api_key=xai_key,
