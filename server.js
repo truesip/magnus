@@ -1548,14 +1548,14 @@ function normalizePhoneNumber(s) {
   return String(s || '').replace(/\s+/g, '');
 }
 
-async function dailyFindDialinConfigIdByPhoneNumber(phoneNumber) {
+async function dailyFindDialinConfigByPhoneNumber(phoneNumber) {
   try {
     // Query directly by phone number (avoid pagination issues).
     const list = await dailyApiCall({
       method: 'GET',
       path: '/domain-dialin-config',
       params: {
-        phone_number: String(phoneNumber),
+        phone_number: String(normalizePhoneNumber(phoneNumber)),
         limit: 1
       }
     });
@@ -1566,7 +1566,10 @@ async function dailyFindDialinConfigIdByPhoneNumber(phoneNumber) {
 
     const item = arr[0];
     const id = item?.id || item?.config_id || item?.domain_dialin_config_id;
-    return id ? String(id) : null;
+    const type = item?.type || item?.dialin_type || item?.dialinType || null;
+
+    if (!id) return null;
+    return { dialinConfigId: String(id), type: type ? String(type) : null };
   } catch (e) {
     if (DEBUG) console.warn('[ai.dialin.list] Failed to list domain dial-in configs:', e?.message || e);
   }
@@ -1575,22 +1578,63 @@ async function dailyFindDialinConfigIdByPhoneNumber(phoneNumber) {
 
 async function dailyUpsertDialinConfig({ phoneNumber, roomCreationApi }) {
   // Daily Domain Dial-In Config
-  // POST /domain-dialin-config body params include: phone_number, room_creation_api, name_prefix, ...
-  const existingId = await dailyFindDialinConfigIdByPhoneNumber(phoneNumber);
+  // POST /domain-dialin-config body params include: phone_number, room_creation_api, name_prefix, type, ...
+  const normalizedPhoneNumber = normalizePhoneNumber(phoneNumber);
+  const existing = await dailyFindDialinConfigByPhoneNumber(normalizedPhoneNumber);
 
   const payload = {
     // Daily requires explicitly specifying the dial-in config type.
     // For inbound agent calls we use pinless dial-in.
     type: 'pinless_dialin',
-    phone_number: String(phoneNumber),
+    phone_number: String(normalizedPhoneNumber),
     room_creation_api: String(roomCreationApi),
     name_prefix: 'TalkUSA'
   };
 
-  if (existingId) {
-    const updated = await dailyApiCall({ method: 'PUT', path: `/domain-dialin-config/${encodeURIComponent(existingId)}`, body: payload });
-    const id = updated?.id || updated?.data?.id || existingId;
-    return { dialinConfigId: String(id) };
+  // If a config exists with a different type (e.g. pin_dialin), delete and recreate.
+  if (existing?.dialinConfigId && existing?.type && existing.type !== 'pinless_dialin') {
+    if (DEBUG) console.warn('[ai.dialin.upsert] Existing dial-in config has incompatible type; recreating', {
+      phoneNumber: normalizedPhoneNumber,
+      existingType: existing.type,
+      existingId: existing.dialinConfigId
+    });
+    try { await dailyDeleteDialinConfig(existing.dialinConfigId); } catch {}
+    const created = await dailyApiCall({ method: 'POST', path: '/domain-dialin-config', body: payload });
+    const createdId = created?.id || created?.data?.id;
+    if (!createdId) {
+      if (DEBUG) console.warn('[ai.dialin.create] Unexpected Daily response:', created);
+      throw new Error('Failed to create dial-in config (missing id)');
+    }
+    return { dialinConfigId: String(createdId) };
+  }
+
+  if (existing?.dialinConfigId) {
+    try {
+      const updated = await dailyApiCall({
+        method: 'PUT',
+        path: `/domain-dialin-config/${encodeURIComponent(existing.dialinConfigId)}`,
+        body: payload
+      });
+      const id = updated?.id || updated?.data?.id || existing.dialinConfigId;
+      return { dialinConfigId: String(id) };
+    } catch (e) {
+      // Some Daily accounts/configs reject updates depending on existing state.
+      // Fall back to delete+recreate for resilience.
+      if (DEBUG) console.warn('[ai.dialin.upsert] Update failed; recreating', {
+        phoneNumber: normalizedPhoneNumber,
+        existingId: existing.dialinConfigId,
+        status: e?.status,
+        message: e?.message
+      });
+      try { await dailyDeleteDialinConfig(existing.dialinConfigId); } catch {}
+      const created = await dailyApiCall({ method: 'POST', path: '/domain-dialin-config', body: payload });
+      const createdId = created?.id || created?.data?.id;
+      if (!createdId) {
+        if (DEBUG) console.warn('[ai.dialin.create] Unexpected Daily response:', created);
+        throw new Error('Failed to create dial-in config (missing id)');
+      }
+      return { dialinConfigId: String(createdId) };
+    }
   }
 
   const created = await dailyApiCall({ method: 'POST', path: '/domain-dialin-config', body: payload });
