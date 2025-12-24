@@ -3,6 +3,7 @@ import os
 from typing import Any, Optional
 
 import httpx
+from deepgram.clients.listen.v1.websocket.options import LiveOptions
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import AggregationType, TTSTextFrame
@@ -206,13 +207,17 @@ async def bot(session_args: Any):
     )
 
     # STT / LLM / TTS
-    stt = DeepgramSTTService(api_key=deepgram_key, sample_rate=sample_rate)
     deepgram_model = _env("DEEPGRAM_MODEL", "nova-3-general").strip()
-    if deepgram_model:
-        # In Pipecat 0.0.98, set_model may be async; handle both sync + async implementations.
-        maybe = stt.set_model(deepgram_model)
-        if inspect.isawaitable(maybe):
-            await maybe
+
+    # Don't call stt.set_model() here: in Pipecat 0.0.98 it may assume an active
+    # websocket connection and crash with "_connection" missing.
+    # Instead, configure the model via Deepgram LiveOptions at construction.
+    stt_live_options = LiveOptions(model=deepgram_model) if deepgram_model else None
+    stt = DeepgramSTTService(
+        api_key=deepgram_key,
+        sample_rate=sample_rate,
+        live_options=stt_live_options,
+    )
 
     llm = OpenAILLMService(
         api_key=xai_key,
