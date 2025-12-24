@@ -240,14 +240,17 @@ async def bot(session_args: Any):
     context = OpenAILLMContext(messages=[{"role": "system", "content": prompt}] if prompt else [])
     ctx = llm.create_context_aggregator(context)
 
+    # IMPORTANT: assistant context aggregator consumes TextFrames (it aggregates them and does
+    # not forward). If it sits *before* TTS, the bot will generate text but you won't hear audio.
+    # So we place it after TTS and before the output transport.
     pipeline = Pipeline(
         [
             transport.input(),
             stt,
             ctx.user(),
             llm,
-            ctx.assistant(),
             tts,
+            ctx.assistant(),
             transport.output(),
         ]
     )
