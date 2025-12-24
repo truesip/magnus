@@ -160,7 +160,7 @@ async def bot(session_args: Any):
       - CARTESIA_DEFAULT_VOICE_ID (fallback)
       - AGENT_GREETING
       - AGENT_PROMPT
-      - XAI_MODEL (default: grok-beta)
+      - XAI_MODEL (default: grok-3)
       - XAI_BASE_URL (default: https://api.x.ai/v1)
       - DEEPGRAM_MODEL (default: nova-3-general)
       - CARTESIA_MODEL (default: sonic-3)
@@ -221,7 +221,8 @@ async def bot(session_args: Any):
 
     llm = OpenAILLMService(
         api_key=xai_key,
-        model=_env("XAI_MODEL", "grok-beta").strip() or "grok-beta",
+        # grok-beta was deprecated; default to grok-3.
+        model=_env("XAI_MODEL", "grok-3").strip() or "grok-3",
         base_url=_env("XAI_BASE_URL", "https://api.x.ai/v1").strip() or "https://api.x.ai/v1",
     )
 
