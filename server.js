@@ -1,6 +1,10 @@
 // Load .env.local first (for local development), fallback to .env
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const { execFile } = require('child_process');
+const util = require('util');
+const execFileAsync = util.promisify(execFile);
 const envLocalPath = path.join(__dirname, '.env.local');
 if (fs.existsSync(envLocalPath)) {
   require('dotenv').config({ path: envLocalPath });
@@ -15,6 +19,10 @@ const crypto = require('crypto');
 const https = require('https');
 const zlib = require('zlib');
 const mysql = require('mysql2/promise');
+const nodemailer = require('nodemailer');
+const multer = require('multer');
+const PizZip = require('pizzip');
+const Docxtemplater = require('docxtemplater');
 const session = require('express-session');
 const MySQLStore = require('express-mysql-session')(session);
 const bcrypt = require('bcryptjs');
@@ -416,6 +424,51 @@ const OTP_TTL_MS = (parseInt(process.env.EMAIL_VERIFICATION_TTL_MINUTES) || 10) 
 const OTP_MAX_ATTEMPTS = parseInt(process.env.OTP_MAX_ATTEMPTS || '5', 10);
 function otp() { return String(Math.floor(100000 + Math.random() * 900000)); }
 function sha256(s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); }
+
+// ========== Encryption helpers (AES-256-GCM) ==========
+// Used for storing per-user SMTP passwords and per-agent action tokens.
+let cachedUserSmtpEncKey = undefined;
+function getUserSmtpEncryptionKey() {
+  if (cachedUserSmtpEncKey !== undefined) return cachedUserSmtpEncKey;
+  const raw = String(process.env.USER_SMTP_ENCRYPTION_KEY || '').trim();
+  if (!raw) {
+    cachedUserSmtpEncKey = null;
+    return cachedUserSmtpEncKey;
+  }
+  try {
+    const buf = Buffer.from(raw, 'base64');
+    if (buf.length !== 32) throw new Error('Expected 32 bytes');
+    cachedUserSmtpEncKey = buf;
+    return cachedUserSmtpEncKey;
+  } catch (e) {
+    cachedUserSmtpEncKey = null;
+    if (DEBUG) console.warn('[enc] Invalid USER_SMTP_ENCRYPTION_KEY; must be base64-encoded 32 bytes');
+    return cachedUserSmtpEncKey;
+  }
+}
+
+function encryptAes256Gcm(plainText, keyBuf) {
+  if (!keyBuf || !Buffer.isBuffer(keyBuf) || keyBuf.length !== 32) {
+    throw new Error('Encryption key not configured');
+  }
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', keyBuf, iv);
+  const enc = Buffer.concat([cipher.update(String(plainText || ''), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return { enc, iv, tag };
+}
+
+function decryptAes256Gcm(encBuf, ivBuf, tagBuf, keyBuf) {
+  if (!keyBuf || !Buffer.isBuffer(keyBuf) || keyBuf.length !== 32) {
+    throw new Error('Encryption key not configured');
+  }
+  if (!encBuf || !ivBuf || !tagBuf) return '';
+  const decipher = crypto.createDecipheriv('aes-256-gcm', keyBuf, ivBuf);
+  decipher.setAuthTag(tagBuf);
+  const plain = Buffer.concat([decipher.update(encBuf), decipher.final()]).toString('utf8');
+  return plain;
+}
+
 let pool;
 let sessionStore;
 
@@ -756,10 +809,16 @@ async function initDb() {
     pipecat_agent_name VARCHAR(191) NOT NULL,
     pipecat_secret_set VARCHAR(191) NOT NULL,
     pipecat_region VARCHAR(64) NULL,
+    agent_action_token_hash CHAR(64) NULL,
+    agent_action_token_enc BLOB NULL,
+    agent_action_token_iv VARBINARY(16) NULL,
+    agent_action_token_tag VARBINARY(16) NULL,
+    default_doc_template_id BIGINT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uniq_pipecat_agent (pipecat_agent_name),
     KEY idx_ai_agents_user (user_id),
+    KEY idx_ai_agents_default_template (default_doc_template_id),
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
 
@@ -807,6 +866,66 @@ async function initDb() {
     KEY idx_ai_number_cycles_user (user_id),
     CONSTRAINT fk_ai_number_cycles_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
     CONSTRAINT fk_ai_number_cycles_number FOREIGN KEY (ai_number_id) REFERENCES ai_numbers(id) ON DELETE CASCADE
+  )`);
+
+  // Per-user SMTP settings (used by AI agent document sending)
+  await pool.query(`CREATE TABLE IF NOT EXISTS user_smtp_settings (
+    user_id BIGINT NOT NULL,
+    host VARCHAR(255) NOT NULL,
+    port INT NOT NULL,
+    secure TINYINT(1) NOT NULL DEFAULT 0,
+    username VARCHAR(255) NULL,
+    password_enc BLOB NULL,
+    password_iv VARBINARY(16) NULL,
+    password_tag VARBINARY(16) NULL,
+    from_email VARCHAR(255) NOT NULL,
+    from_name VARCHAR(255) NULL,
+    reply_to VARCHAR(255) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id),
+    CONSTRAINT fk_user_smtp_settings_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
+  // AI document templates (DOCX) used by the AI agent to generate emails
+  await pool.query(`CREATE TABLE IF NOT EXISTS ai_doc_templates (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    name VARCHAR(191) NOT NULL,
+    original_filename VARCHAR(255) NULL,
+    mime_type VARCHAR(128) NULL,
+    size_bytes BIGINT NULL,
+    doc_blob LONGBLOB NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_ai_doc_template (user_id, name),
+    KEY idx_ai_doc_templates_user (user_id),
+    CONSTRAINT fk_ai_doc_templates_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
+  // AI email send audit log + idempotency
+  await pool.query(`CREATE TABLE IF NOT EXISTS ai_email_sends (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    agent_id BIGINT NULL,
+    template_id BIGINT NULL,
+    dedupe_key CHAR(64) NOT NULL,
+    call_id VARCHAR(64) NULL,
+    call_domain VARCHAR(64) NULL,
+    to_email VARCHAR(255) NOT NULL,
+    subject VARCHAR(255) NULL,
+    status ENUM('pending','completed','failed') NOT NULL DEFAULT 'pending',
+    attempt_count INT NOT NULL DEFAULT 0,
+    error TEXT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_ai_email_dedupe (dedupe_key),
+    KEY idx_ai_email_user (user_id),
+    KEY idx_ai_email_agent (agent_id),
+    KEY idx_ai_email_template (template_id),
+    CONSTRAINT fk_ai_email_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_ai_email_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL,
+    CONSTRAINT fk_ai_email_template FOREIGN KEY (template_id) REFERENCES ai_doc_templates(id) ON DELETE SET NULL
   )`);
 
   // AI inbound call logs (Daily dial-in -> Pipecat Cloud). These are displayed in Call History.
@@ -877,6 +996,89 @@ async function initDb() {
       }
     } catch (e) {
       if (DEBUG) console.warn('[schema] ai_agents.cartesia_voice_id check failed', e.message || e);
+    }
+
+    // Ensure ai_agents has an agent action token + default doc template pointer
+    try {
+      const [hasTokenHash] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_agents' AND column_name='agent_action_token_hash' LIMIT 1",
+        [dbName]
+      );
+      if (!hasTokenHash || !hasTokenHash.length) {
+        await pool.query('ALTER TABLE ai_agents ADD COLUMN agent_action_token_hash CHAR(64) NULL AFTER pipecat_region');
+        if (DEBUG) console.log('[schema] Added ai_agents.agent_action_token_hash column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_agents.agent_action_token_hash check failed', e.message || e);
+    }
+
+    try {
+      const [hasTokenEnc] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_agents' AND column_name='agent_action_token_enc' LIMIT 1",
+        [dbName]
+      );
+      if (!hasTokenEnc || !hasTokenEnc.length) {
+        await pool.query('ALTER TABLE ai_agents ADD COLUMN agent_action_token_enc BLOB NULL AFTER agent_action_token_hash');
+        if (DEBUG) console.log('[schema] Added ai_agents.agent_action_token_enc column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_agents.agent_action_token_enc check failed', e.message || e);
+    }
+
+    try {
+      const [hasTokenIv] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_agents' AND column_name='agent_action_token_iv' LIMIT 1",
+        [dbName]
+      );
+      if (!hasTokenIv || !hasTokenIv.length) {
+        await pool.query('ALTER TABLE ai_agents ADD COLUMN agent_action_token_iv VARBINARY(16) NULL AFTER agent_action_token_enc');
+        if (DEBUG) console.log('[schema] Added ai_agents.agent_action_token_iv column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_agents.agent_action_token_iv check failed', e.message || e);
+    }
+
+    try {
+      const [hasTokenTag] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_agents' AND column_name='agent_action_token_tag' LIMIT 1",
+        [dbName]
+      );
+      if (!hasTokenTag || !hasTokenTag.length) {
+        await pool.query('ALTER TABLE ai_agents ADD COLUMN agent_action_token_tag VARBINARY(16) NULL AFTER agent_action_token_iv');
+        if (DEBUG) console.log('[schema] Added ai_agents.agent_action_token_tag column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_agents.agent_action_token_tag check failed', e.message || e);
+    }
+
+    try {
+      const [hasDefaultTpl] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_agents' AND column_name='default_doc_template_id' LIMIT 1",
+        [dbName]
+      );
+      if (!hasDefaultTpl || !hasDefaultTpl.length) {
+        await pool.query('ALTER TABLE ai_agents ADD COLUMN default_doc_template_id BIGINT NULL AFTER agent_action_token_tag');
+        if (DEBUG) console.log('[schema] Added ai_agents.default_doc_template_id column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_agents.default_doc_template_id check failed', e.message || e);
+    }
+
+    try {
+      const [hasDefaultTplIdx] = await pool.query(
+        "SELECT 1 FROM information_schema.statistics WHERE table_schema=? AND table_name='ai_agents' AND index_name='idx_ai_agents_default_template' LIMIT 1",
+        [dbName]
+      );
+      if (!hasDefaultTplIdx || !hasDefaultTplIdx.length) {
+        try {
+          await pool.query('ALTER TABLE ai_agents ADD KEY idx_ai_agents_default_template (default_doc_template_id)');
+          if (DEBUG) console.log('[schema] Added ai_agents.idx_ai_agents_default_template index');
+        } catch (e) {
+          if (DEBUG) console.warn('[schema] Failed to add ai_agents.idx_ai_agents_default_template index:', e.message || e);
+        }
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_agents.idx_ai_agents_default_template check failed', e.message || e);
     }
 
     // Ensure ai_call_logs.time_connect exists (Daily dial-in connected timestamp)
@@ -1583,6 +1785,518 @@ app.get('/api/me/profile', requireAuth, async (req, res) => {
   } catch (e) { return res.status(500).json({ success: false, message: 'Profile fetch failed' }); }
 });
 
+// ========== Per-user SMTP settings (for AI agent document emails) ==========
+function isValidEmail(email) {
+  const s = String(email || '').trim();
+  if (!s || s.length > 254) return false;
+  // Simple pragmatic check
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+}
+
+async function loadUserSmtpSettings(userId) {
+  if (!pool) throw new Error('Database not configured');
+  const [rows] = await pool.execute(
+    'SELECT user_id, host, port, secure, username, password_enc, password_iv, password_tag, from_email, from_name, reply_to FROM user_smtp_settings WHERE user_id = ? LIMIT 1',
+    [userId]
+  );
+  return rows && rows[0] ? rows[0] : null;
+}
+
+async function sendEmailViaUserSmtp({ userId, toEmail, subject, text, html, attachments }) {
+  const settings = await loadUserSmtpSettings(userId);
+  if (!settings) throw new Error('SMTP settings not configured');
+
+  const key = getUserSmtpEncryptionKey();
+  if (!key) throw new Error('USER_SMTP_ENCRYPTION_KEY not configured');
+
+  const host = String(settings.host || '').trim();
+  const port = parseInt(String(settings.port || '0'), 10);
+  const secure = String(settings.secure || '0') === '1' || settings.secure === 1;
+  const smtpUser = settings.username != null ? String(settings.username) : '';
+  const smtpPass = decryptAes256Gcm(settings.password_enc, settings.password_iv, settings.password_tag, key);
+
+  if (!host || !port) throw new Error('SMTP host/port missing');
+  if (!smtpUser || !smtpPass) throw new Error('SMTP username/password missing');
+
+  const fromEmail = String(settings.from_email || '').trim();
+  const fromName = String(settings.from_name || '').trim();
+  const replyTo = String(settings.reply_to || '').trim();
+
+  if (!isValidEmail(fromEmail)) throw new Error('SMTP from_email invalid');
+
+  const transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    auth: { user: smtpUser, pass: smtpPass }
+  });
+
+  const from = fromName ? `"${fromName.replace(/\"/g, '')}" <${fromEmail}>` : fromEmail;
+
+  return transporter.sendMail({
+    from,
+    to: String(toEmail || '').trim(),
+    ...(replyTo ? { replyTo } : {}),
+    subject: String(subject || '').slice(0, 255) || 'Document from TalkUSA',
+    ...(text ? { text: String(text) } : {}),
+    ...(html ? { html: String(html) } : {}),
+    ...(Array.isArray(attachments) && attachments.length ? { attachments } : {})
+  });
+}
+
+app.get('/api/me/smtp-settings', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const row = await loadUserSmtpSettings(userId);
+    if (!row) return res.json({ success: true, data: null });
+    return res.json({
+      success: true,
+      data: {
+        host: row.host,
+        port: row.port,
+        secure: row.secure ? 1 : 0,
+        username: row.username || '',
+        from_email: row.from_email || '',
+        from_name: row.from_name || '',
+        reply_to: row.reply_to || '',
+        has_password: !!(row.password_enc && row.password_iv && row.password_tag)
+      }
+    });
+  } catch (e) {
+    if (DEBUG) console.warn('[smtp.settings.get] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load SMTP settings' });
+  }
+});
+
+app.put('/api/me/smtp-settings', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = req.session.userId;
+    const body = req.body || {};
+
+    const host = String(body.host || '').trim();
+    const port = parseInt(String(body.port || '0'), 10);
+    const secure = body.secure === true || body.secure === 1 || String(body.secure || '').trim() === '1';
+    const username = String(body.username || '').trim();
+    const password = (body.password != null ? String(body.password) : '');
+
+    const fromEmail = String(body.from_email || body.fromEmail || '').trim();
+    const fromName = String(body.from_name || body.fromName || '').trim();
+    const replyTo = String(body.reply_to || body.replyTo || '').trim();
+
+    if (!host) return res.status(400).json({ success: false, message: 'SMTP host is required' });
+    if (!port || port < 1 || port > 65535) return res.status(400).json({ success: false, message: 'SMTP port is invalid' });
+    if (!username) return res.status(400).json({ success: false, message: 'SMTP username is required' });
+    if (!isValidEmail(fromEmail)) return res.status(400).json({ success: false, message: 'from_email is invalid' });
+    if (replyTo && !isValidEmail(replyTo)) return res.status(400).json({ success: false, message: 'reply_to is invalid' });
+
+    const existing = await loadUserSmtpSettings(userId);
+
+    let passwordEnc = existing?.password_enc || null;
+    let passwordIv = existing?.password_iv || null;
+    let passwordTag = existing?.password_tag || null;
+
+    if (password && password.trim()) {
+      const key = getUserSmtpEncryptionKey();
+      if (!key) return res.status(500).json({ success: false, message: 'USER_SMTP_ENCRYPTION_KEY not configured' });
+      const enc = encryptAes256Gcm(password, key);
+      passwordEnc = enc.enc;
+      passwordIv = enc.iv;
+      passwordTag = enc.tag;
+    }
+
+    if (!passwordEnc || !passwordIv || !passwordTag) {
+      return res.status(400).json({ success: false, message: 'SMTP password is required' });
+    }
+
+    await pool.execute(
+      `INSERT INTO user_smtp_settings (user_id, host, port, secure, username, password_enc, password_iv, password_tag, from_email, from_name, reply_to)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE host=VALUES(host), port=VALUES(port), secure=VALUES(secure), username=VALUES(username),
+         password_enc=VALUES(password_enc), password_iv=VALUES(password_iv), password_tag=VALUES(password_tag),
+         from_email=VALUES(from_email), from_name=VALUES(from_name), reply_to=VALUES(reply_to)`,
+      [userId, host, port, secure ? 1 : 0, username, passwordEnc, passwordIv, passwordTag, fromEmail, fromName || null, replyTo || null]
+    );
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.warn('[smtp.settings.put] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to save SMTP settings' });
+  }
+});
+
+app.post('/api/me/smtp-settings/test', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    // Default to the logged-in user email
+    let toEmail = String(req.body?.to_email || req.body?.toEmail || req.session.email || '').trim();
+    if (!toEmail || !isValidEmail(toEmail)) {
+      return res.status(400).json({ success: false, message: 'Valid to_email is required' });
+    }
+
+    await sendEmailViaUserSmtp({
+      userId,
+      toEmail,
+      subject: 'TalkUSA SMTP test',
+      text: 'This is a test email from TalkUSA. Your SMTP settings are working.'
+    });
+
+    return res.json({ success: true });
+  } catch (e) {
+    const msg = e?.message || 'SMTP test failed';
+    if (DEBUG) console.warn('[smtp.settings.test] error:', msg);
+    return res.status(502).json({ success: false, message: msg });
+  }
+});
+
+// ========== AI document templates (DOCX) ==========
+const docTemplateUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+});
+
+app.get('/api/me/ai/doc-templates', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const [rows] = await pool.execute(
+      'SELECT id, name, original_filename, mime_type, size_bytes, created_at, updated_at FROM ai_doc_templates WHERE user_id = ? ORDER BY created_at DESC',
+      [userId]
+    );
+    return res.json({ success: true, data: rows || [] });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.doc.templates.list] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load templates' });
+  }
+});
+
+app.post('/api/me/ai/doc-templates', requireAuth, docTemplateUpload.single('file'), async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const file = req.file;
+    if (!file || !file.buffer) {
+      return res.status(400).json({ success: false, message: 'Missing file upload (field name: file)' });
+    }
+
+    const original = String(file.originalname || '').trim();
+    if (!/\.docx$/i.test(original)) {
+      return res.status(400).json({ success: false, message: 'Only .docx templates are supported' });
+    }
+
+    const name = String((req.body && (req.body.name || req.body.display_name)) || original.replace(/\.docx$/i, '')).trim();
+    if (!name) return res.status(400).json({ success: false, message: 'Template name is required' });
+
+    const mime = String(file.mimetype || 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    const sizeBytes = file.size != null ? Number(file.size) : (file.buffer ? file.buffer.length : null);
+
+    const [ins] = await pool.execute(
+      'INSERT INTO ai_doc_templates (user_id, name, original_filename, mime_type, size_bytes, doc_blob) VALUES (?,?,?,?,?,?)',
+      [userId, name, original || null, mime || null, sizeBytes || null, file.buffer]
+    );
+
+    return res.json({ success: true, data: { id: ins.insertId, name } });
+  } catch (e) {
+    const msg = e?.code === 'ER_DUP_ENTRY' ? 'A template with that name already exists' : (e?.message || 'Upload failed');
+    if (DEBUG) console.warn('[ai.doc.templates.upload] error:', msg);
+    return res.status(400).json({ success: false, message: msg });
+  }
+});
+
+app.delete('/api/me/ai/doc-templates/:id', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(400).json({ success: false, message: 'Missing template id' });
+
+    const [rows] = await pool.execute('SELECT id FROM ai_doc_templates WHERE id = ? AND user_id = ? LIMIT 1', [id, userId]);
+    if (!rows || !rows.length) return res.status(404).json({ success: false, message: 'Template not found' });
+
+    await pool.execute('DELETE FROM ai_doc_templates WHERE id = ? AND user_id = ?', [id, userId]);
+
+    // If any agent uses this as default, clear it
+    try { await pool.execute('UPDATE ai_agents SET default_doc_template_id = NULL WHERE user_id = ? AND default_doc_template_id = ?', [userId, id]); } catch {}
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.doc.templates.delete] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Delete failed' });
+  }
+});
+
+function normalizeTemplateVariables(obj) {
+  if (!obj || typeof obj !== 'object') return {};
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    const key = String(k || '').trim();
+    if (!key) continue;
+    // Keep values as strings to avoid docxtemplater surprises
+    out[key] = (v == null) ? '' : String(v);
+  }
+  return out;
+}
+
+function renderDocxTemplate({ templateBuffer, variables }) {
+  const data = normalizeTemplateVariables(variables);
+  const zip = new PizZip(templateBuffer);
+  const doc = new Docxtemplater(zip, {
+    paragraphLoop: true,
+    linebreaks: true,
+    delimiters: { start: '[[', end: ']]' },
+    // If a template contains a placeholder that isn't present in variables,
+    // substitute an empty string instead of throwing.
+    nullGetter: () => ''
+  });
+  doc.render(data);
+  return doc.getZip().generate({ type: 'nodebuffer', compression: 'DEFLATE' });
+}
+
+async function convertDocxToPdfBuffer(docxBuffer, { baseName = 'document' } = {}) {
+  const candidates = [];
+  const configured = String(process.env.LIBREOFFICE_BIN || process.env.SOFFICE_PATH || '').trim();
+  if (configured) candidates.push(configured);
+  candidates.push('soffice');
+  candidates.push('libreoffice');
+
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'talkusa-doc-'));
+  const safeBase = String(baseName || 'document').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 48) || 'document';
+  const inputPath = path.join(tmpDir, `${safeBase}.docx`);
+  const outputDir = tmpDir;
+  const expectedPdf = path.join(outputDir, `${safeBase}.pdf`);
+
+  try {
+    await fs.promises.writeFile(inputPath, docxBuffer);
+
+    const args = [
+      '--headless',
+      '--nologo',
+      '--nolockcheck',
+      '--norestore',
+      '--convert-to',
+      'pdf',
+      '--outdir',
+      outputDir,
+      inputPath
+    ];
+
+    for (const bin of candidates) {
+      try {
+        await execFileAsync(bin, args, { timeout: 30000, windowsHide: true });
+        if (fs.existsSync(expectedPdf)) {
+          return await fs.promises.readFile(expectedPdf);
+        }
+      } catch (e) {
+        // try next candidate
+        if (DEBUG) console.warn('[doc.convert] LibreOffice convert attempt failed:', { bin, message: e?.message || e });
+      }
+    }
+
+    return null;
+  } finally {
+    try { await fs.promises.rm(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+function parseBearerToken(authHeader) {
+  const s = String(authHeader || '').trim();
+  if (!s) return '';
+  const m = s.match(/^Bearer\s+(.+)$/i);
+  if (!m) return '';
+  return String(m[1] || '').trim();
+}
+
+// Agent-auth endpoint called by the Pipecat agent runtime.
+// Sends a templated document via the owning user's SMTP settings.
+app.post('/api/ai/agent/send-document', async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const token = parseBearerToken(req.headers.authorization);
+    if (!token) return res.status(401).json({ success: false, message: 'Missing Authorization bearer token' });
+
+    const tokenHash = sha256(token);
+    const [arows] = await pool.execute(
+      'SELECT id, user_id, default_doc_template_id FROM ai_agents WHERE agent_action_token_hash = ? LIMIT 1',
+      [tokenHash]
+    );
+    const agent = arows && arows[0];
+    if (!agent) return res.status(401).json({ success: false, message: 'Invalid token' });
+
+    const userId = Number(agent.user_id);
+    const agentId = Number(agent.id);
+
+    const toEmail = String(req.body?.to_email || req.body?.toEmail || '').trim();
+    if (!toEmail || !isValidEmail(toEmail)) {
+      return res.status(400).json({ success: false, message: 'Valid to_email is required' });
+    }
+
+    const variables = (req.body && (req.body.variables || req.body.vars)) || {};
+
+    const callId = String(req.body?.call_id || req.body?.callId || '').trim() || null;
+    const callDomain = String(req.body?.call_domain || req.body?.callDomain || '').trim() || null;
+
+    // Resolve template id (explicit wins; otherwise agent default)
+    const templateRaw = (req.body?.template_id !== undefined) ? req.body.template_id : req.body?.templateId;
+    let templateId = null;
+    if (templateRaw != null && String(templateRaw).trim()) {
+      const tid = parseInt(String(templateRaw).trim(), 10);
+      if (!Number.isFinite(tid) || tid <= 0) {
+        return res.status(400).json({ success: false, message: 'template_id is invalid' });
+      }
+      templateId = tid;
+    } else if (agent.default_doc_template_id) {
+      templateId = Number(agent.default_doc_template_id);
+    }
+
+    if (!templateId) {
+      return res.status(400).json({ success: false, message: 'No template selected (set a default template for this agent or pass template_id)' });
+    }
+
+    const subjectRaw = String(req.body?.subject || '').trim();
+    const subject = (subjectRaw ? subjectRaw.slice(0, 255) : 'Your document');
+
+    let dedupeKey = String(req.body?.dedupe_key || req.body?.dedupeKey || '').trim();
+    if (dedupeKey) {
+      if (!/^[a-f0-9]{64}$/i.test(dedupeKey)) {
+        return res.status(400).json({ success: false, message: 'dedupe_key must be a 64-char hex sha256' });
+      }
+      dedupeKey = dedupeKey.toLowerCase();
+    } else {
+      dedupeKey = sha256(
+        `send-document|agent:${agentId}|call:${callDomain || ''}|${callId || ''}|template:${templateId}|to:${toEmail.toLowerCase()}`
+      );
+    }
+
+    // Idempotency + audit row
+    let sendRowId = null;
+    try {
+      const [ins] = await pool.execute(
+        `INSERT INTO ai_email_sends (user_id, agent_id, template_id, dedupe_key, call_id, call_domain, to_email, subject, status, attempt_count)
+         VALUES (?,?,?,?,?,?,?,?, 'pending', 1)`,
+        [userId, agentId, templateId, dedupeKey, callId, callDomain, toEmail, subject]
+      );
+      sendRowId = ins.insertId;
+    } catch (e) {
+      if (e?.code !== 'ER_DUP_ENTRY') throw e;
+      const [erows] = await pool.execute(
+        'SELECT id, status, attempt_count FROM ai_email_sends WHERE dedupe_key = ? LIMIT 1',
+        [dedupeKey]
+      );
+      const existing = erows && erows[0];
+      if (existing && existing.status === 'completed') {
+        return res.json({ success: true, already_sent: true, dedupe_key: dedupeKey });
+      }
+      if (existing && existing.status === 'pending') {
+        return res.status(202).json({ success: true, in_progress: true, dedupe_key: dedupeKey });
+      }
+      if (existing && existing.status === 'failed') {
+        sendRowId = existing.id;
+        try {
+          await pool.execute(
+            'UPDATE ai_email_sends SET status = \'pending\', attempt_count = attempt_count + 1, error = NULL, to_email = ?, subject = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+            [toEmail, subject, sendRowId]
+          );
+        } catch {}
+      } else {
+        return res.status(202).json({ success: true, in_progress: true, dedupe_key: dedupeKey });
+      }
+    }
+
+    // Load template
+    const [trows] = await pool.execute(
+      'SELECT id, name, doc_blob FROM ai_doc_templates WHERE id = ? AND user_id = ? LIMIT 1',
+      [templateId, userId]
+    );
+    const tpl = trows && trows[0];
+    if (!tpl) {
+      if (sendRowId) {
+        try {
+          await pool.execute(
+            'UPDATE ai_email_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+            ['Template not found', sendRowId]
+          );
+        } catch {}
+      }
+      return res.status(404).json({ success: false, message: 'Template not found' });
+    }
+
+    // Render + convert
+    let docxOut;
+    try {
+      docxOut = renderDocxTemplate({ templateBuffer: tpl.doc_blob, variables });
+    } catch (e) {
+      const msg = e?.message || 'Template render failed';
+      if (sendRowId) {
+        try {
+          await pool.execute(
+            'UPDATE ai_email_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+            [msg, sendRowId]
+          );
+        } catch {}
+      }
+      return res.status(400).json({ success: false, message: msg });
+    }
+
+    let pdfOut = null;
+    try {
+      pdfOut = await convertDocxToPdfBuffer(docxOut, { baseName: tpl.name || 'document' });
+    } catch (e) {
+      pdfOut = null;
+    }
+
+    const safeBase = String(tpl.name || 'document').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 48) || 'document';
+    const attachments = pdfOut
+      ? [{ filename: `${safeBase}.pdf`, content: pdfOut, contentType: 'application/pdf' }]
+      : [{ filename: `${safeBase}.docx`, content: docxOut, contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }];
+
+    try {
+      await sendEmailViaUserSmtp({
+        userId,
+        toEmail,
+        subject,
+        text: 'Please find your document attached.',
+        attachments
+      });
+
+      if (sendRowId) {
+        try {
+          await pool.execute(
+            'UPDATE ai_email_sends SET status = \'completed\', error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+            [sendRowId]
+          );
+        } catch {}
+      }
+
+      return res.json({
+        success: true,
+        dedupe_key: dedupeKey,
+        already_sent: false,
+        sent_format: pdfOut ? 'pdf' : 'docx'
+      });
+    } catch (e) {
+      const msg = e?.message || 'Email send failed';
+      if (sendRowId) {
+        try {
+          await pool.execute(
+            'UPDATE ai_email_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+            [msg, sendRowId]
+          );
+        } catch {}
+      }
+      return res.status(502).json({ success: false, message: msg });
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.agent.send-document] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to send document' });
+  }
+});
+
 // ========== AI Agents (Pipecat Cloud) ==========
 const AI_MAX_AGENTS = Math.max(1, parseInt(process.env.AI_MAX_AGENTS || '5', 10) || 5);
 const AI_MAX_NUMBERS = Math.max(1, parseInt(process.env.AI_MAX_NUMBERS || '5', 10) || 5);
@@ -1599,7 +2313,7 @@ function assertConfiguredOrThrow(name, val) {
   if (!val) throw new Error(`${name} not configured`);
 }
 
-function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId }) {
+function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl, portalAgentActionToken }) {
   const deepgram = process.env.DEEPGRAM_API_KEY || '';
   const cartesia = process.env.CARTESIA_API_KEY || '';
   const xai = process.env.XAI_API_KEY || '';
@@ -1611,7 +2325,7 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId }) {
   // Required for Daily dial-in handling inside the agent runtime.
   assertConfiguredOrThrow('DAILY_API_KEY', daily);
 
-  return {
+  const secrets = {
     DEEPGRAM_API_KEY: deepgram,
     CARTESIA_API_KEY: cartesia,
     CARTESIA_VOICE_ID: String(cartesiaVoiceId || ''),
@@ -1620,6 +2334,14 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId }) {
     AGENT_GREETING: String(greeting || ''),
     AGENT_PROMPT: String(prompt || '')
   };
+
+  const portalBase = String(portalBaseUrl || process.env.PORTAL_BASE_URL || process.env.PUBLIC_BASE_URL || '').trim();
+  if (portalBase) secrets.PORTAL_BASE_URL = portalBase;
+
+  const token = String(portalAgentActionToken || '').trim();
+  if (token) secrets.PORTAL_AGENT_ACTION_TOKEN = token;
+
+  return secrets;
 }
 
 function pipecatSecretsObjectToArray(secretsObj) {
@@ -1933,7 +2655,9 @@ app.get('/api/me/ai/agents', requireAuth, async (req, res) => {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     const userId = req.session.userId;
     const [rows] = await pool.execute(
-      `SELECT a.id, a.display_name, a.greeting, a.prompt, a.cartesia_voice_id, a.pipecat_agent_name, a.pipecat_region, a.created_at, a.updated_at,
+      `SELECT a.id, a.display_name, a.greeting, a.prompt, a.cartesia_voice_id, a.pipecat_agent_name, a.pipecat_region,
+              a.default_doc_template_id,
+              a.created_at, a.updated_at,
               n.id AS number_id, n.phone_number AS phone_number
        FROM ai_agents a
        LEFT JOIN ai_numbers n ON n.agent_id = a.id
@@ -1953,11 +2677,26 @@ app.post('/api/me/ai/agents', requireAuth, async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     const userId = req.session.userId;
-    const { display_name, greeting, prompt, cartesia_voice_id, cartesiaVoiceId } = req.body || {};
+    const { display_name, greeting, prompt, cartesia_voice_id, cartesiaVoiceId, default_doc_template_id, defaultDocTemplateId } = req.body || {};
     const name = String(display_name || '').trim();
     const voiceIdRaw = (cartesia_voice_id != null ? cartesia_voice_id : cartesiaVoiceId);
     const cartesiaVoiceIdClean = (voiceIdRaw != null ? String(voiceIdRaw) : '').trim();
     if (!name) return res.status(400).json({ success: false, message: 'display_name is required' });
+
+    // Optional: default document template
+    const defaultTplRaw = (default_doc_template_id !== undefined) ? default_doc_template_id : defaultDocTemplateId;
+    let defaultTplId = null;
+    if (defaultTplRaw != null && String(defaultTplRaw).trim()) {
+      const tid = parseInt(String(defaultTplRaw).trim(), 10);
+      if (!Number.isFinite(tid) || tid <= 0) {
+        return res.status(400).json({ success: false, message: 'default_doc_template_id is invalid' });
+      }
+      const [trows] = await pool.execute('SELECT id FROM ai_doc_templates WHERE id = ? AND user_id = ? LIMIT 1', [tid, userId]);
+      if (!trows || !trows.length) {
+        return res.status(404).json({ success: false, message: 'Template not found' });
+      }
+      defaultTplId = tid;
+    }
 
     const [[cnt]] = await pool.execute('SELECT COUNT(*) AS total FROM ai_agents WHERE user_id = ?', [userId]);
     const total = Number(cnt?.total || 0);
@@ -1970,9 +2709,38 @@ app.post('/api/me/ai/agents', requireAuth, async (req, res) => {
     const agentName = `u${userId}-${slug}-${rand}`;
     const secretSetName = buildPipecatSecretSetName(agentName);
 
+    // Optional: per-agent action token used by the agent runtime to call back into this portal
+    // (e.g., sending templated documents via the customer's SMTP settings).
+    let actionTokenPlain = '';
+    let actionTokenHash = null;
+    let actionTokenEnc = null;
+    let actionTokenIv = null;
+    let actionTokenTag = null;
+
+    try {
+      const key = getUserSmtpEncryptionKey();
+      if (key) {
+        actionTokenPlain = crypto.randomBytes(32).toString('base64url');
+        actionTokenHash = sha256(actionTokenPlain);
+        const enc = encryptAes256Gcm(actionTokenPlain, key);
+        actionTokenEnc = enc.enc;
+        actionTokenIv = enc.iv;
+        actionTokenTag = enc.tag;
+      } else if (DEBUG) {
+        console.warn('[ai.agents.create] USER_SMTP_ENCRYPTION_KEY not configured; agent action token will not be set');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[ai.agents.create] Failed to generate/encrypt agent action token:', e.message || e);
+    }
+
     // Provision Pipecat secret set + agent
     try {
-      const secrets = buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId: cartesiaVoiceIdClean });
+      const secrets = buildPipecatSecrets({
+        greeting,
+        prompt,
+        cartesiaVoiceId: cartesiaVoiceIdClean,
+        portalAgentActionToken: actionTokenPlain
+      });
       await pipecatUpsertSecretSet(secretSetName, secrets, PIPECAT_REGION);
       await pipecatCreateAgent({ agentName, secretSetName });
     } catch (provErr) {
@@ -1984,8 +2752,22 @@ app.post('/api/me/ai/agents', requireAuth, async (req, res) => {
 
     // Persist
     const [ins] = await pool.execute(
-      'INSERT INTO ai_agents (user_id, display_name, greeting, prompt, cartesia_voice_id, pipecat_agent_name, pipecat_secret_set, pipecat_region) VALUES (?,?,?,?,?,?,?,?)',
-      [userId, name, String(greeting || ''), String(prompt || ''), cartesiaVoiceIdClean || null, agentName, secretSetName, PIPECAT_REGION]
+      'INSERT INTO ai_agents (user_id, display_name, greeting, prompt, cartesia_voice_id, pipecat_agent_name, pipecat_secret_set, pipecat_region, agent_action_token_hash, agent_action_token_enc, agent_action_token_iv, agent_action_token_tag, default_doc_template_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [
+        userId,
+        name,
+        String(greeting || ''),
+        String(prompt || ''),
+        cartesiaVoiceIdClean || null,
+        agentName,
+        secretSetName,
+        PIPECAT_REGION,
+        actionTokenHash,
+        actionTokenEnc,
+        actionTokenIv,
+        actionTokenTag,
+        defaultTplId
+      ]
     );
 
     return res.json({
@@ -2013,7 +2795,7 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     const userId = req.session.userId;
     const agentId = req.params.id;
-    const { display_name, greeting, prompt, cartesia_voice_id, cartesiaVoiceId } = req.body || {};
+    const { display_name, greeting, prompt, cartesia_voice_id, cartesiaVoiceId, default_doc_template_id, defaultDocTemplateId } = req.body || {};
 
     const [rows] = await pool.execute('SELECT * FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1', [agentId, userId]);
     const agent = rows && rows[0];
@@ -2027,14 +2809,49 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
     const nextVoiceIdClean = nextVoiceId ? String(nextVoiceId).trim() : '';
     if (!nextName) return res.status(400).json({ success: false, message: 'display_name cannot be empty' });
 
+    // Optional: update default template
+    const defaultTplRaw = (default_doc_template_id !== undefined) ? default_doc_template_id : defaultDocTemplateId;
+    let nextDefaultTpl = agent.default_doc_template_id;
+    if (defaultTplRaw !== undefined) {
+      const s = String(defaultTplRaw == null ? '' : defaultTplRaw).trim();
+      if (!s) {
+        nextDefaultTpl = null;
+      } else {
+        const tid = parseInt(s, 10);
+        if (!Number.isFinite(tid) || tid <= 0) {
+          return res.status(400).json({ success: false, message: 'default_doc_template_id is invalid' });
+        }
+        const [trows] = await pool.execute(
+          'SELECT id FROM ai_doc_templates WHERE id = ? AND user_id = ? LIMIT 1',
+          [tid, userId]
+        );
+        if (!trows || !trows.length) {
+          return res.status(404).json({ success: false, message: 'Template not found' });
+        }
+        nextDefaultTpl = tid;
+      }
+    }
+
     await pool.execute(
-      'UPDATE ai_agents SET display_name = ?, greeting = ?, prompt = ?, cartesia_voice_id = ? WHERE id = ? AND user_id = ?',
-      [nextName, nextGreeting, nextPrompt, nextVoiceIdClean || null, agentId, userId]
+      'UPDATE ai_agents SET display_name = ?, greeting = ?, prompt = ?, cartesia_voice_id = ?, default_doc_template_id = ? WHERE id = ? AND user_id = ?',
+      [nextName, nextGreeting, nextPrompt, nextVoiceIdClean || null, nextDefaultTpl, agentId, userId]
     );
 
     // Update secret set + redeploy
     try {
-      const secrets = buildPipecatSecrets({ greeting: nextGreeting, prompt: nextPrompt, cartesiaVoiceId: nextVoiceIdClean });
+      let portalToken = '';
+      if (agent.agent_action_token_enc && agent.agent_action_token_iv && agent.agent_action_token_tag) {
+        const key = getUserSmtpEncryptionKey();
+        if (!key) throw new Error('USER_SMTP_ENCRYPTION_KEY not configured');
+        portalToken = decryptAes256Gcm(agent.agent_action_token_enc, agent.agent_action_token_iv, agent.agent_action_token_tag, key);
+      }
+
+      const secrets = buildPipecatSecrets({
+        greeting: nextGreeting,
+        prompt: nextPrompt,
+        cartesiaVoiceId: nextVoiceIdClean,
+        portalAgentActionToken: portalToken
+      });
       await pipecatUpsertSecretSet(agent.pipecat_secret_set, secrets, agent.pipecat_region || PIPECAT_REGION);
       await pipecatUpdateAgent({
         agentName: agent.pipecat_agent_name,
@@ -2238,10 +3055,18 @@ app.post('/api/me/ai/numbers/:id/assign', requireAuth, async (req, res) => {
     // Ensure the Pipecat agent has the latest platform keys (including DAILY_API_KEY)
     // before routing real PSTN traffic to it.
     try {
+      let portalToken = '';
+      if (agent.agent_action_token_enc && agent.agent_action_token_iv && agent.agent_action_token_tag) {
+        const key = getUserSmtpEncryptionKey();
+        if (!key) throw new Error('USER_SMTP_ENCRYPTION_KEY not configured');
+        portalToken = decryptAes256Gcm(agent.agent_action_token_enc, agent.agent_action_token_iv, agent.agent_action_token_tag, key);
+      }
+
       const secrets = buildPipecatSecrets({
         greeting: agent.greeting,
         prompt: agent.prompt,
-        cartesiaVoiceId: agent.cartesia_voice_id
+        cartesiaVoiceId: agent.cartesia_voice_id,
+        portalAgentActionToken: portalToken
       });
       await pipecatUpsertSecretSet(agent.pipecat_secret_set, secrets, agent.pipecat_region || PIPECAT_REGION);
       await pipecatUpdateAgent({

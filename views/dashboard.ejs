@@ -326,6 +326,47 @@
             <div id="ai-numbers-empty" class="muted">Loading…</div>
           </div>
         </div>
+
+        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:16px">
+          <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+            <h3 style="margin:0 0 10px 0">Email (SMTP)</h3>
+            <div class="muted" style="margin-bottom:10px">Used when your AI agent emails documents to callers.</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <input id="smtpHost" type="text" placeholder="SMTP host (e.g. smtp.gmail.com)">
+              <input id="smtpPort" type="number" placeholder="Port (e.g. 587)">
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+                <input id="smtpSecure" type="checkbox"> Use SSL (secure)
+              </label>
+              <div></div>
+              <input id="smtpUsername" type="text" placeholder="Username">
+              <input id="smtpPassword" type="password" placeholder="Password (leave blank to keep current)">
+              <input id="smtpFromEmail" type="email" placeholder="From email (e.g. you@domain.com)">
+              <input id="smtpFromName" type="text" placeholder="From name (optional)">
+              <input id="smtpReplyTo" type="email" placeholder="Reply-to (optional)">
+              <input id="smtpTestToEmail" type="email" placeholder="Test recipient (optional)">
+            </div>
+            <div class="toolbar" style="margin-top:10px">
+              <button id="saveSmtpBtn">Save SMTP</button>
+              <button id="testSmtpBtn" style="background:#6b7280">Send Test Email</button>
+              <span id="smtpStatus" class="muted" style="margin-left:auto"></span>
+            </div>
+          </div>
+
+          <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+            <h3 style="margin:0 0 10px 0">Document Templates</h3>
+            <div class="muted" style="margin-bottom:10px">Upload a .docx with placeholders like <code>[[Name]]</code> and <code>[[Address]]</code>.</div>
+            <div class="toolbar" style="flex-wrap:wrap">
+              <input id="docTemplateName" type="text" placeholder="Template name" style="flex:1;min-width:160px">
+              <input id="docTemplateFile" type="file" accept=".docx">
+              <button id="uploadDocTemplateBtn" style="background:#4f46e5">Upload</button>
+            </div>
+            <table id="ai-doc-templates-table" style="display:none">
+              <thead><tr><th>Name</th><th>File</th><th>Updated</th><th>Actions</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div id="ai-doc-templates-empty" class="muted">Loading…</div>
+          </div>
+        </div>
       </section>
 
       <section id="view-billing" style="display:none">
@@ -449,6 +490,13 @@
           <label style="display:block;margin-bottom:4px;font-size:13px">Custom Prompt</label>
           <textarea id="aiAgentPrompt" rows="6" placeholder="Instructions for the agent..." style="width:100%;box-sizing:border-box"></textarea>
         </div>
+        <div style="margin-bottom:16px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Default Document Template</label>
+          <select id="aiAgentDefaultTemplateSelect" style="width:100%;box-sizing:border-box">
+            <option value="">None</option>
+          </select>
+          <div class="muted" style="margin-top:6px">Used when the agent emails a document to a caller.</div>
+        </div>
         <input type="hidden" id="aiAgentId">
         <div style="display:flex;gap:8px;justify-content:flex-end">
           <button id="cancelAiAgentBtn" style="background:#6b7280">Cancel</button>
@@ -479,7 +527,7 @@
     tabs.billing.addEventListener('click',e=>{e.preventDefault();activate('billing');billingPage=0;loadBillingHistory();});
     tabs.buydid.addEventListener('click',e=>{e.preventDefault();activate('buydid');loadCountries();});
     tabs.mydids.addEventListener('click',e=>{e.preventDefault();activate('mydids');mydidsPage=0;loadMyDids();});
-    tabs.ai.addEventListener('click',e=>{e.preventDefault();activate('ai');loadAiAgents();loadAiNumbers();});
+    tabs.ai.addEventListener('click',e=>{e.preventDefault();activate('ai');loadAiAgents();loadAiNumbers();loadSmtpSettings();loadDocTemplates();});
     tabs.cdr.addEventListener('click',e=>{e.preventDefault();activate('cdr');cdrPage=0;loadCdrDidOptions();loadCdr();});
 
     function grabRows(payload){
@@ -496,6 +544,174 @@
     let aiAgentsData = [];
     let aiNumbersData = [];
     let cartesiaVoicesLoaded = false;
+
+    // AI email + doc templates
+    let smtpHasPassword = false;
+    let docTemplatesData = [];
+
+    function refreshAgentDefaultTemplateSelectOptions(){
+      const sel = $('#aiAgentDefaultTemplateSelect');
+      if (!sel) return;
+      const current = String(sel.value || '');
+      sel.innerHTML = '';
+      sel.appendChild(new Option('None', ''));
+      for (const t of docTemplatesData || []){
+        const id = t && t.id != null ? String(t.id) : '';
+        const name = t && t.name ? String(t.name) : '';
+        if (!id) continue;
+        sel.appendChild(new Option(name || id, id));
+      }
+      // Restore selection if still present
+      const still = Array.from(sel.options || []).some(o => String(o.value) === current);
+      sel.value = still ? current : '';
+    }
+
+    async function loadSmtpSettings(){
+      const status = $('#smtpStatus');
+      if (status) status.textContent = 'Loading…';
+      try {
+        const r = await fetch('/api/me/smtp-settings');
+        const j = await r.json();
+        if (!j || j.success === false) {
+          if (status) status.textContent = j?.message || 'Failed to load';
+          return;
+        }
+        const d = j.data;
+        smtpHasPassword = !!(d && d.has_password);
+        $('#smtpHost').value = d ? (d.host || '') : '';
+        $('#smtpPort').value = d ? (d.port || '') : '';
+        $('#smtpSecure').checked = !!(d && (d.secure === 1 || d.secure === true));
+        $('#smtpUsername').value = d ? (d.username || '') : '';
+        $('#smtpPassword').value = '';
+        $('#smtpFromEmail').value = d ? (d.from_email || '') : '';
+        $('#smtpFromName').value = d ? (d.from_name || '') : '';
+        $('#smtpReplyTo').value = d ? (d.reply_to || '') : '';
+        if (status) status.textContent = d ? (smtpHasPassword ? 'Configured' : 'Missing password') : 'Not configured';
+      } catch (e) {
+        if (status) status.textContent = 'Failed to load';
+      }
+    }
+
+    async function saveSmtpSettings(){
+      const btn = $('#saveSmtpBtn');
+      if (!btn) return;
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = 'Saving...';
+      try {
+        const payload = {
+          host: ($('#smtpHost').value || '').trim(),
+          port: parseInt(String($('#smtpPort').value || '0'), 10),
+          secure: $('#smtpSecure').checked ? 1 : 0,
+          username: ($('#smtpUsername').value || '').trim(),
+          password: ($('#smtpPassword').value || ''),
+          from_email: ($('#smtpFromEmail').value || '').trim(),
+          from_name: ($('#smtpFromName').value || '').trim(),
+          reply_to: ($('#smtpReplyTo').value || '').trim()
+        };
+        const r = await fetch('/api/me/smtp-settings', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const j = await r.json();
+        if (!j || j.success === false) {
+          showToast(j?.message || 'Failed to save SMTP settings', 'error');
+          return;
+        }
+        showToast('SMTP settings saved.');
+        await loadSmtpSettings();
+      } catch (e) {
+        showToast('Failed to save SMTP settings', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    }
+
+    async function testSmtpSettings(){
+      const btn = $('#testSmtpBtn');
+      if (!btn) return;
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = 'Sending...';
+      try {
+        const to_email = ($('#smtpTestToEmail').value || '').trim();
+        const r = await fetch('/api/me/smtp-settings/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(to_email ? { to_email } : {})
+        });
+        const j = await r.json();
+        if (!j || j.success === false) {
+          showToast(j?.message || 'SMTP test failed', 'error');
+          return;
+        }
+        showToast('Test email sent.');
+      } catch (e) {
+        showToast('SMTP test failed', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    }
+
+    function renderDocTemplates(){
+      const table = $('#ai-doc-templates-table');
+      const empty = $('#ai-doc-templates-empty');
+      if (!table || !empty) return;
+      const tbody = table.querySelector('tbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+
+      if (!docTemplatesData || !docTemplatesData.length){
+        table.style.display = 'none';
+        empty.style.display = 'block';
+        empty.textContent = 'No templates yet. Upload a .docx.';
+        refreshAgentDefaultTemplateSelectOptions();
+        return;
+      }
+
+      for (const t of docTemplatesData){
+        const tr = document.createElement('tr');
+        const name = String(t.name || '');
+        const file = String(t.original_filename || '');
+        const updated = t.updated_at ? new Date(t.updated_at).toLocaleString() : '';
+        tr.innerHTML =
+          `<td>${escapeHtml(name)}</td>`+
+          `<td>${escapeHtml(file)}</td>`+
+          `<td>${escapeHtml(updated)}</td>`+
+          `<td><button class="ai-doc-template-delete" data-id="${escapeHtml(String(t.id))}" style="background:#ef4444">Delete</button></td>`;
+        tbody.appendChild(tr);
+      }
+
+      empty.style.display = 'none';
+      table.style.display = 'table';
+      refreshAgentDefaultTemplateSelectOptions();
+    }
+
+    async function loadDocTemplates(){
+      const table = $('#ai-doc-templates-table');
+      const empty = $('#ai-doc-templates-empty');
+      if (empty) { empty.style.display = 'block'; empty.textContent = 'Loading…'; }
+      if (table) table.style.display = 'none';
+      try {
+        const r = await fetch('/api/me/ai/doc-templates');
+        const j = await r.json();
+        if (!j || j.success === false) {
+          docTemplatesData = [];
+          renderDocTemplates();
+          if (empty) empty.textContent = j?.message || 'Failed to load templates';
+          return;
+        }
+        docTemplatesData = Array.isArray(j.data) ? j.data : [];
+        renderDocTemplates();
+      } catch (e) {
+        docTemplatesData = [];
+        renderDocTemplates();
+        if (empty) empty.textContent = 'Failed to load templates';
+      }
+    }
 
     function getSelectedCartesiaVoiceId(){
       const sel = $('#aiAgentCartesiaVoiceSelect');
@@ -717,6 +933,14 @@
       $('#aiAgentGreeting').value = agent ? String(agent.greeting || '') : '';
       $('#aiAgentPrompt').value = agent ? String(agent.prompt || '') : '';
 
+      // Default template selection
+      const desiredTemplateId = agent && agent.default_doc_template_id ? String(agent.default_doc_template_id) : '';
+      refreshAgentDefaultTemplateSelectOptions();
+      try { $('#aiAgentDefaultTemplateSelect').value = desiredTemplateId; } catch {}
+      loadDocTemplates().then(() => {
+        try { $('#aiAgentDefaultTemplateSelect').value = desiredTemplateId; } catch {}
+      });
+
       // Voice selection
       const desiredVoiceId = agent ? String(agent.cartesia_voice_id || '') : '';
       applyAiVoiceSelection(desiredVoiceId);
@@ -752,6 +976,7 @@
       const greeting = ($('#aiAgentGreeting').value || '');
       const prompt = ($('#aiAgentPrompt').value || '');
       const cartesia_voice_id = getSelectedCartesiaVoiceId();
+      const defaultTpl = ($('#aiAgentDefaultTemplateSelect').value || '').trim();
       if (!display_name) return showToast('Agent name is required.', 'error');
 
       const btn = $('#confirmAiAgentBtn');
@@ -765,7 +990,13 @@
         const r = await fetch(url, {
           method,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ display_name, greeting, prompt, cartesia_voice_id: (cartesia_voice_id || null) })
+          body: JSON.stringify({
+            display_name,
+            greeting,
+            prompt,
+            cartesia_voice_id: (cartesia_voice_id || null),
+            default_doc_template_id: defaultTpl ? defaultTpl : null
+          })
         });
         const j = await r.json();
         if (!j || j.success === false) {
@@ -778,6 +1009,46 @@
         await loadAiNumbers();
       } catch (e) {
         showToast('Failed to save agent', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    });
+
+    // SMTP + templates controls
+    $('#saveSmtpBtn').addEventListener('click', (e) => { e.preventDefault(); saveSmtpSettings(); });
+    $('#testSmtpBtn').addEventListener('click', (e) => { e.preventDefault(); testSmtpSettings(); });
+
+    $('#uploadDocTemplateBtn').addEventListener('click', async (e) => {
+      e.preventDefault();
+      const btn = $('#uploadDocTemplateBtn');
+      if (!btn) return;
+
+      const name = ($('#docTemplateName').value || '').trim();
+      const fileInput = $('#docTemplateFile');
+      const file = fileInput && fileInput.files ? fileInput.files[0] : null;
+      if (!file) return showToast('Please choose a .docx file to upload.', 'error');
+
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = 'Uploading...';
+      try {
+        const fd = new FormData();
+        if (name) fd.append('name', name);
+        fd.append('file', file);
+        const r = await fetch('/api/me/ai/doc-templates', { method: 'POST', body: fd });
+        const j = await r.json();
+        if (!j || j.success === false) {
+          showToast(j?.message || 'Upload failed', 'error');
+          return;
+        }
+        showToast('Template uploaded.');
+        try { $('#docTemplateName').value = ''; } catch {}
+        try { $('#docTemplateFile').value = ''; } catch {}
+        await loadDocTemplates();
+        await loadAiAgents();
+      } catch (e2) {
+        showToast('Upload failed', 'error');
       } finally {
         btn.disabled = false;
         btn.textContent = old;
@@ -845,6 +1116,24 @@
           await loadAiNumbers();
         } catch {
           showToast('Failed to unassign number', 'error');
+        }
+      }
+      if (ev.target && ev.target.classList.contains('ai-doc-template-delete')) {
+        const tplId = ev.target.getAttribute('data-id');
+        if (!tplId) return;
+        if (!confirm('Delete this document template?')) return;
+        try {
+          const r = await fetch(`/api/me/ai/doc-templates/${encodeURIComponent(tplId)}`, { method: 'DELETE' });
+          const j = await r.json();
+          if (!j || j.success === false) {
+            showToast(j?.message || 'Delete failed', 'error');
+            return;
+          }
+          showToast('Template deleted.');
+          await loadDocTemplates();
+          await loadAiAgents();
+        } catch {
+          showToast('Delete failed', 'error');
         }
       }
     });

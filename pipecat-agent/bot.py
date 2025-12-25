@@ -1,4 +1,5 @@
 import inspect
+import json
 import os
 from typing import Any, Optional
 
@@ -13,6 +14,7 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.llm_service import FunctionCallParams
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.daily.transport import DailyDialinSettings, DailyParams, DailyTransport
 from pipecat.utils.text.markdown_text_filter import MarkdownTextFilter
@@ -174,7 +176,51 @@ async def bot(session_args: Any):
     xai_key = _require("XAI_API_KEY")
 
     greeting = _env("AGENT_GREETING", "").strip()
-    prompt = _env("AGENT_PROMPT", "You are a helpful voice assistant. Keep responses concise.").strip()
+    base_prompt = _env("AGENT_PROMPT", "You are a helpful voice assistant. Keep responses concise.").strip()
+
+    # Portal integration (used for emailing templated documents)
+    portal_base_url = _env("PORTAL_BASE_URL", "").strip().rstrip("/")
+    portal_token = _env("PORTAL_AGENT_ACTION_TOKEN", "").strip()
+    tools = []
+
+    if portal_base_url and portal_token:
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_document",
+                    "description": "Email a templated document to the caller using the business owner's SMTP settings and the agent's default template.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "to_email": {
+                                "type": "string",
+                                "description": "Recipient email address",
+                            },
+                            "subject": {
+                                "type": "string",
+                                "description": "Email subject (optional)",
+                            },
+                            "variables": {
+                                "type": "object",
+                                "description": "Template variables mapping. Keys correspond to placeholders inside [[...]] in the DOCX template (e.g. Name, Address).",
+                            },
+                        },
+                        "required": ["to_email"],
+                    },
+                },
+            }
+        )
+
+    # Extend the user-provided prompt with minimal tool guidance.
+    prompt = base_prompt
+    if tools:
+        prompt += (
+            "\n\nYou can email the caller a document when requested. "
+            "Collect their email and any details needed for the template placeholders, "
+            "then call the send_document tool with to_email and variables. "
+            "After the tool returns, confirm whether the email was sent."
+        )
 
     room_url = getattr(session_args, "room_url", None) or getattr(session_args, "roomUrl", None) or ""
     token = getattr(session_args, "token", None) or getattr(session_args, "room_token", None) or ""
@@ -226,6 +272,66 @@ async def bot(session_args: Any):
         base_url=_env("XAI_BASE_URL", "https://api.x.ai/v1").strip() or "https://api.x.ai/v1",
     )
 
+    # Register tool handler (if portal integration is configured)
+    if tools:
+        async def _send_document(params: FunctionCallParams) -> None:
+            args = dict(params.arguments or {})
+            to_email = str(args.get("to_email") or args.get("toEmail") or args.get("email") or "").strip()
+            subject = str(args.get("subject") or "").strip()
+            variables = args.get("variables") or {}
+            if not isinstance(variables, dict):
+                variables = {}
+
+            if not to_email:
+                await params.result_callback({"success": False, "message": "to_email is required"})
+                return
+
+            if not portal_base_url or not portal_token:
+                await params.result_callback({
+                    "success": False,
+                    "message": "Portal integration not configured (missing PORTAL_BASE_URL or PORTAL_AGENT_ACTION_TOKEN)",
+                })
+                return
+
+            payload: dict[str, Any] = {
+                "to_email": to_email,
+                "variables": variables,
+            }
+            if subject:
+                payload["subject"] = subject
+
+            if dialin_settings:
+                payload["call_id"] = str(dialin_settings.call_id)
+                payload["call_domain"] = str(dialin_settings.call_domain)
+
+            url = f"{portal_base_url}/api/ai/agent/send-document"
+            headers = {
+                "Authorization": f"Bearer {portal_token}",
+                "Accept": "application/json",
+            }
+
+            try:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = {"success": False, "message": resp.text}
+
+                if resp.status_code >= 400 or (isinstance(data, dict) and data.get("success") is False):
+                    await params.result_callback({
+                        "success": False,
+                        "status_code": resp.status_code,
+                        "response": data,
+                    })
+                    return
+
+                await params.result_callback({"success": True, "response": data})
+            except Exception as e:
+                await params.result_callback({"success": False, "message": str(e)})
+
+        llm.register_function("send_document", _send_document)
+
     voice_id = await _resolve_cartesia_voice_id(api_key=cartesia_key)
     tts = CartesiaTTSService(
         api_key=cartesia_key,
@@ -237,7 +343,15 @@ async def bot(session_args: Any):
     )
 
     # Conversation context (OpenAI-compatible)
-    context = OpenAILLMContext(messages=[{"role": "system", "content": prompt}] if prompt else [])
+    if tools:
+        context = OpenAILLMContext(
+            messages=[{"role": "system", "content": prompt}] if prompt else [],
+            tools=tools,
+            tool_choice="auto",
+        )
+    else:
+        context = OpenAILLMContext(messages=[{"role": "system", "content": prompt}] if prompt else [])
+
     ctx = llm.create_context_aggregator(context)
 
     # IMPORTANT: assistant context aggregator consumes TextFrames (it aggregates them and does
