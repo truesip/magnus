@@ -1453,16 +1453,20 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId }) {
   const deepgram = process.env.DEEPGRAM_API_KEY || '';
   const cartesia = process.env.CARTESIA_API_KEY || '';
   const xai = process.env.XAI_API_KEY || '';
+  const daily = process.env.DAILY_API_KEY || '';
   // Platform-owned keys are required.
   assertConfiguredOrThrow('DEEPGRAM_API_KEY', deepgram);
   assertConfiguredOrThrow('CARTESIA_API_KEY', cartesia);
   assertConfiguredOrThrow('XAI_API_KEY', xai);
+  // Required for Daily dial-in handling inside the agent runtime.
+  assertConfiguredOrThrow('DAILY_API_KEY', daily);
 
   return {
     DEEPGRAM_API_KEY: deepgram,
     CARTESIA_API_KEY: cartesia,
     CARTESIA_VOICE_ID: String(cartesiaVoiceId || ''),
     XAI_API_KEY: xai,
+    DAILY_API_KEY: daily,
     AGENT_GREETING: String(greeting || ''),
     AGENT_PROMPT: String(prompt || '')
   };
@@ -2010,6 +2014,25 @@ app.post('/api/me/ai/numbers/:id/assign', requireAuth, async (req, res) => {
     // If the number was previously assigned, remove its existing dial-in config
     if (num.dialin_config_id) {
       try { await dailyDeleteDialinConfig(num.dialin_config_id); } catch (e) { if (DEBUG) console.warn('[ai.assign] Failed to delete old dialin config', e.message || e); }
+    }
+
+    // Ensure the Pipecat agent has the latest platform keys (including DAILY_API_KEY)
+    // before routing real PSTN traffic to it.
+    try {
+      const secrets = buildPipecatSecrets({
+        greeting: agent.greeting,
+        prompt: agent.prompt,
+        cartesiaVoiceId: agent.cartesia_voice_id
+      });
+      await pipecatUpsertSecretSet(agent.pipecat_secret_set, secrets, agent.pipecat_region || PIPECAT_REGION);
+      await pipecatUpdateAgent({
+        agentName: agent.pipecat_agent_name,
+        secretSetName: agent.pipecat_secret_set,
+        regionOverride: agent.pipecat_region || PIPECAT_REGION
+      });
+    } catch (provErr) {
+      const msg = provErr?.message || 'Failed to update agent in Pipecat';
+      return res.status(502).json({ success: false, message: msg, error: provErr?.data });
     }
 
     const roomCreationApi = buildDailyRoomCreationApiUrl({ agentName: agent.pipecat_agent_name });
