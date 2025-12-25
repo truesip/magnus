@@ -773,6 +773,8 @@ async function initDb() {
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     call_id VARCHAR(64) NOT NULL,
     call_domain VARCHAR(64) NOT NULL,
+    event_call_id VARCHAR(64) NULL,
+    event_call_domain VARCHAR(64) NULL,
     user_id BIGINT NOT NULL,
     agent_id BIGINT NULL,
     ai_number_id BIGINT NULL,
@@ -792,6 +794,7 @@ async function initDb() {
     KEY idx_ai_call_user (user_id),
     KEY idx_ai_call_time_start (time_start),
     KEY idx_ai_call_to_number (to_number),
+    KEY idx_ai_call_event (event_call_domain, event_call_id),
     CONSTRAINT fk_ai_call_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
     CONSTRAINT fk_ai_call_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL,
     CONSTRAINT fk_ai_call_number FOREIGN KEY (ai_number_id) REFERENCES ai_numbers(id) ON DELETE SET NULL
@@ -844,6 +847,51 @@ async function initDb() {
     } catch (e) {
       if (DEBUG) console.warn('[schema] ai_call_logs.time_connect check failed', e.message || e);
     }
+
+    // Ensure ai_call_logs event identifiers exist (Daily /webhooks/daily/events may use different ids)
+    try {
+      const [hasEventCallId] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_call_logs' AND column_name='event_call_id' LIMIT 1",
+        [dbName]
+      );
+      if (!hasEventCallId || !hasEventCallId.length) {
+        await pool.query('ALTER TABLE ai_call_logs ADD COLUMN event_call_id VARCHAR(64) NULL AFTER call_domain');
+        if (DEBUG) console.log('[schema] Added ai_call_logs.event_call_id column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_call_logs.event_call_id check failed', e.message || e);
+    }
+
+    try {
+      const [hasEventCallDomain] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_call_logs' AND column_name='event_call_domain' LIMIT 1",
+        [dbName]
+      );
+      if (!hasEventCallDomain || !hasEventCallDomain.length) {
+        await pool.query('ALTER TABLE ai_call_logs ADD COLUMN event_call_domain VARCHAR(64) NULL AFTER event_call_id');
+        if (DEBUG) console.log('[schema] Added ai_call_logs.event_call_domain column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_call_logs.event_call_domain check failed', e.message || e);
+    }
+
+    try {
+      const [hasEventIdx] = await pool.query(
+        "SELECT 1 FROM information_schema.statistics WHERE table_schema=? AND table_name='ai_call_logs' AND index_name='idx_ai_call_event' LIMIT 1",
+        [dbName]
+      );
+      if (!hasEventIdx || !hasEventIdx.length) {
+        try {
+          await pool.query('ALTER TABLE ai_call_logs ADD KEY idx_ai_call_event (event_call_domain, event_call_id)');
+          if (DEBUG) console.log('[schema] Added ai_call_logs.idx_ai_call_event index');
+        } catch (e) {
+          if (DEBUG) console.warn('[schema] Failed to add idx_ai_call_event index:', e.message || e);
+        }
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_call_logs.idx_ai_call_event check failed', e.message || e);
+    }
+
     // Add dst column to user_trunks if missing
     const [hasDst] = await pool.query(
       'SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name=\'user_trunks\' AND column_name=\'dst\' LIMIT 1',
@@ -4246,6 +4294,57 @@ app.post('/webhooks/daily/events', async (req, res) => {
           return { updated: false };
         }
 
+        async function tryUpdateAiCallLogByTimeWindow({ sqlById, buildParamsById }) {
+          // Fallback for when Daily event identifiers don't match the ids we stored
+          // from room_creation_api. Use a tight time window and only rows that
+          // have not been ended yet.
+          const windowMinutes = 30;
+
+          const where = [
+            'time_end IS NULL',
+            'time_start IS NOT NULL',
+            '(status IS NULL OR status IN (\'webhook_received\',\'pipecat_started\',\'connected\',\'warning\'))',
+            '(event_call_id IS NULL OR event_call_id = \'\')',
+            'time_start >= DATE_SUB(?, INTERVAL ' + windowMinutes + ' MINUTE)',
+            'time_start <= DATE_ADD(?, INTERVAL ' + windowMinutes + ' MINUTE)'
+          ];
+
+          const params = [ts, ts];
+
+          // If we have numbers in the event payload, constrain by them as well.
+          if (toDigits) {
+            where.push("REGEXP_REPLACE(to_number, '[^0-9]', '') = ?");
+            params.push(toDigits);
+          }
+          if (fromDigits) {
+            where.push("REGEXP_REPLACE(from_number, '[^0-9]', '') = ?");
+            params.push(fromDigits);
+          }
+
+          // Select the nearest candidate row by start time.
+          let rowId = null;
+          try {
+            const [rows] = await pool.query(
+              `SELECT id
+               FROM ai_call_logs
+               WHERE ${where.join(' AND ')}
+               ORDER BY ABS(TIMESTAMPDIFF(SECOND, time_start, ?)) ASC, time_start DESC, id DESC
+               LIMIT 1`,
+              params.concat([ts])
+            );
+            rowId = rows && rows[0] ? rows[0].id : null;
+          } catch (e) {
+            if (DEBUG) console.warn('[daily.webhook] time-window candidate lookup failed:', e.message || e);
+            rowId = null;
+          }
+
+          if (!rowId) return { updated: false };
+
+          const [r] = await pool.execute(sqlById, buildParamsById(rowId));
+          if (r && r.affectedRows) return { updated: true, via: 'time_window', rowId };
+          return { updated: false };
+        }
+
         // Timestamps are seconds since epoch.
         const tsRaw = src.timestamp != null
           ? Number(src.timestamp)
@@ -4266,28 +4365,52 @@ app.post('/webhooks/daily/events', async (req, res) => {
         }
 
         if (type === 'dialin.connected') {
+          // 1) Preferred: match by event_call_id/event_call_domain (once mapped).
           let result = await tryUpdateAiCallLog({
             sqlByDomain: `UPDATE ai_call_logs
              SET status = ?,
                  time_connect = COALESCE(time_connect, ?),
                  updated_at = CURRENT_TIMESTAMP
-             WHERE call_id = ? AND call_domain = ?
+             WHERE event_call_id = ? AND event_call_domain = ? AND time_end IS NULL
              LIMIT 1`,
             buildParamsByDomain: (cid, dom) => ['connected', ts, cid, dom],
             sqlById: `UPDATE ai_call_logs
                SET status = ?,
                    time_connect = COALESCE(time_connect, ?),
                    updated_at = CURRENT_TIMESTAMP
-               WHERE call_id = ?
+               WHERE event_call_id = ? AND time_end IS NULL
                LIMIT 1`,
             buildParamsById: (cid) => ['connected', ts, cid]
           });
 
+          // 2) Fallback: some Daily payloads may still use the original room_creation_api call ids.
+          if (!result.updated) {
+            result = await tryUpdateAiCallLog({
+              sqlByDomain: `UPDATE ai_call_logs
+               SET status = ?,
+                   time_connect = COALESCE(time_connect, ?),
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE call_id = ? AND call_domain = ? AND time_end IS NULL
+               LIMIT 1`,
+              buildParamsByDomain: (cid, dom) => ['connected', ts, cid, dom],
+              sqlById: `UPDATE ai_call_logs
+                 SET status = ?,
+                     time_connect = COALESCE(time_connect, ?),
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE call_id = ? AND time_end IS NULL
+                 LIMIT 1`,
+              buildParamsById: (cid) => ['connected', ts, cid]
+            });
+          }
+
+          // 3) Fallback: match by phone numbers (if present) and store the event ids.
           if (!result.updated) {
             const numResult = await tryUpdateAiCallLogByNumbers({
               sqlToFrom: `UPDATE ai_call_logs
                 SET status = ?,
                     time_connect = COALESCE(time_connect, ?),
+                    event_call_id = COALESCE(event_call_id, ?),
+                    event_call_domain = COALESCE(event_call_domain, ?),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE time_end IS NULL
                   AND REGEXP_REPLACE(to_number, '[^0-9]', '') = ?
@@ -4295,19 +4418,37 @@ app.post('/webhooks/daily/events', async (req, res) => {
                   AND time_start >= DATE_SUB(?, INTERVAL 12 HOUR)
                 ORDER BY time_start DESC, id DESC
                 LIMIT 1`,
-              paramsToFrom: ['connected', ts, toDigits, fromDigits, ts],
+              paramsToFrom: ['connected', ts, callId || null, callDomain || null, toDigits, fromDigits, ts],
               sqlToOnly: `UPDATE ai_call_logs
                 SET status = ?,
                     time_connect = COALESCE(time_connect, ?),
+                    event_call_id = COALESCE(event_call_id, ?),
+                    event_call_domain = COALESCE(event_call_domain, ?),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE time_end IS NULL
                   AND REGEXP_REPLACE(to_number, '[^0-9]', '') = ?
                   AND time_start >= DATE_SUB(?, INTERVAL 12 HOUR)
                 ORDER BY time_start DESC, id DESC
                 LIMIT 1`,
-              paramsToOnly: ['connected', ts, toDigits, ts]
+              paramsToOnly: ['connected', ts, callId || null, callDomain || null, toDigits, ts]
             });
             result = numResult.updated ? numResult : result;
+          }
+
+          // 4) Last resort: match by a tight time window and store the event ids.
+          if (!result.updated) {
+            const timeResult = await tryUpdateAiCallLogByTimeWindow({
+              sqlById: `UPDATE ai_call_logs
+                SET status = ?,
+                    time_connect = COALESCE(time_connect, ?),
+                    event_call_id = COALESCE(event_call_id, ?),
+                    event_call_domain = COALESCE(event_call_domain, ?),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                LIMIT 1`,
+              buildParamsById: (rowId) => ['connected', ts, callId || null, callDomain || null, rowId]
+            });
+            result = timeResult.updated ? timeResult : result;
           }
 
           if (!result.updated && DEBUG) {
@@ -4324,34 +4465,66 @@ app.post('/webhooks/daily/events', async (req, res) => {
         }
 
         if (type === 'dialin.stopped') {
+          // 1) Preferred: match by event_call_id/event_call_domain (once mapped).
           let result = await tryUpdateAiCallLog({
             sqlByDomain: `UPDATE ai_call_logs
-             SET status = CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END,
-                 time_end = ?,
-                 duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), ?)),
-                 billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), ?)),
+             SET status = CASE WHEN status = 'error' THEN 'error' ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
+                 time_end = COALESCE(time_end, ?),
+                 duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                 billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
                  updated_at = CURRENT_TIMESTAMP
-             WHERE call_id = ? AND call_domain = ?
+             WHERE event_call_id = ? AND event_call_domain = ?
              LIMIT 1`,
             buildParamsByDomain: (cid, dom) => [ts, ts, ts, ts, ts, cid, dom],
             sqlById: `UPDATE ai_call_logs
-               SET status = CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END,
-                   time_end = ?,
-                   duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), ?)),
-                   billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), ?)),
+               SET status = CASE WHEN status = 'error' THEN 'error' ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
+                   time_end = COALESCE(time_end, ?),
+                   duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                   billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
                    updated_at = CURRENT_TIMESTAMP
-               WHERE call_id = ?
+               WHERE event_call_id = ?
                LIMIT 1`,
             buildParamsById: (cid) => [ts, ts, ts, ts, ts, cid]
           });
 
+          // 2) Fallback: legacy match by call_id/call_domain and store the event ids.
+          if (!result.updated) {
+            result = await tryUpdateAiCallLog({
+              sqlByDomain: `UPDATE ai_call_logs
+               SET status = CASE WHEN status = 'error' THEN 'error' ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
+                   time_end = COALESCE(time_end, ?),
+                   duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                   billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                   event_call_id = COALESCE(event_call_id, ?),
+                   event_call_domain = COALESCE(event_call_domain, ?),
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE call_id = ? AND call_domain = ?
+               LIMIT 1`,
+              buildParamsByDomain: (cid, dom) => [ts, ts, ts, ts, ts, callId || null, callDomain || null, cid, dom],
+              sqlById: `UPDATE ai_call_logs
+                 SET status = CASE WHEN status = 'error' THEN 'error' ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
+                     time_end = COALESCE(time_end, ?),
+                     duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                     billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                     event_call_id = COALESCE(event_call_id, ?),
+                     event_call_domain = COALESCE(event_call_domain, ?),
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE call_id = ?
+                 LIMIT 1`,
+              buildParamsById: (cid) => [ts, ts, ts, ts, ts, callId || null, callDomain || null, cid]
+            });
+          }
+
+          // 3) Fallback: match by phone numbers (if present) and store the event ids.
           if (!result.updated) {
             const numResult = await tryUpdateAiCallLogByNumbers({
               sqlToFrom: `UPDATE ai_call_logs
-                SET status = CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END,
+                SET status = CASE WHEN status = 'error' THEN 'error' ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
                     time_end = COALESCE(time_end, ?),
-                    duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), ?)),
-                    billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), ?)),
+                    duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                    billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                    event_call_id = COALESCE(event_call_id, ?),
+                    event_call_domain = COALESCE(event_call_domain, ?),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE time_end IS NULL
                   AND REGEXP_REPLACE(to_number, '[^0-9]', '') = ?
@@ -4359,21 +4532,41 @@ app.post('/webhooks/daily/events', async (req, res) => {
                   AND time_start >= DATE_SUB(?, INTERVAL 12 HOUR)
                 ORDER BY time_start DESC, id DESC
                 LIMIT 1`,
-              paramsToFrom: [ts, ts, ts, ts, ts, toDigits, fromDigits, ts],
+              paramsToFrom: [ts, ts, ts, ts, ts, callId || null, callDomain || null, toDigits, fromDigits, ts],
               sqlToOnly: `UPDATE ai_call_logs
-                SET status = CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END,
+                SET status = CASE WHEN status = 'error' THEN 'error' ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
                     time_end = COALESCE(time_end, ?),
-                    duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), ?)),
-                    billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), ?)),
+                    duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                    billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                    event_call_id = COALESCE(event_call_id, ?),
+                    event_call_domain = COALESCE(event_call_domain, ?),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE time_end IS NULL
                   AND REGEXP_REPLACE(to_number, '[^0-9]', '') = ?
                   AND time_start >= DATE_SUB(?, INTERVAL 12 HOUR)
                 ORDER BY time_start DESC, id DESC
                 LIMIT 1`,
-              paramsToOnly: [ts, ts, ts, ts, ts, toDigits, ts]
+              paramsToOnly: [ts, ts, ts, ts, ts, callId || null, callDomain || null, toDigits, ts]
             });
             result = numResult.updated ? numResult : result;
+          }
+
+          // 4) Last resort: match by a tight time window and store the event ids.
+          if (!result.updated) {
+            const timeResult = await tryUpdateAiCallLogByTimeWindow({
+              sqlById: `UPDATE ai_call_logs
+                SET status = CASE WHEN status = 'error' THEN 'error' ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
+                    time_end = COALESCE(time_end, ?),
+                    duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                    billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                    event_call_id = COALESCE(event_call_id, ?),
+                    event_call_domain = COALESCE(event_call_domain, ?),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                LIMIT 1`,
+              buildParamsById: (rowId) => [ts, ts, ts, ts, ts, callId || null, callDomain || null, rowId]
+            });
+            result = timeResult.updated ? timeResult : result;
           }
 
           if (!result.updated && DEBUG) {
@@ -4390,28 +4583,66 @@ app.post('/webhooks/daily/events', async (req, res) => {
         }
 
         if (type === 'dialin.error') {
+          // 1) Preferred: match by event_call_id/event_call_domain (once mapped).
           let result = await tryUpdateAiCallLog({
             sqlByDomain: `UPDATE ai_call_logs
              SET status = 'error',
                  time_end = COALESCE(time_end, ?),
+                 duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                 billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
                  updated_at = CURRENT_TIMESTAMP
-             WHERE call_id = ? AND call_domain = ?
+             WHERE event_call_id = ? AND event_call_domain = ? AND time_end IS NULL
              LIMIT 1`,
-            buildParamsByDomain: (cid, dom) => [ts, cid, dom],
+            buildParamsByDomain: (cid, dom) => [ts, ts, ts, ts, ts, cid, dom],
             sqlById: `UPDATE ai_call_logs
                SET status = 'error',
                    time_end = COALESCE(time_end, ?),
+                   duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                   billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
                    updated_at = CURRENT_TIMESTAMP
-               WHERE call_id = ?
+               WHERE event_call_id = ? AND time_end IS NULL
                LIMIT 1`,
-            buildParamsById: (cid) => [ts, cid]
+            buildParamsById: (cid) => [ts, ts, ts, ts, ts, cid]
           });
 
+          // 2) Fallback: legacy match by call_id/call_domain and store the event ids.
+          if (!result.updated) {
+            result = await tryUpdateAiCallLog({
+              sqlByDomain: `UPDATE ai_call_logs
+               SET status = 'error',
+                   time_end = COALESCE(time_end, ?),
+                   duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                   billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                   event_call_id = COALESCE(event_call_id, ?),
+                   event_call_domain = COALESCE(event_call_domain, ?),
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE call_id = ? AND call_domain = ? AND time_end IS NULL
+               LIMIT 1`,
+              buildParamsByDomain: (cid, dom) => [ts, ts, ts, ts, ts, callId || null, callDomain || null, cid, dom],
+              sqlById: `UPDATE ai_call_logs
+                 SET status = 'error',
+                     time_end = COALESCE(time_end, ?),
+                     duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                     billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                     event_call_id = COALESCE(event_call_id, ?),
+                     event_call_domain = COALESCE(event_call_domain, ?),
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE call_id = ? AND time_end IS NULL
+                 LIMIT 1`,
+              buildParamsById: (cid) => [ts, ts, ts, ts, ts, callId || null, callDomain || null, cid]
+            });
+          }
+
+          // 3) Fallback: match by phone numbers (if present) and store the event ids.
           if (!result.updated) {
             const numResult = await tryUpdateAiCallLogByNumbers({
               sqlToFrom: `UPDATE ai_call_logs
                 SET status = 'error',
                     time_end = COALESCE(time_end, ?),
+                    duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                    billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                    event_call_id = COALESCE(event_call_id, ?),
+                    event_call_domain = COALESCE(event_call_domain, ?),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE time_end IS NULL
                   AND REGEXP_REPLACE(to_number, '[^0-9]', '') = ?
@@ -4419,19 +4650,41 @@ app.post('/webhooks/daily/events', async (req, res) => {
                   AND time_start >= DATE_SUB(?, INTERVAL 12 HOUR)
                 ORDER BY time_start DESC, id DESC
                 LIMIT 1`,
-              paramsToFrom: [ts, toDigits, fromDigits, ts],
+              paramsToFrom: [ts, ts, ts, ts, ts, callId || null, callDomain || null, toDigits, fromDigits, ts],
               sqlToOnly: `UPDATE ai_call_logs
                 SET status = 'error',
                     time_end = COALESCE(time_end, ?),
+                    duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                    billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                    event_call_id = COALESCE(event_call_id, ?),
+                    event_call_domain = COALESCE(event_call_domain, ?),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE time_end IS NULL
                   AND REGEXP_REPLACE(to_number, '[^0-9]', '') = ?
                   AND time_start >= DATE_SUB(?, INTERVAL 12 HOUR)
                 ORDER BY time_start DESC, id DESC
                 LIMIT 1`,
-              paramsToOnly: [ts, toDigits, ts]
+              paramsToOnly: [ts, ts, ts, ts, ts, callId || null, callDomain || null, toDigits, ts]
             });
             result = numResult.updated ? numResult : result;
+          }
+
+          // 4) Last resort: match by a tight time window and store the event ids.
+          if (!result.updated) {
+            const timeResult = await tryUpdateAiCallLogByTimeWindow({
+              sqlById: `UPDATE ai_call_logs
+                SET status = 'error',
+                    time_end = COALESCE(time_end, ?),
+                    duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                    billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
+                    event_call_id = COALESCE(event_call_id, ?),
+                    event_call_domain = COALESCE(event_call_domain, ?),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                LIMIT 1`,
+              buildParamsById: (rowId) => [ts, ts, ts, ts, ts, callId || null, callDomain || null, rowId]
+            });
+            result = timeResult.updated ? timeResult : result;
           }
 
           if (!result.updated && DEBUG) {
@@ -4448,25 +4701,51 @@ app.post('/webhooks/daily/events', async (req, res) => {
         }
 
         if (type === 'dialin.warning') {
+          // 1) Preferred: match by event_call_id/event_call_domain (once mapped).
           let result = await tryUpdateAiCallLog({
             sqlByDomain: `UPDATE ai_call_logs
              SET status = IF(status IS NULL OR status = '', 'warning', status),
                  updated_at = CURRENT_TIMESTAMP
-             WHERE call_id = ? AND call_domain = ?
+             WHERE event_call_id = ? AND event_call_domain = ?
              LIMIT 1`,
             buildParamsByDomain: (cid, dom) => [cid, dom],
             sqlById: `UPDATE ai_call_logs
                SET status = IF(status IS NULL OR status = '', 'warning', status),
                    updated_at = CURRENT_TIMESTAMP
-               WHERE call_id = ?
+               WHERE event_call_id = ?
                LIMIT 1`,
             buildParamsById: (cid) => [cid]
           });
 
+          // 2) Fallback: legacy match by call_id/call_domain and store the event ids.
+          if (!result.updated) {
+            result = await tryUpdateAiCallLog({
+              sqlByDomain: `UPDATE ai_call_logs
+               SET status = IF(status IS NULL OR status = '', 'warning', status),
+                   event_call_id = COALESCE(event_call_id, ?),
+                   event_call_domain = COALESCE(event_call_domain, ?),
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE call_id = ? AND call_domain = ?
+               LIMIT 1`,
+              buildParamsByDomain: (cid, dom) => [callId || null, callDomain || null, cid, dom],
+              sqlById: `UPDATE ai_call_logs
+                 SET status = IF(status IS NULL OR status = '', 'warning', status),
+                     event_call_id = COALESCE(event_call_id, ?),
+                     event_call_domain = COALESCE(event_call_domain, ?),
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE call_id = ?
+                 LIMIT 1`,
+              buildParamsById: (cid) => [callId || null, callDomain || null, cid]
+            });
+          }
+
+          // 3) Fallback: match by phone numbers (if present) and store the event ids.
           if (!result.updated) {
             const numResult = await tryUpdateAiCallLogByNumbers({
               sqlToFrom: `UPDATE ai_call_logs
                 SET status = IF(status IS NULL OR status = '', 'warning', status),
+                    event_call_id = COALESCE(event_call_id, ?),
+                    event_call_domain = COALESCE(event_call_domain, ?),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE time_end IS NULL
                   AND REGEXP_REPLACE(to_number, '[^0-9]', '') = ?
@@ -4474,18 +4753,35 @@ app.post('/webhooks/daily/events', async (req, res) => {
                   AND time_start >= DATE_SUB(?, INTERVAL 12 HOUR)
                 ORDER BY time_start DESC, id DESC
                 LIMIT 1`,
-              paramsToFrom: [toDigits, fromDigits, ts],
+              paramsToFrom: [callId || null, callDomain || null, toDigits, fromDigits, ts],
               sqlToOnly: `UPDATE ai_call_logs
                 SET status = IF(status IS NULL OR status = '', 'warning', status),
+                    event_call_id = COALESCE(event_call_id, ?),
+                    event_call_domain = COALESCE(event_call_domain, ?),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE time_end IS NULL
                   AND REGEXP_REPLACE(to_number, '[^0-9]', '') = ?
                   AND time_start >= DATE_SUB(?, INTERVAL 12 HOUR)
                 ORDER BY time_start DESC, id DESC
                 LIMIT 1`,
-              paramsToOnly: [toDigits, ts]
+              paramsToOnly: [callId || null, callDomain || null, toDigits, ts]
             });
             result = numResult.updated ? numResult : result;
+          }
+
+          // 4) Last resort: match by a tight time window and store the event ids.
+          if (!result.updated) {
+            const timeResult = await tryUpdateAiCallLogByTimeWindow({
+              sqlById: `UPDATE ai_call_logs
+                SET status = IF(status IS NULL OR status = '', 'warning', status),
+                    event_call_id = COALESCE(event_call_id, ?),
+                    event_call_domain = COALESCE(event_call_domain, ?),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                LIMIT 1`,
+              buildParamsById: (rowId) => [callId || null, callDomain || null, rowId]
+            });
+            result = timeResult.updated ? timeResult : result;
           }
 
           if (!result.updated && DEBUG) {
