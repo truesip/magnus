@@ -780,6 +780,7 @@ async function initDb() {
     from_number VARCHAR(64) NULL,
     to_number VARCHAR(64) NULL,
     time_start DATETIME NULL,
+    time_connect DATETIME NULL,
     time_end DATETIME NULL,
     duration INT NULL,
     billsec INT NULL,
@@ -828,6 +829,20 @@ async function initDb() {
       }
     } catch (e) {
       if (DEBUG) console.warn('[schema] ai_agents.cartesia_voice_id check failed', e.message || e);
+    }
+
+    // Ensure ai_call_logs.time_connect exists (Daily dial-in connected timestamp)
+    try {
+      const [hasTimeConnect] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_call_logs' AND column_name='time_connect' LIMIT 1",
+        [dbName]
+      );
+      if (!hasTimeConnect || !hasTimeConnect.length) {
+        await pool.query('ALTER TABLE ai_call_logs ADD COLUMN time_connect DATETIME NULL AFTER time_start');
+        if (DEBUG) console.log('[schema] Added ai_call_logs.time_connect column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_call_logs.time_connect check failed', e.message || e);
     }
     // Add dst column to user_trunks if missing
     const [hasDst] = await pool.query(
@@ -4062,6 +4077,166 @@ app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
   } catch (e) {
     if (DEBUG) console.error('[daily.dialin] Unhandled error:', e.message || e);
     // Return 200 to avoid webhook retry storms on unexpected errors.
+    return res.status(200).json({ success: true });
+  }
+});
+
+// Daily Webhooks (call state updates)
+// Configure a Daily webhook for dialin.connected + dialin.stopped (+ optional dialin.warning/dialin.error)
+// to this endpoint, e.g.:
+//   https://www.talkusa.net/webhooks/daily/events?token=<DAILY_DIALIN_WEBHOOK_TOKEN>
+// These events allow us to update AI call durations/status automatically.
+app.post('/webhooks/daily/events', async (req, res) => {
+  try {
+    if (!pool) return res.status(200).json({ success: true });
+
+    // Optional shared-secret guard (recommended).
+    if (DAILY_DIALIN_WEBHOOK_TOKEN) {
+      const token = String(req.query.token || '').trim();
+      if (!token || token !== DAILY_DIALIN_WEBHOOK_TOKEN) {
+        if (DEBUG) console.warn('[daily.webhook] Invalid token');
+        return res.status(403).json({ success: false, message: 'Forbidden' });
+      }
+    }
+
+    const evt = (req.body && typeof req.body === 'object') ? req.body : {};
+    const type = String(evt.type || '').trim();
+    const payload = (evt.payload && typeof evt.payload === 'object') ? evt.payload : {};
+
+    if (!type || !type.startsWith('dialin.')) {
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const callId = String(payload.session_id || payload.sessionId || '').trim();
+    const callDomain = String(payload.domain_id || payload.domainId || '').trim();
+    if (!callId || !callDomain) {
+      if (DEBUG) console.warn('[daily.webhook] Missing session_id/domain_id:', { type });
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    // Timestamps are seconds since epoch.
+    const tsRaw = payload.timestamp != null ? Number(payload.timestamp) : (evt.event_ts != null ? Number(evt.event_ts) : null);
+    const ts = (tsRaw && Number.isFinite(tsRaw)) ? new Date(tsRaw * 1000) : new Date();
+
+    if (DEBUG) {
+      console.log('[daily.webhook]', {
+        type,
+        callId,
+        callDomain,
+        ts: ts.toISOString()
+      });
+    }
+
+    if (type === 'dialin.connected') {
+      // Mark when the PSTN call actually connected to a room.
+      const [r1] = await pool.execute(
+        `UPDATE ai_call_logs
+         SET status = ?,
+             time_connect = COALESCE(time_connect, ?),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE call_id = ? AND call_domain = ?
+         LIMIT 1`,
+        ['connected', ts, callId, callDomain]
+      );
+      if (!r1 || !r1.affectedRows) {
+        // Fallback: some Daily payloads may vary in call_domain formatting.
+        await pool.execute(
+          `UPDATE ai_call_logs
+           SET status = ?,
+               time_connect = COALESCE(time_connect, ?),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE call_id = ?
+           LIMIT 1`,
+          ['connected', ts, callId]
+        );
+      }
+
+      return res.status(200).json({ success: true });
+    }
+
+    if (type === 'dialin.stopped') {
+      // Call ended. Compute billsec/duration from time_connect if present, otherwise time_start.
+      const [r1] = await pool.execute(
+        `UPDATE ai_call_logs
+         SET status = CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END,
+             time_end = ?,
+             duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), ?)),
+             billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), ?)),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE call_id = ? AND call_domain = ?
+         LIMIT 1`,
+        [ts, ts, ts, ts, ts, callId, callDomain]
+      );
+      if (!r1 || !r1.affectedRows) {
+        await pool.execute(
+          `UPDATE ai_call_logs
+           SET status = CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END,
+               time_end = ?,
+               duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), ?)),
+               billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), ?)),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE call_id = ?
+           LIMIT 1`,
+          [ts, ts, ts, ts, ts, callId]
+        );
+      }
+
+      return res.status(200).json({ success: true });
+    }
+
+    if (type === 'dialin.error') {
+      // Call failed.
+      const [r1] = await pool.execute(
+        `UPDATE ai_call_logs
+         SET status = 'error',
+             time_end = COALESCE(time_end, ?),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE call_id = ? AND call_domain = ?
+         LIMIT 1`,
+        [ts, callId, callDomain]
+      );
+      if (!r1 || !r1.affectedRows) {
+        await pool.execute(
+          `UPDATE ai_call_logs
+           SET status = 'error',
+               time_end = COALESCE(time_end, ?),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE call_id = ?
+           LIMIT 1`,
+          [ts, callId]
+        );
+      }
+
+      return res.status(200).json({ success: true });
+    }
+
+    if (type === 'dialin.warning') {
+      // Non-terminal; do not overwrite status if call is already in progress/completed.
+      const [r1] = await pool.execute(
+        `UPDATE ai_call_logs
+         SET status = IF(status IS NULL OR status = '', 'warning', status),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE call_id = ? AND call_domain = ?
+         LIMIT 1`,
+        [callId, callDomain]
+      );
+      if (!r1 || !r1.affectedRows) {
+        await pool.execute(
+          `UPDATE ai_call_logs
+           SET status = IF(status IS NULL OR status = '', 'warning', status),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE call_id = ?
+           LIMIT 1`,
+          [callId]
+        );
+      }
+
+      return res.status(200).json({ success: true });
+    }
+
+    return res.status(200).json({ success: true, ignored: true });
+  } catch (e) {
+    if (DEBUG) console.error('[daily.webhook] Unhandled error:', e.message || e);
     return res.status(200).json({ success: true });
   }
 });
