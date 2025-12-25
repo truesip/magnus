@@ -768,6 +768,34 @@ async function initDb() {
     CONSTRAINT fk_ai_numbers_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL
   )`);
 
+  // AI inbound call logs (Daily dial-in -> Pipecat Cloud). These are displayed in Call History.
+  await pool.query(`CREATE TABLE IF NOT EXISTS ai_call_logs (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    call_id VARCHAR(64) NOT NULL,
+    call_domain VARCHAR(64) NOT NULL,
+    user_id BIGINT NOT NULL,
+    agent_id BIGINT NULL,
+    ai_number_id BIGINT NULL,
+    direction VARCHAR(16) NOT NULL DEFAULT 'inbound',
+    from_number VARCHAR(64) NULL,
+    to_number VARCHAR(64) NULL,
+    time_start DATETIME NULL,
+    time_end DATETIME NULL,
+    duration INT NULL,
+    billsec INT NULL,
+    status VARCHAR(32) NULL,
+    raw_payload JSON NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_ai_call (call_domain, call_id),
+    KEY idx_ai_call_user (user_id),
+    KEY idx_ai_call_time_start (time_start),
+    KEY idx_ai_call_to_number (to_number),
+    CONSTRAINT fk_ai_call_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_ai_call_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL,
+    CONSTRAINT fk_ai_call_number FOREIGN KEY (ai_number_id) REFERENCES ai_numbers(id) ON DELETE SET NULL
+  )`);
+
   // One-time migration: drop legacy per-user API columns if present and add password_hash if missing
   try {
     const toDrop = ['api_key','api_secret'];
@@ -1521,6 +1549,29 @@ function buildPipecatDialinWebhookUrl({ agentName }) {
   return `${PIPECAT_DIALIN_WEBHOOK_BASE.replace(/\/$/, '')}/${encodeURIComponent(PIPECAT_ORG_ID)}/${encodeURIComponent(agentName)}/dialin`;
 }
 
+function buildDailyRoomCreationApiUrl({ agentName }) {
+  const publicBase = String(process.env.PUBLIC_BASE_URL || '').trim();
+  const localBase = String(AI_DIALIN_WEBHOOK_BASE || '').trim() || (publicBase ? joinUrl(publicBase, '/webhooks/daily/dialin') : '');
+
+  if (!localBase) {
+    // Fallback to Pipecat-managed webhook (no local logging).
+    return buildPipecatDialinWebhookUrl({ agentName });
+  }
+
+  const url = `${String(localBase).replace(/\/$/, '')}/${encodeURIComponent(agentName)}`;
+
+  if (!DAILY_DIALIN_WEBHOOK_TOKEN) return url;
+
+  // Append token as a query param (Daily will call room_creation_api exactly as configured).
+  try {
+    const u = new URL(url);
+    u.searchParams.set('token', DAILY_DIALIN_WEBHOOK_TOKEN);
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 async function dailyBuyAnyAvailableNumber() {
   // Daily Phone Numbers
   // GET /list-available-numbers -> { total_count, data: [{ number, region, ... }] }
@@ -1946,7 +1997,7 @@ app.post('/api/me/ai/numbers/:id/assign', requireAuth, async (req, res) => {
       try { await dailyDeleteDialinConfig(num.dialin_config_id); } catch (e) { if (DEBUG) console.warn('[ai.assign] Failed to delete old dialin config', e.message || e); }
     }
 
-    const roomCreationApi = buildPipecatDialinWebhookUrl({ agentName: agent.pipecat_agent_name });
+    const roomCreationApi = buildDailyRoomCreationApiUrl({ agentName: agent.pipecat_agent_name });
     const { dialinConfigId } = await dailyUpsertDialinConfig({ phoneNumber: num.phone_number, roomCreationApi });
 
     await pool.execute(
@@ -2098,6 +2149,54 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
     createdAt: r.created_at ? r.created_at.toISOString() : null
   }));
 
+  // Inbound AI calls from ai_call_logs (Daily dial-in -> Pipecat)
+  let aiInbound = [];
+  try {
+    const aiFilters = ['user_id = ?'];
+    const aiParams = [userId];
+    if (fromRaw) {
+      aiFilters.push('DATE(time_start) >= ?');
+      aiParams.push(fromRaw);
+    }
+    if (toRaw) {
+      aiFilters.push('DATE(time_start) <= ?');
+      aiParams.push(toRaw);
+    }
+    if (didFilter) {
+      aiFilters.push('(to_number = ? OR from_number = ?)');
+      aiParams.push(didFilter, didFilter);
+    }
+    const whereAiSql = aiFilters.length ? 'WHERE ' + aiFilters.join(' AND ') : '';
+
+    const [aiRows] = await pool.query(
+      `SELECT id, call_id, call_domain, direction, from_number, to_number,
+              time_start, time_end, duration, billsec, created_at
+       FROM ai_call_logs
+       ${whereAiSql}
+       ORDER BY time_start DESC, id DESC`,
+      aiParams
+    );
+
+    aiInbound = (aiRows || []).map(r => ({
+      id: r.call_id ? `ai-${r.call_id}` : `ai-db-${r.id}`,
+      cdrId: r.call_id ? `daily-${r.call_id}` : null,
+      didNumber: r.to_number || null,
+      direction: r.direction || 'inbound',
+      srcNumber: r.from_number || '',
+      dstNumber: r.to_number || '',
+      timeStart: r.time_start ? r.time_start.toISOString() : null,
+      timeConnect: null,
+      timeEnd: r.time_end ? r.time_end.toISOString() : null,
+      duration: r.duration != null ? Number(r.duration) : (r.billsec != null ? Number(r.billsec) : null),
+      billsec: r.billsec != null ? Number(r.billsec) : (r.duration != null ? Number(r.duration) : null),
+      price: null,
+      createdAt: r.created_at ? r.created_at.toISOString() : null
+    }));
+  } catch (e) {
+    if (DEBUG) console.warn('[cdr.timeline] Failed to load AI inbound from ai_call_logs:', e.message || e);
+    aiInbound = [];
+  }
+
   // Outbound from user_mb_cdrs (local MagnusBilling mirror)
   let outbound = [];
   try {
@@ -2107,7 +2206,7 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
     outbound = [];
   }
 
-  let all = inbound.concat(outbound);
+  let all = inbound.concat(aiInbound).concat(outbound);
 
   // Sort newest first by timeStart (fallback to createdAt)
   all.sort((a, b) => {
@@ -2721,9 +2820,13 @@ app.get('/api/me/dids', requireAuth, async (req, res) => {
     const userId = req.session.userId;
     if (!userId) return res.status(401).json({ success: false, message: 'Not authenticated' });
 
-    const [rows] = await pool.execute(
-      'SELECT did_number FROM user_dids WHERE user_id = ? ORDER BY did_number',
-      [userId]
+    // Include DIDWW DIDs + AI (Daily) phone numbers so Call History filtering works for both.
+    const [rows] = await pool.query(
+      `SELECT did_number FROM user_dids WHERE user_id = ?
+       UNION
+       SELECT phone_number AS did_number FROM ai_numbers WHERE user_id = ?
+       ORDER BY did_number`,
+      [userId, userId]
     );
 
     return res.json({ success: true, data: rows });
@@ -2763,7 +2866,7 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
       if (DEBUG) console.warn('[me.stats.dids] failed:', e.message || e);
     }
 
-    // Inbound calls grouped by day from user_did_cdrs
+    // Inbound calls grouped by day from user_did_cdrs (DIDWW) + ai_call_logs (Daily/Pipecat)
     let inboundCount = 0;
     const inboundByDayMap = new Map();
     try {
@@ -2783,7 +2886,27 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
         inboundByDayMap.set(day, (inboundByDayMap.get(day) || 0) + c);
       }
     } catch (e) {
-      if (DEBUG) console.warn('[me.stats.inbound] failed:', e.message || e);
+      if (DEBUG) console.warn('[me.stats.inbound.didww] failed:', e.message || e);
+    }
+
+    try {
+      const [rows] = await pool.query(
+        `SELECT DATE(time_start) AS d, COUNT(*) AS calls
+         FROM ai_call_logs
+         WHERE user_id = ? AND DATE(time_start) BETWEEN ? AND ?
+         GROUP BY DATE(time_start)
+         ORDER BY DATE(time_start)`,
+        [userId, from, to]
+      );
+      for (const r of rows) {
+        const dObj = r.d instanceof Date ? r.d : null;
+        const day = dObj ? dObj.toISOString().slice(0, 10) : String(r.d || '');
+        const c = Number(r.calls || 0);
+        inboundCount += c;
+        inboundByDayMap.set(day, (inboundByDayMap.get(day) || 0) + c);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[me.stats.inbound.ai] failed:', e.message || e);
     }
 
     // Outbound calls grouped by day from user_mb_cdrs
@@ -3798,6 +3921,151 @@ app.post('/webhooks/square', async (req, res) => {
   }
 });
 
+// Daily pinless dial-in webhook (room_creation_api) -> start Pipecat Cloud session.
+// This lets us log inbound AI calls into the user's Call History.
+app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
+  try {
+    const agentName = String(req.params.agentName || '').trim();
+    if (!agentName) return res.status(400).json({ success: false, message: 'Missing agentName' });
+
+    // Optional shared-secret guard (recommended if you use the local webhook).
+    if (DAILY_DIALIN_WEBHOOK_TOKEN) {
+      const token = String(req.query.token || '').trim();
+      if (!token || token !== DAILY_DIALIN_WEBHOOK_TOKEN) {
+        if (DEBUG) console.warn('[daily.dialin] Invalid token');
+        return res.status(403).json({ success: false, message: 'Forbidden' });
+      }
+    }
+
+    const body = (req.body && typeof req.body === 'object') ? req.body : {};
+
+    // Daily payload (per Daily/Pipecat docs) uses capitalized keys: To / From / callId / callDomain.
+    const toNumber = String(body.To || body.to || body.to_number || body.toNumber || '').trim();
+    const fromNumber = String(body.From || body.from || body.from_number || body.fromNumber || '').trim();
+    const callId = String(body.callId || body.call_id || body.callID || '').trim();
+    const callDomain = String(body.callDomain || body.call_domain || '').trim();
+
+    if (!callId || !callDomain) {
+      if (DEBUG) console.warn('[daily.dialin] Missing callId/callDomain in webhook payload');
+      return res.status(400).json({ success: false, message: 'Missing callId/callDomain' });
+    }
+
+    // Best-effort lookup so we can attribute calls to the correct user.
+    let agentRow = null;
+    let aiNumberRow = null;
+    if (pool) {
+      try {
+        const [rows] = await pool.execute(
+          'SELECT id, user_id FROM ai_agents WHERE pipecat_agent_name = ? LIMIT 1',
+          [agentName]
+        );
+        agentRow = rows && rows[0] ? rows[0] : null;
+      } catch (e) {
+        if (DEBUG) console.warn('[daily.dialin] Failed to lookup agent:', e.message || e);
+      }
+
+      if (agentRow) {
+        try {
+          const [nRows] = await pool.execute(
+            'SELECT id, phone_number FROM ai_numbers WHERE agent_id = ? AND user_id = ? LIMIT 1',
+            [agentRow.id, agentRow.user_id]
+          );
+          aiNumberRow = nRows && nRows[0] ? nRows[0] : null;
+        } catch (e) {
+          if (DEBUG) console.warn('[daily.dialin] Failed to lookup ai_number:', e.message || e);
+        }
+      }
+
+      // Insert/update call log (idempotent via UNIQUE(call_domain, call_id)).
+      if (agentRow) {
+        try {
+          await pool.execute(
+            `INSERT INTO ai_call_logs (call_id, call_domain, user_id, agent_id, ai_number_id, direction, from_number, to_number, time_start, status, raw_payload)
+             VALUES (?, ?, ?, ?, ?, 'inbound', ?, ?, NOW(), ?, ?)
+             ON DUPLICATE KEY UPDATE
+               updated_at = CURRENT_TIMESTAMP,
+               from_number = COALESCE(NULLIF(VALUES(from_number), ''), from_number),
+               to_number = COALESCE(NULLIF(VALUES(to_number), ''), to_number)`,
+            [
+              callId,
+              callDomain,
+              agentRow.user_id,
+              agentRow.id,
+              aiNumberRow ? aiNumberRow.id : null,
+              fromNumber || null,
+              toNumber || (aiNumberRow ? aiNumberRow.phone_number : null),
+              'webhook_received',
+              JSON.stringify(body)
+            ]
+          );
+        } catch (e) {
+          if (DEBUG) console.warn('[daily.dialin] Failed to insert ai_call_logs row:', e.message || e);
+        }
+      }
+    }
+
+    // Trigger Pipecat Cloud to start the dial-in session for this agent.
+    // Pipecat Cloud handles creating the Daily room and connecting the PSTN call.
+    try {
+      const startBody = {
+        createDailyRoom: true,
+        dailyRoomProperties: {
+          sip: {
+            display_name: fromNumber || 'Caller',
+            sip_mode: 'dial-in',
+            num_endpoints: 1
+          }
+        },
+        body: {
+          dialin_settings: {
+            from: fromNumber,
+            to: toNumber,
+            call_id: callId,
+            call_domain: callDomain
+          }
+        }
+      };
+
+      await pipecatApiCall({
+        method: 'POST',
+        path: `/public/${encodeURIComponent(agentName)}/start`,
+        body: startBody
+      });
+
+      if (pool && agentRow) {
+        try {
+          await pool.execute(
+            'UPDATE ai_call_logs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE call_id = ? AND call_domain = ? AND user_id = ? LIMIT 1',
+            ['pipecat_started', callId, callDomain, agentRow.user_id]
+          );
+        } catch (e) {
+          if (DEBUG) console.warn('[daily.dialin] Failed to update ai_call_logs status:', e.message || e);
+        }
+      }
+    } catch (e) {
+      if (DEBUG) console.error('[daily.dialin] Failed to start Pipecat dial-in session:', e?.data || e?.message || e);
+
+      if (pool && agentRow) {
+        try {
+          await pool.execute(
+            'UPDATE ai_call_logs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE call_id = ? AND call_domain = ? AND user_id = ? LIMIT 1',
+            ['pipecat_start_failed', callId, callDomain, agentRow.user_id]
+          );
+        } catch {}
+      }
+
+      // Return non-2xx so Daily can retry.
+      return res.status(502).json({ success: false, message: 'Failed to start Pipecat dial-in session' });
+    }
+
+    return res.status(200).json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[daily.dialin] Unhandled error:', e.message || e);
+    // Return 200 to avoid webhook retry storms on unexpected errors.
+    return res.status(200).json({ success: true });
+  }
+});
+
 // DIDWW Voice IN CDR Streaming webhook (Call Events API)
 app.post(
   '/webhooks/didww/voice-in-cdr',
@@ -4284,6 +4552,12 @@ const PIPECAT_MAX_AGENTS = process.env.PIPECAT_MAX_AGENTS;
 const PIPECAT_ENABLE_KRISP = process.env.PIPECAT_ENABLE_KRISP;
 const PIPECAT_IMAGE_PULL_SECRET_SET = process.env.PIPECAT_IMAGE_PULL_SECRET_SET || '';
 const PIPECAT_DIALIN_WEBHOOK_BASE = process.env.PIPECAT_DIALIN_WEBHOOK_BASE || 'https://api.pipecat.daily.co/v1/public/webhooks';
+
+// Optional: route Daily pinless dial-in callbacks through this server so we can log inbound AI calls.
+// If not set, we fall back to PIPECAT_DIALIN_WEBHOOK_BASE.
+const AI_DIALIN_WEBHOOK_BASE = process.env.AI_DIALIN_WEBHOOK_BASE || '';
+// Optional shared secret appended to room_creation_api as ?token=... and verified by our webhook.
+const DAILY_DIALIN_WEBHOOK_TOKEN = process.env.DAILY_DIALIN_WEBHOOK_TOKEN || '';
 
 function parseOptionalIntEnv(v) {
   if (v === undefined || v === null || String(v).trim() === '') return undefined;
