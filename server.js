@@ -3285,6 +3285,76 @@ app.get('/api/me/cdrs/local', requireAuth, async (req, res) => {
   }
 });
 
+// Helpers: MagnusBilling credit read/update and delta enforcement
+async function fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader }) {
+  const idStr = String(magnusUserId || '').trim();
+  if (!idStr) return { credit: null, userRow: null, raw: null };
+  const params = new URLSearchParams();
+  params.append('module', 'user');
+  params.append('action', 'read');
+  params.append('start', '0');
+  // NOTE: Some MagnusBilling installs don't filter properly with admin creds; we fetch a page and filter client-side.
+  params.append('limit', '1000');
+
+  const resp = await mbSignedCall({ relPath: '/index.php/user/read', params, httpsAgent, hostHeader });
+  const allUsers = resp?.data?.rows || resp?.data?.data || [];
+  const userRow = allUsers.find(u => String(u.id || u.user_id || u.uid || u.id_user || u.idUser || u.userid || '') === idStr);
+  const creditNum = userRow ? Number(userRow.credit || 0) : null;
+  return { credit: Number.isFinite(creditNum) ? creditNum : null, userRow: userRow || null, raw: resp?.data || null };
+}
+
+async function updateMagnusUserCredit({ magnusUserId, newCredit, httpsAgent, hostHeader }) {
+  const updateParams = new URLSearchParams();
+  updateParams.append('module', 'user');
+  updateParams.append('action', 'save');
+  updateParams.append('id', String(magnusUserId));
+  updateParams.append('credit', String(newCredit));
+  return mbSignedCall({ relPath: '/index.php/user/save', params: updateParams, httpsAgent, hostHeader });
+}
+
+// Some MagnusBilling versions record refill rows but do not immediately update user.credit (especially for negative refills).
+// This helper verifies the credit delta and applies a direct credit correction when needed.
+async function ensureMagnusCreditDeltaApplied({ magnusUserId, creditDelta, creditBefore, httpsAgent, hostHeader, label }) {
+  const delta = Number(creditDelta || 0);
+  const before = Number(creditBefore);
+  if (!Number.isFinite(delta) || delta === 0) return { ok: true, adjusted: false, reason: 'no-op' };
+  if (!Number.isFinite(before)) return { ok: false, adjusted: false, reason: 'missing-credit-before' };
+
+  const EPS = 0.01; // 1 cent tolerance to handle rounding differences
+
+  const afterInfo = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+  const after = Number(afterInfo.credit);
+  if (!Number.isFinite(after)) return { ok: false, adjusted: false, reason: 'missing-credit-after' };
+
+  const expected = before + delta;
+
+  // Check if the credit moved enough in the expected direction.
+  const applied = delta < 0
+    ? (after <= expected + EPS) // charges: credit should go DOWN (or more)
+    : (after >= expected - EPS); // refills: credit should go UP (or more)
+
+  if (applied) return { ok: true, adjusted: false, creditAfter: after, expected };
+
+  // Apply the delta directly to whatever the current credit is (preserves any other concurrent changes).
+  const target = after + delta;
+  const updResp = await updateMagnusUserCredit({ magnusUserId, newCredit: target, httpsAgent, hostHeader });
+
+  if (DEBUG) {
+    console.warn('[magnus.credit.ensure] Applied direct credit correction:', {
+      label,
+      magnusUserId,
+      creditBefore: before,
+      creditAfter: after,
+      delta,
+      expectedAfter: expected,
+      target,
+      updateStatus: updResp?.status
+    });
+  }
+
+  return { ok: updResp?.status >= 200 && updResp?.status < 300, adjusted: true, creditAfter: after, expected, target };
+}
+
 // Shared helper to apply a refill in MagnusBilling, update billing_history and send receipt
 async function applyMagnusRefill({ userId, magnusUserId, amountNum, desc, displayName, userEmail, httpsAgent, hostHeader, billingId }) {
   if (!pool) throw new Error('Database not configured');
@@ -6376,6 +6446,15 @@ async function billInboundCdrsForUser({ localUserId, magnusUserId, httpsAgent, h
   try {
     let magnusResponse = null;
     let success = false;
+    let creditBefore = null;
+
+    // Read credit before charging so we can verify whether the refill actually affected user.credit
+    try {
+      const beforeInfo = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+      if (beforeInfo && Number.isFinite(beforeInfo.credit)) creditBefore = Number(beforeInfo.credit);
+    } catch (e) {
+      if (DEBUG) console.warn('[didww.cdr.billing] Failed to read MagnusBilling credit before charge:', e.message || e);
+    }
 
     // Primary path: create a negative refill in MagnusBilling so there is a visible
     // ledger entry (similar to how manual fees are recorded).
@@ -6398,6 +6477,31 @@ async function billInboundCdrsForUser({ localUserId, magnusUserId, httpsAgent, h
         (refillResp?.status >= 200 && refillResp?.status < 300)
       ) {
         success = true;
+
+        // Ensure user.credit is actually decremented (some installs don't apply negative refills to credit)
+        if (creditBefore != null) {
+          try {
+            const ensureRes = await ensureMagnusCreditDeltaApplied({
+              magnusUserId,
+              creditDelta: -totalAmount,
+              creditBefore,
+              httpsAgent,
+              hostHeader,
+              label: 'didww.cdr.billing'
+            });
+            if (!ensureRes.ok) {
+              success = false;
+              if (DEBUG) console.warn('[didww.cdr.billing] Credit correction failed after negative refill; will mark billing failed', {
+                magnusUserId,
+                totalAmount
+              });
+            }
+          } catch (ensureErr) {
+            success = false;
+            if (DEBUG) console.warn('[didww.cdr.billing] Credit correction threw after negative refill; will mark billing failed', ensureErr?.message || ensureErr);
+          }
+        }
+
         if (DEBUG) console.log('[didww.cdr.billing.refill] Created negative refill for inbound charges:', {
           magnusUserId,
           userId: localUserId,
@@ -6575,6 +6679,15 @@ async function billInboundAiCallsForUser({ localUserId, magnusUserId, httpsAgent
   try {
     let magnusResponse = null;
     let success = false;
+    let creditBefore = null;
+
+    // Read credit before charging so we can verify whether the refill actually affected user.credit
+    try {
+      const beforeInfo = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+      if (beforeInfo && Number.isFinite(beforeInfo.credit)) creditBefore = Number(beforeInfo.credit);
+    } catch (e) {
+      if (DEBUG) console.warn('[ai.call.billing] Failed to read MagnusBilling credit before charge:', e.message || e);
+    }
 
     // Primary: create a negative refill in MagnusBilling so there is a visible ledger entry.
     try {
@@ -6596,6 +6709,31 @@ async function billInboundAiCallsForUser({ localUserId, magnusUserId, httpsAgent
         (refillResp?.status >= 200 && refillResp?.status < 300)
       ) {
         success = true;
+
+        // Ensure user.credit is actually decremented (some installs don't apply negative refills to credit)
+        if (creditBefore != null) {
+          try {
+            const ensureRes = await ensureMagnusCreditDeltaApplied({
+              magnusUserId,
+              creditDelta: -totalAmount,
+              creditBefore,
+              httpsAgent,
+              hostHeader,
+              label: 'ai.call.billing'
+            });
+            if (!ensureRes.ok) {
+              success = false;
+              if (DEBUG) console.warn('[ai.call.billing] Credit correction failed after negative refill; will mark billing failed', {
+                magnusUserId,
+                totalAmount
+              });
+            }
+          } catch (ensureErr) {
+            success = false;
+            if (DEBUG) console.warn('[ai.call.billing] Credit correction threw after negative refill; will mark billing failed', ensureErr?.message || ensureErr);
+          }
+        }
+
         if (DEBUG) console.log('[ai.call.billing.refill] Created negative refill for AI inbound charges:', {
           magnusUserId,
           userId: localUserId,
@@ -6690,6 +6828,15 @@ async function chargeAiNumberMonthlyFee({ userId, magnusUserId, aiNumberId, phon
   try {
     let magnusResponse = null;
     let success = false;
+    let creditBefore = null;
+
+    // Read credit before charging so we can verify whether the refill actually affected user.credit
+    try {
+      const beforeInfo = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+      if (beforeInfo && Number.isFinite(beforeInfo.credit)) creditBefore = Number(beforeInfo.credit);
+    } catch (e) {
+      if (DEBUG) console.warn('[ai.number.billing] Failed to read MagnusBilling credit before charge:', e.message || e);
+    }
 
     // Primary: create a negative refill entry
     try {
@@ -6711,6 +6858,31 @@ async function chargeAiNumberMonthlyFee({ userId, magnusUserId, aiNumberId, phon
         (refillResp?.status >= 200 && refillResp?.status < 300)
       ) {
         success = true;
+
+        // Ensure user.credit is actually decremented (some installs don't apply negative refills to credit)
+        if (creditBefore != null) {
+          try {
+            const ensureRes = await ensureMagnusCreditDeltaApplied({
+              magnusUserId,
+              creditDelta: -amt,
+              creditBefore,
+              httpsAgent,
+              hostHeader,
+              label: 'ai.number.billing'
+            });
+            if (!ensureRes.ok) {
+              success = false;
+              if (DEBUG) console.warn('[ai.number.billing] Credit correction failed after negative refill; will fall back to direct credit update', {
+                magnusUserId,
+                amount: amt
+              });
+            }
+          } catch (ensureErr) {
+            success = false;
+            if (DEBUG) console.warn('[ai.number.billing] Credit correction threw after negative refill; will fall back to direct credit update', ensureErr?.message || ensureErr);
+          }
+        }
+
         if (DEBUG) console.log('[ai.number.billing.refill] Created negative refill for AI number monthly fee:', {
           magnusUserId,
           userId,
