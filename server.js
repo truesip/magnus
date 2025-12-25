@@ -4750,7 +4750,10 @@ const DIDWW_API_URL = process.env.DIDWW_API_URL || 'https://api.didww.com/v3';
 
 // Pipecat Cloud (Control plane)
 // NOTE: Pipecat Cloud API details can vary; keep URLs configurable via env.
+// Private key is used for control-plane operations (create agents, manage secrets, etc.)
 const PIPECAT_API_KEY = process.env.PIPECAT_PRIVATE_API_KEY || process.env.PIPECAT_API_KEY || '';
+// Public key is required for /public/* endpoints like /public/{agentName}/start
+const PIPECAT_PUBLIC_API_KEY = process.env.PIPECAT_PUBLIC_API_KEY || process.env.PIPECAT_PUBLIC_KEY || '';
 const PIPECAT_API_URL = process.env.PIPECAT_API_URL || process.env.PIPECAT_BASE_URL || 'https://api.pipecat.daily.co/v1';
 const PIPECAT_ORG_ID = process.env.PIPECAT_ORG_ID || '';
 const PIPECAT_AGENT_IMAGE = process.env.PIPECAT_AGENT_IMAGE || '';
@@ -4799,15 +4802,22 @@ const CARTESIA_API_KEY = process.env.CARTESIA_API_KEY || '';
 const CARTESIA_API_URL = process.env.CARTESIA_API_URL || 'https://api.cartesia.ai';
 const CARTESIA_VERSION = process.env.CARTESIA_VERSION || '2025-04-16';
 
-function pipecatAxios() {
-  if (!PIPECAT_API_KEY) {
-    throw new Error('PIPECAT_PRIVATE_API_KEY not configured');
+function pipecatAxios({ kind } = {}) {
+  const k = String(kind || 'private').trim().toLowerCase();
+  const apiKey = (k === 'public') ? PIPECAT_PUBLIC_API_KEY : PIPECAT_API_KEY;
+
+  if (!apiKey) {
+    throw new Error(k === 'public'
+      ? 'PIPECAT_PUBLIC_API_KEY not configured'
+      : 'PIPECAT_PRIVATE_API_KEY not configured'
+    );
   }
+
   return axios.create({
     baseURL: PIPECAT_API_URL,
     timeout: 30000,
     headers: {
-      'Authorization': `Bearer ${PIPECAT_API_KEY}`,
+      'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
       'Accept': 'application/json'
     },
@@ -4849,7 +4859,8 @@ function cartesiaAxios() {
 }
 
 async function pipecatApiCall({ method, path, body }) {
-  const client = pipecatAxios();
+  const isPublic = String(path || '').startsWith('/public/');
+  const client = pipecatAxios({ kind: isPublic ? 'public' : 'private' });
   const resp = await client.request({ method, url: path, data: body });
   if (!(resp.status >= 200 && resp.status < 300)) {
     if (DEBUG) console.error('[pipecatApiCall] Request failed:', { status: resp.status, path, data: resp.data });
