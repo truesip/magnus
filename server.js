@@ -43,6 +43,20 @@ const CHECKOUT_MAX_AMOUNT = parseFloat(process.env.CHECKOUT_MAX_AMOUNT || '500')
 // Defaults: Local $0.025/min equivalent, Toll-Free $0.03/min equivalent
 const INBOUND_LOCAL_RATE_PER_MIN = parseFloat(process.env.INBOUND_LOCAL_RATE_PER_MIN || '0.025') || 0.025;
 const INBOUND_TOLLFREE_RATE_PER_MIN = parseFloat(process.env.INBOUND_TOLLFREE_RATE_PER_MIN || '0.03') || 0.03;
+
+// AI inbound call billing (Daily dial-in -> Pipecat). Defaults to the DIDWW inbound rates
+// unless AI-specific overrides are provided.
+const AI_INBOUND_LOCAL_RATE_PER_MIN = parseFloat(
+  process.env.AI_INBOUND_LOCAL_RATE_PER_MIN || String(INBOUND_LOCAL_RATE_PER_MIN)
+) || INBOUND_LOCAL_RATE_PER_MIN;
+const AI_INBOUND_TOLLFREE_RATE_PER_MIN = parseFloat(
+  process.env.AI_INBOUND_TOLLFREE_RATE_PER_MIN || String(INBOUND_TOLLFREE_RATE_PER_MIN)
+) || INBOUND_TOLLFREE_RATE_PER_MIN;
+
+// If enabled, AI inbound calls are billed in whole-minute increments (rounded up).
+// Default is per-second billing (DIDWW-style). Set AI_INBOUND_BILLING_ROUND_UP_TO_MINUTE=1 to enable minute rounding.
+const AI_INBOUND_BILLING_ROUND_UP_TO_MINUTE = String(process.env.AI_INBOUND_BILLING_ROUND_UP_TO_MINUTE ?? '0') !== '0';
+
 app.set('trust proxy', 1);
 app.set('etag', false);
 const COOKIE_SECURE = process.env.COOKIE_SECURE === '1';
@@ -768,6 +782,33 @@ async function initDb() {
     CONSTRAINT fk_ai_numbers_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL
   )`);
 
+  // AI number monthly billing tracking
+  // Uses a cycle table (idempotency) similar to DIDWW markup billing.
+  await pool.query(`CREATE TABLE IF NOT EXISTS ai_number_markups (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    ai_number_id BIGINT NOT NULL,
+    last_billed_to DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_user_ai_number (user_id, ai_number_id),
+    KEY idx_ai_number_markups_user (user_id),
+    CONSTRAINT fk_ai_number_markups_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_ai_number_markups_number FOREIGN KEY (ai_number_id) REFERENCES ai_numbers(id) ON DELETE CASCADE
+  )`);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS ai_number_markup_cycles (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    ai_number_id BIGINT NOT NULL,
+    billed_to DATETIME NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_ai_number_cycle (user_id, ai_number_id, billed_to),
+    KEY idx_ai_number_cycles_user (user_id),
+    CONSTRAINT fk_ai_number_cycles_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_ai_number_cycles_number FOREIGN KEY (ai_number_id) REFERENCES ai_numbers(id) ON DELETE CASCADE
+  )`);
+
   // AI inbound call logs (Daily dial-in -> Pipecat Cloud). These are displayed in Call History.
   await pool.query(`CREATE TABLE IF NOT EXISTS ai_call_logs (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -786,6 +827,9 @@ async function initDb() {
     time_end DATETIME NULL,
     duration INT NULL,
     billsec INT NULL,
+    price DECIMAL(18,8) NULL,
+    billed TINYINT(1) NOT NULL DEFAULT 0,
+    billing_history_id BIGINT NULL,
     status VARCHAR(32) NULL,
     raw_payload JSON NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -794,6 +838,7 @@ async function initDb() {
     KEY idx_ai_call_user (user_id),
     KEY idx_ai_call_time_start (time_start),
     KEY idx_ai_call_to_number (to_number),
+    KEY idx_ai_call_billed (user_id, billed),
     KEY idx_ai_call_event (event_call_domain, event_call_id),
     CONSTRAINT fk_ai_call_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
     CONSTRAINT fk_ai_call_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL,
@@ -890,6 +935,63 @@ async function initDb() {
       }
     } catch (e) {
       if (DEBUG) console.warn('[schema] ai_call_logs.idx_ai_call_event check failed', e.message || e);
+    }
+
+    // Ensure ai_call_logs billing columns exist (price + billed markers)
+    try {
+      const [hasAiPrice] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_call_logs' AND column_name='price' LIMIT 1",
+        [dbName]
+      );
+      if (!hasAiPrice || !hasAiPrice.length) {
+        await pool.query('ALTER TABLE ai_call_logs ADD COLUMN price DECIMAL(18,8) NULL AFTER billsec');
+        if (DEBUG) console.log('[schema] Added ai_call_logs.price column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_call_logs.price check failed', e.message || e);
+    }
+
+    try {
+      const [hasAiBilled] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_call_logs' AND column_name='billed' LIMIT 1",
+        [dbName]
+      );
+      if (!hasAiBilled || !hasAiBilled.length) {
+        await pool.query('ALTER TABLE ai_call_logs ADD COLUMN billed TINYINT(1) NOT NULL DEFAULT 0 AFTER price');
+        if (DEBUG) console.log('[schema] Added ai_call_logs.billed column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_call_logs.billed check failed', e.message || e);
+    }
+
+    try {
+      const [hasAiBillingId] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_call_logs' AND column_name='billing_history_id' LIMIT 1",
+        [dbName]
+      );
+      if (!hasAiBillingId || !hasAiBillingId.length) {
+        await pool.query('ALTER TABLE ai_call_logs ADD COLUMN billing_history_id BIGINT NULL AFTER billed');
+        if (DEBUG) console.log('[schema] Added ai_call_logs.billing_history_id column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_call_logs.billing_history_id check failed', e.message || e);
+    }
+
+    try {
+      const [hasAiBilledIdx] = await pool.query(
+        "SELECT 1 FROM information_schema.statistics WHERE table_schema=? AND table_name='ai_call_logs' AND index_name='idx_ai_call_billed' LIMIT 1",
+        [dbName]
+      );
+      if (!hasAiBilledIdx || !hasAiBilledIdx.length) {
+        try {
+          await pool.query('ALTER TABLE ai_call_logs ADD KEY idx_ai_call_billed (user_id, billed)');
+          if (DEBUG) console.log('[schema] Added ai_call_logs.idx_ai_call_billed index');
+        } catch (e) {
+          if (DEBUG) console.warn('[schema] Failed to add idx_ai_call_billed index:', e.message || e);
+        }
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_call_logs.idx_ai_call_billed check failed', e.message || e);
     }
 
     // Add dst column to user_trunks if missing
@@ -2019,12 +2121,81 @@ app.post('/api/me/ai/numbers/buy', requireAuth, async (req, res) => {
       return res.status(400).json({ success: false, message: `You can have up to ${AI_MAX_NUMBERS} phone numbers.` });
     }
 
+    // Optional: balance check before buying a number (same pattern as DIDWW).
+    // Uses AI_DID_* monthly fee config (fallback: DID_* markup) as the required minimum balance.
+    const localFee = parseFloat(process.env.AI_DID_LOCAL_MONTHLY_FEE || process.env.DID_LOCAL_MONTHLY_MARKUP || '0') || 0;
+    const tollfreeFee = parseFloat(process.env.AI_DID_TOLLFREE_MONTHLY_FEE || process.env.DID_TOLLFREE_MONTHLY_MARKUP || '0') || 0;
+    const requiredMonthly = Math.max(localFee, tollfreeFee, 0);
+    let magnusUserId = null;
+
+    if (requiredMonthly > 0) {
+      try {
+        const httpsAgent = magnusBillingAgent;
+        const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+        magnusUserId = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
+
+        if (magnusUserId) {
+          const readParams = new URLSearchParams();
+          readParams.append('module', 'user');
+          readParams.append('action', 'read');
+          readParams.append('start', '0');
+          readParams.append('limit', '100');
+          const readResp = await mbSignedCall({ relPath: '/index.php/user/read', params: readParams, httpsAgent, hostHeader });
+          const allUsers = readResp?.data?.rows || readResp?.data?.data || [];
+          const userRow = allUsers.find(u => String(u.id || u.user_id || u.uid || u.id_user || '') === String(magnusUserId));
+          if (userRow) {
+            const currentCredit = Number(userRow.credit || 0);
+            if (DEBUG) console.log('[ai.number.buy] Balance check:', { magnusUserId, currentCredit, requiredMonthly });
+            if (currentCredit < requiredMonthly) {
+              return res.status(400).json({
+                success: false,
+                message: `Insufficient balance in your TalkUSA account. This AI number costs at least $${requiredMonthly.toFixed(2)} per month and your current balance is $${currentCredit.toFixed(2)}. Please add funds on the dashboard and try again.`
+              });
+            }
+          }
+        }
+      } catch (balanceErr) {
+        if (DEBUG) console.error('[ai.number.buy] Failed to check balance:', balanceErr.message || balanceErr);
+        return res.status(500).json({ success: false, message: 'Failed to verify account balance. Please try again.' });
+      }
+    }
+
     const { dailyNumberId, phoneNumber } = await dailyBuyAnyAvailableNumber();
 
     const [ins] = await pool.execute(
       'INSERT INTO ai_numbers (user_id, daily_number_id, phone_number) VALUES (?,?,?)',
       [userId, dailyNumberId, phoneNumber]
     );
+
+    // Best-effort: bill the first monthly AI DID fee immediately.
+    // The scheduler will also handle this later; cycle-table idempotency avoids double-charges.
+    try {
+      if (requiredMonthly > 0) {
+        const httpsAgent = magnusBillingAgent;
+        const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+        if (!magnusUserId) {
+          magnusUserId = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
+        }
+        if (magnusUserId) {
+          const [nrows] = await pool.execute(
+            'SELECT id, phone_number, created_at FROM ai_numbers WHERE id = ? AND user_id = ? LIMIT 1',
+            [ins.insertId, userId]
+          );
+          const numRow = nrows && nrows[0];
+          if (numRow) {
+            await billAiNumberMonthlyFeesForUser({
+              localUserId: String(userId),
+              magnusUserId: String(magnusUserId),
+              aiNumbers: [numRow],
+              httpsAgent,
+              hostHeader
+            });
+          }
+        }
+      }
+    } catch (billErr) {
+      if (DEBUG) console.warn('[ai.number.buy] Initial monthly fee billing failed (will retry via scheduler):', billErr.message || billErr);
+    }
 
     return res.json({ success: true, data: { id: ins.insertId, daily_number_id: dailyNumberId, phone_number: phoneNumber } });
   } catch (e) {
@@ -2257,7 +2428,7 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
 
     const [aiRows] = await pool.query(
       `SELECT id, call_id, call_domain, direction, from_number, to_number,
-              time_start, time_connect, time_end, duration, billsec, status, created_at
+              time_start, time_connect, time_end, duration, billsec, price, status, created_at
        FROM ai_call_logs
        ${whereAiSql}
        ORDER BY time_start DESC, id DESC`,
@@ -2276,7 +2447,7 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
       timeEnd: r.time_end ? r.time_end.toISOString() : null,
       duration: r.duration != null ? Number(r.duration) : (r.billsec != null ? Number(r.billsec) : null),
       billsec: r.billsec != null ? Number(r.billsec) : (r.duration != null ? Number(r.duration) : null),
-      price: null,
+      price: r.price != null ? Number(r.price) : null,
       status: r.status || null,
       createdAt: r.created_at ? r.created_at.toISOString() : null
     }));
@@ -6292,6 +6463,479 @@ async function billInboundCdrsForUser({ localUserId, magnusUserId, httpsAgent, h
   }
 }
 
+function detectTollfreeUsCaByNpa(number) {
+  const tollfreeNpas = new Set(['800', '833', '844', '855', '866', '877', '888']);
+  const rawNum = String(number || '').replace(/\D/g, '');
+  if (!rawNum) return false;
+  const digits = rawNum.length > 11 ? rawNum.slice(-11) : rawNum;
+  const npa = digits.startsWith('1') ? digits.slice(1, 4) : digits.slice(0, 3);
+  return tollfreeNpas.has(npa);
+}
+
+function rateAiInboundCallPrice({ toNumber, billsec }) {
+  const sec = Number(billsec || 0);
+  if (!Number.isFinite(sec) || sec <= 0) return { price: 0, isTollfree: false, ratePerMin: 0, billedUnits: 0 };
+
+  const isTollfree = detectTollfreeUsCaByNpa(toNumber);
+  const ratePerMin = isTollfree ? AI_INBOUND_TOLLFREE_RATE_PER_MIN : AI_INBOUND_LOCAL_RATE_PER_MIN;
+  if (!ratePerMin || ratePerMin <= 0) return { price: 0, isTollfree, ratePerMin: 0, billedUnits: 0 };
+
+  let price = 0;
+  let billedUnits = 0;
+  if (AI_INBOUND_BILLING_ROUND_UP_TO_MINUTE) {
+    billedUnits = Math.ceil(sec / 60); // whole minutes
+    price = billedUnits * ratePerMin;
+  } else {
+    billedUnits = sec; // seconds
+    price = sec * (ratePerMin / 60);
+  }
+
+  // Keep enough precision for per-second pricing while staying reasonable for UI
+  const rounded = Number(price.toFixed(6));
+  return { price: Number.isFinite(rounded) ? rounded : 0, isTollfree, ratePerMin, billedUnits };
+}
+
+// Backfill/compute per-call price for AI call logs. This is separate from charging the user.
+async function backfillAiCallPricesForUser({ localUserId, limit = 500 }) {
+  if (!pool || !localUserId) return;
+  try {
+    const safeLimit = Math.max(1, Math.min(2000, parseInt(String(limit || '500'), 10) || 500));
+
+    // Only price ended calls; price is based on billsec (fallback: duration)
+    const [rows] = await pool.query(
+      `SELECT id, to_number, billsec, duration
+       FROM ai_call_logs
+       WHERE user_id = ?
+         AND direction = 'inbound'
+         AND time_end IS NOT NULL
+         AND time_connect IS NOT NULL
+         AND COALESCE(billsec, duration, 0) > 0
+         AND (price IS NULL OR price <= 0)
+       ORDER BY time_end DESC, id DESC
+       LIMIT ${safeLimit}`,
+      [localUserId]
+    );
+
+    for (const r of rows || []) {
+      const billsec = (r.billsec != null ? Number(r.billsec) : (r.duration != null ? Number(r.duration) : 0)) || 0;
+      const { price } = rateAiInboundCallPrice({ toNumber: r.to_number, billsec });
+      if (!price || price <= 0) continue;
+      try {
+        await pool.execute(
+          'UPDATE ai_call_logs SET price = ? WHERE id = ? AND (price IS NULL OR price <= 0)',
+          [price, r.id]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[ai.call.rate] Failed to update ai_call_logs.price:', e.message || e);
+      }
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.call.rate] Backfill failed:', e.message || e);
+  }
+}
+
+// Aggregate and bill inbound AI calls for a user (Daily dial-in -> Pipecat)
+async function billInboundAiCallsForUser({ localUserId, magnusUserId, httpsAgent, hostHeader }) {
+  if (!pool || !localUserId || !magnusUserId) return;
+
+  // Ensure price is populated for recent ended calls before aggregating
+  await backfillAiCallPricesForUser({ localUserId });
+
+  const [[agg]] = await pool.execute(
+    "SELECT SUM(price) AS total_amount, COUNT(*) AS call_count FROM ai_call_logs WHERE user_id = ? AND billed = 0 AND direction = 'inbound' AND time_end IS NOT NULL AND time_connect IS NOT NULL AND price IS NOT NULL AND price > 0",
+    [localUserId]
+  );
+  const totalAmount = Number(agg?.total_amount || 0);
+  const callCount = Number(agg?.call_count || 0);
+  if (!totalAmount || totalAmount <= 0 || !callCount) return;
+
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const now = new Date();
+  const dateLabel = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+  const desc = `AI inbound call charges - ${dateLabel} - ${callCount} call${callCount === 1 ? '' : 's'}`;
+
+  // Insert pending billing record
+  const [insertResult] = await pool.execute(
+    'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
+    [localUserId, -totalAmount, desc, 'pending']
+  );
+  const billingId = insertResult.insertId;
+
+  // Mark call logs as billed (idempotency marker) before charging MagnusBilling.
+  try {
+    await pool.execute(
+      "UPDATE ai_call_logs SET billed = 1, billing_history_id = ? WHERE user_id = ? AND billed = 0 AND direction = 'inbound' AND time_end IS NOT NULL AND time_connect IS NOT NULL AND price IS NOT NULL AND price > 0",
+      [billingId, localUserId]
+    );
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.call.billing] Failed to mark ai_call_logs as billed:', e.message || e);
+    return;
+  }
+
+  try {
+    let magnusResponse = null;
+    let success = false;
+
+    // Primary: create a negative refill in MagnusBilling so there is a visible ledger entry.
+    try {
+      const refillParams = new URLSearchParams();
+      refillParams.append('module', 'refill');
+      refillParams.append('action', 'save');
+      refillParams.append('id_user', String(magnusUserId));
+      refillParams.append('credit', String(-totalAmount));
+      refillParams.append('description', desc);
+      refillParams.append('payment', '1');
+      refillParams.append('refill_type', '0');
+
+      const refillResp = await mbSignedCall({ relPath: '/index.php/refill/save', params: refillParams, httpsAgent, hostHeader });
+      magnusResponse = JSON.stringify(refillResp?.data || refillResp || {});
+
+      if (
+        refillResp?.data?.success === true ||
+        (Array.isArray(refillResp?.data?.rows) && refillResp.data.rows.length > 0) ||
+        (refillResp?.status >= 200 && refillResp?.status < 300)
+      ) {
+        success = true;
+        if (DEBUG) console.log('[ai.call.billing.refill] Created negative refill for AI inbound charges:', {
+          magnusUserId,
+          userId: localUserId,
+          totalAmount,
+          callCount
+        });
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[ai.call.billing] Refill module failed, falling back to direct credit update:', e.message || e);
+    }
+
+    // Fallback: directly adjust user.credit
+    if (!success) {
+      try {
+        const readParams = new URLSearchParams();
+        readParams.append('module', 'user');
+        readParams.append('action', 'read');
+        readParams.append('start', '0');
+        readParams.append('limit', '100');
+        const readResp = await mbSignedCall({ relPath: '/index.php/user/read', params: readParams, httpsAgent, hostHeader });
+        const allUsers = readResp?.data?.rows || readResp?.data?.data || [];
+        const userRow = allUsers.find(u => String(u.id || u.user_id || u.uid || u.id_user || '') === String(magnusUserId));
+        magnusResponse = JSON.stringify(readResp?.data || readResp || {});
+
+        if (userRow) {
+          const currentCredit = Number(userRow.credit || 0);
+          const newCredit = currentCredit - totalAmount;
+          const updateParams = new URLSearchParams();
+          updateParams.append('module', 'user');
+          updateParams.append('action', 'save');
+          updateParams.append('id', String(magnusUserId));
+          updateParams.append('credit', String(newCredit));
+          const updateResp = await mbSignedCall({ relPath: '/index.php/user/save', params: updateParams, httpsAgent, hostHeader });
+          magnusResponse = JSON.stringify(updateResp?.data || updateResp || {});
+          success = true;
+          if (DEBUG) console.log('[ai.call.billing] Deducted AI inbound charges from MagnusBilling credit (fallback path):', {
+            magnusUserId,
+            userId: localUserId,
+            totalAmount,
+            currentCredit,
+            newCredit,
+            callCount
+          });
+        } else if (DEBUG) {
+          console.warn('[ai.call.billing] Magnus user not found when charging AI inbound calls (fallback path)', { magnusUserId });
+        }
+      } catch (fallbackErr) {
+        if (DEBUG) console.warn('[ai.call.billing] Fallback direct credit update failed:', fallbackErr.message || fallbackErr);
+      }
+    }
+
+    await pool.execute(
+      'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+      [success ? 'completed' : 'failed', magnusResponse || 'No MagnusBilling response', billingId]
+    );
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.call.billing] MagnusBilling error while charging AI inbound calls:', e.message || e);
+    await pool.execute(
+      'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+      ['failed', String(e.message || e), billingId]
+    );
+  }
+}
+
+// Charge monthly service fee for a single AI phone number (Daily Telephony)
+async function chargeAiNumberMonthlyFee({ userId, magnusUserId, aiNumberId, phoneNumber, monthlyAmount, isTollfree, billedTo, httpsAgent, hostHeader }) {
+  if (!pool) return false;
+  const amt = Number(monthlyAmount || 0);
+  if (!amt || amt <= 0) return false;
+
+  const periodLabel = billedTo ? `period ending ${new Date(billedTo).toISOString().slice(0, 10)}` : 'monthly period';
+  const descRaw = `AI number monthly service fee - ${isTollfree ? 'Toll-Free' : 'Local'} ${phoneNumber || aiNumberId} (${periodLabel})`;
+  const description = descRaw.substring(0, 255);
+
+  // Extra safety: avoid duplicate charges
+  try {
+    const [existingRows] = await pool.execute(
+      'SELECT id FROM billing_history WHERE user_id = ? AND amount = ? AND description = ? AND status != ? LIMIT 1',
+      [userId, -amt, description, 'failed']
+    );
+    if (existingRows && existingRows.length) return true;
+  } catch (dupErr) {
+    if (DEBUG) console.warn('[ai.number.billing] Duplicate-check query failed; continuing:', dupErr.message || dupErr);
+  }
+
+  const [insertResult] = await pool.execute(
+    'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
+    [userId, -amt, description, 'pending']
+  );
+  const billingId = insertResult.insertId;
+
+  try {
+    let magnusResponse = null;
+    let success = false;
+
+    // Primary: create a negative refill entry
+    try {
+      const refillParams = new URLSearchParams();
+      refillParams.append('module', 'refill');
+      refillParams.append('action', 'save');
+      refillParams.append('id_user', String(magnusUserId));
+      refillParams.append('credit', String(-amt));
+      refillParams.append('description', description);
+      refillParams.append('payment', '1');
+      refillParams.append('refill_type', '0');
+
+      const refillResp = await mbSignedCall({ relPath: '/index.php/refill/save', params: refillParams, httpsAgent, hostHeader });
+      magnusResponse = JSON.stringify(refillResp?.data || refillResp || {});
+
+      if (
+        refillResp?.data?.success === true ||
+        (Array.isArray(refillResp?.data?.rows) && refillResp.data.rows.length > 0) ||
+        (refillResp?.status >= 200 && refillResp?.status < 300)
+      ) {
+        success = true;
+        if (DEBUG) console.log('[ai.number.billing.refill] Created negative refill for AI number monthly fee:', {
+          magnusUserId,
+          userId,
+          aiNumberId,
+          phoneNumber,
+          amount: amt,
+          billedTo: billedTo ? new Date(billedTo).toISOString() : null
+        });
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[ai.number.billing] Refill module failed, falling back to direct credit update:', e.message || e);
+    }
+
+    // Fallback: direct credit update
+    if (!success) {
+      const readParams = new URLSearchParams();
+      readParams.append('module', 'user');
+      readParams.append('action', 'read');
+      readParams.append('start', '0');
+      readParams.append('limit', '100');
+      const readResp = await mbSignedCall({ relPath: '/index.php/user/read', params: readParams, httpsAgent, hostHeader });
+      const allUsers = readResp?.data?.rows || readResp?.data?.data || [];
+      const userRow = allUsers.find(u => String(u.id || u.user_id || u.uid || u.id_user || '') === String(magnusUserId));
+      magnusResponse = JSON.stringify(readResp?.data || readResp || {});
+
+      if (userRow) {
+        const currentCredit = Number(userRow.credit || 0);
+        const newCredit = currentCredit - amt;
+        const updateParams = new URLSearchParams();
+        updateParams.append('module', 'user');
+        updateParams.append('action', 'save');
+        updateParams.append('id', String(magnusUserId));
+        updateParams.append('credit', String(newCredit));
+        const updateResp = await mbSignedCall({ relPath: '/index.php/user/save', params: updateParams, httpsAgent, hostHeader });
+        magnusResponse = JSON.stringify(updateResp?.data || updateResp || {});
+        success = true;
+        if (DEBUG) console.log('[ai.number.billing] Deducted AI number monthly fee via direct credit update:', {
+          magnusUserId,
+          userId,
+          aiNumberId,
+          phoneNumber,
+          amount: amt,
+          currentCredit,
+          newCredit
+        });
+      }
+    }
+
+    await pool.execute(
+      'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+      [success ? 'completed' : 'failed', magnusResponse || 'No MagnusBilling response', billingId]
+    );
+
+    return success;
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.number.billing] MagnusBilling error while charging AI number monthly fee:', e.message || e);
+    await pool.execute(
+      'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+      ['failed', String(e.message || e), billingId]
+    );
+    return false;
+  }
+}
+
+function addMonthsClamped(date, months) {
+  const d = new Date(date);
+  if (!Number.isFinite(d.getTime())) return null;
+  const day = d.getDate();
+  d.setMonth(d.getMonth() + (Number(months) || 0));
+  // Clamp overflow (e.g. Jan 31 + 1 month)
+  if (d.getDate() < day) {
+    d.setDate(0);
+  }
+  return d;
+}
+
+// Bill monthly service fees for AI phone numbers (Daily Telephony)
+async function billAiNumberMonthlyFeesForUser({ localUserId, magnusUserId, aiNumbers, httpsAgent, hostHeader }) {
+  if (!pool || !localUserId || !magnusUserId) return;
+
+  const localFee = parseFloat(process.env.AI_DID_LOCAL_MONTHLY_FEE || process.env.DID_LOCAL_MONTHLY_MARKUP || '0') || 0;
+  const tollfreeFee = parseFloat(process.env.AI_DID_TOLLFREE_MONTHLY_FEE || process.env.DID_TOLLFREE_MONTHLY_MARKUP || '0') || 0;
+  if ((!localFee || localFee <= 0) && (!tollfreeFee || tollfreeFee <= 0)) return;
+
+  const now = new Date();
+
+  // Load last billed markers for this user
+  const lastByNumber = new Map();
+  try {
+    const [rows] = await pool.execute(
+      'SELECT ai_number_id, last_billed_to FROM ai_number_markups WHERE user_id = ?',
+      [localUserId]
+    );
+    for (const r of rows || []) {
+      if (!r || r.ai_number_id == null) continue;
+      const dt = r.last_billed_to ? new Date(r.last_billed_to) : null;
+      if (dt && Number.isFinite(dt.getTime())) lastByNumber.set(String(r.ai_number_id), dt);
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.number.billing] Failed to load ai_number_markups:', e.message || e);
+  }
+
+  // Fallback to cycle table max billed_to (covers partial failures where markups wasn't updated)
+  try {
+    const [rows] = await pool.execute(
+      'SELECT ai_number_id, MAX(billed_to) AS last_billed_to FROM ai_number_markup_cycles WHERE user_id = ? GROUP BY ai_number_id',
+      [localUserId]
+    );
+    for (const r of rows || []) {
+      if (!r || r.ai_number_id == null || !r.last_billed_to) continue;
+      const dt = new Date(r.last_billed_to);
+      if (!Number.isFinite(dt.getTime())) continue;
+      const key = String(r.ai_number_id);
+      const existing = lastByNumber.get(key);
+      if (!existing || dt.getTime() > existing.getTime()) {
+        lastByNumber.set(key, dt);
+      }
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.number.billing] Failed to load ai_number_markup_cycles max:', e.message || e);
+  }
+
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const toDb = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+
+  const maxCatchup = 3;
+
+  for (const n of aiNumbers || []) {
+    try {
+      if (!n || n.id == null) continue;
+      const aiNumberId = String(n.id);
+      const phoneNumber = n.phone_number || n.phoneNumber || '';
+
+      const isTollfree = detectTollfreeUsCaByNpa(phoneNumber);
+      let monthlyAmount = isTollfree ? tollfreeFee : localFee;
+      if (!monthlyAmount || monthlyAmount <= 0) {
+        monthlyAmount = isTollfree ? localFee : tollfreeFee;
+      }
+      if (!monthlyAmount || monthlyAmount <= 0) continue;
+
+      const createdAt = (n.created_at instanceof Date)
+        ? n.created_at
+        : (n.createdAt instanceof Date)
+          ? n.createdAt
+          : (n.created_at ? new Date(n.created_at) : new Date());
+
+      let lastBilledTo = lastByNumber.get(aiNumberId) || null;
+
+      for (let iter = 0; iter < maxCatchup; iter++) {
+        let nextBilledTo = null;
+
+        if (!lastBilledTo) {
+          // First charge: bill immediately for the first month (paid-through = created_at + 1 month)
+          nextBilledTo = addMonthsClamped(createdAt, 1);
+        } else {
+          // Subsequent charges: only bill when the number is due (past paid-through date)
+          if (now.getTime() < lastBilledTo.getTime()) break;
+          nextBilledTo = addMonthsClamped(lastBilledTo, 1);
+        }
+
+        if (!nextBilledTo || !Number.isFinite(nextBilledTo.getTime())) break;
+
+        const billedToDb = toDb(nextBilledTo);
+
+        // DB-level idempotency per (user, number, billed_to)
+        const [insRes] = await pool.execute(
+          'INSERT IGNORE INTO ai_number_markup_cycles (user_id, ai_number_id, billed_to) VALUES (?, ?, ?)',
+          [localUserId, aiNumberId, billedToDb]
+        );
+
+        if (!insRes || insRes.affectedRows === 0) {
+          // Already billed this cycle; align last_billed_to for reporting
+          try {
+            await pool.execute(
+              'INSERT INTO ai_number_markups (user_id, ai_number_id, last_billed_to) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE last_billed_to = GREATEST(COALESCE(last_billed_to, VALUES(last_billed_to)), VALUES(last_billed_to))',
+              [localUserId, aiNumberId, billedToDb]
+            );
+          } catch {}
+          lastBilledTo = nextBilledTo;
+          lastByNumber.set(aiNumberId, lastBilledTo);
+          continue;
+        }
+
+        const ok = await chargeAiNumberMonthlyFee({
+          userId: localUserId,
+          magnusUserId,
+          aiNumberId,
+          phoneNumber,
+          monthlyAmount,
+          isTollfree,
+          billedTo: nextBilledTo,
+          httpsAgent,
+          hostHeader
+        });
+
+        if (!ok) {
+          // Roll back cycle marker so we can retry
+          try {
+            await pool.execute(
+              'DELETE FROM ai_number_markup_cycles WHERE user_id = ? AND ai_number_id = ? AND billed_to = ?',
+              [localUserId, aiNumberId, billedToDb]
+            );
+          } catch {}
+          break;
+        }
+
+        // Update reporting marker
+        try {
+          await pool.execute(
+            'INSERT INTO ai_number_markups (user_id, ai_number_id, last_billed_to) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE last_billed_to = VALUES(last_billed_to)',
+            [localUserId, aiNumberId, billedToDb]
+          );
+        } catch (e) {
+          if (DEBUG) console.warn('[ai.number.billing] Failed to update ai_number_markups:', e.message || e);
+        }
+
+        lastBilledTo = nextBilledTo;
+        lastByNumber.set(aiNumberId, lastBilledTo);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[ai.number.billing] Error while processing AI number:', e.message || e);
+    }
+  }
+}
+
 // Wrapper for HTTP routes that still rely on req/session
 async function maybeBillDidMarkupsForUser(req, userDids, included) {
   if (!pool || !req.session || !req.session.userId) return;
@@ -7522,36 +8166,55 @@ async function runMarkupBillingTick() {
       return;
     }
 
-    // Build a fast lookup of which users actually have DIDs
-    const [userDidRows] = await pool.execute('SELECT user_id, didww_did_id FROM user_dids');
-    if (!userDidRows || userDidRows.length === 0) {
-      if (DEBUG) console.log('[billing.markup] No user_dids rows; skipping tick');
-      return;
-    }
     const userIdSet = new Set(users.map(u => String(u.id)));
+
+    // DIDWW: build lookup of DID ids per user (may be empty)
     const didsByUser = new Map(); // localUserId -> [didww_did_id]
-    for (const row of userDidRows) {
-      const uid = String(row.user_id);
-      if (!userIdSet.has(uid)) continue;
-      if (!didsByUser.has(uid)) didsByUser.set(uid, []);
-      didsByUser.get(uid).push(row.didww_did_id);
+    try {
+      const [userDidRows] = await pool.execute('SELECT user_id, didww_did_id FROM user_dids');
+      for (const row of userDidRows || []) {
+        const uid = String(row.user_id);
+        if (!userIdSet.has(uid)) continue;
+        if (!didsByUser.has(uid)) didsByUser.set(uid, []);
+        didsByUser.get(uid).push(row.didww_did_id);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[billing.markup] Failed to load user_dids:', e.message || e);
     }
 
-    const data = await didwwApiCall({
-      method: 'GET',
-      path: '/dids?include=voice_in_trunk,did_group.city,did_group.region,did_group.country,did_group.stock_keeping_units,capacity_pool'
-    });
-    const allDids = data.data || [];
-    const allIncluded = data.included || [];
-    if (!allDids.length) {
-      if (DEBUG) console.log('[billing.markup] No DIDs on DIDWW account; skipping tick');
-      return;
+    // AI numbers: build lookup per user
+    const aiNumbersByUser = new Map(); // localUserId -> [{id, phone_number, created_at}]
+    try {
+      const [aiRows] = await pool.execute('SELECT id, user_id, phone_number, created_at FROM ai_numbers');
+      for (const r of aiRows || []) {
+        const uid = String(r.user_id);
+        if (!userIdSet.has(uid)) continue;
+        if (!aiNumbersByUser.has(uid)) aiNumbersByUser.set(uid, []);
+        aiNumbersByUser.get(uid).push(r);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[billing.ai] Failed to load ai_numbers:', e.message || e);
     }
 
-    // Build a fast lookup from DIDWW DID id -> DID object
-    const didById = new Map();
-    for (const d of allDids) {
-      if (d && d.id) didById.set(d.id, d);
+    // DIDWW: fetch full DID objects only if any user has DIDs
+    let didById = new Map();
+    let allIncluded = [];
+    if ([...didsByUser.values()].some(arr => Array.isArray(arr) && arr.length)) {
+      try {
+        const data = await didwwApiCall({
+          method: 'GET',
+          path: '/dids?include=voice_in_trunk,did_group.city,did_group.region,did_group.country,did_group.stock_keeping_units,capacity_pool'
+        });
+        const allDids = data.data || [];
+        allIncluded = data.included || [];
+        for (const d of allDids) {
+          if (d && d.id) didById.set(d.id, d);
+        }
+      } catch (e) {
+        if (DEBUG) console.warn('[billing.markup] Failed to fetch DIDWW DIDs for billing tick:', e.message || e);
+        didById = new Map();
+        allIncluded = [];
+      }
     }
 
     const httpsAgent = magnusBillingAgent;
@@ -7562,30 +8225,31 @@ async function runMarkupBillingTick() {
       const magnusUserId = String(u.magnus_user_id || '').trim();
       if (!magnusUserId) continue;
 
+      // DIDWW monthly fees + inbound DIDWW usage
       const userDidIds = didsByUser.get(localUserId) || [];
-      if (!userDidIds.length) continue;
+      if (userDidIds.length && didById.size) {
+        const userDids = userDidIds.map(id => didById.get(id)).filter(Boolean);
+        if (userDids.length) {
+          await billDidMarkupsForUser({
+            localUserId,
+            magnusUserId,
+            userDids,
+            included: allIncluded,
+            httpsAgent,
+            hostHeader
+          });
+        }
+      }
+      await billInboundCdrsForUser({ localUserId, magnusUserId, httpsAgent, hostHeader });
 
-      const userDids = userDidIds
-        .map(id => didById.get(id))
-        .filter(Boolean);
-      if (!userDids.length) continue;
+      // AI monthly number fees
+      const userAiNumbers = aiNumbersByUser.get(localUserId) || [];
+      if (userAiNumbers.length) {
+        await billAiNumberMonthlyFeesForUser({ localUserId, magnusUserId, aiNumbers: userAiNumbers, httpsAgent, hostHeader });
+      }
 
-      await billDidMarkupsForUser({
-        localUserId,
-        magnusUserId,
-        userDids,
-        included: allIncluded,
-        httpsAgent,
-        hostHeader
-      });
-
-      // Also bill inbound CDR usage for this user (if any)
-      await billInboundCdrsForUser({
-        localUserId,
-        magnusUserId,
-        httpsAgent,
-        hostHeader
-      });
+      // AI inbound call usage
+      await billInboundAiCallsForUser({ localUserId, magnusUserId, httpsAgent, hostHeader });
     }
   } catch (e) {
     if (DEBUG) console.warn('[billing.markup] Error during scheduler tick:', e.message || e);
