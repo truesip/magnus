@@ -1457,6 +1457,9 @@ async function pipecatUpsertSecretSet(setName, secretsObj, regionOverride) {
 async function pipecatCreateAgent({ agentName, secretSetName }) {
   assertConfiguredOrThrow('PIPECAT_AGENT_IMAGE', PIPECAT_AGENT_IMAGE);
 
+  const autoScaling = buildPipecatAutoScaling();
+  const enableKrisp = parseOptionalBoolEnv(PIPECAT_ENABLE_KRISP);
+
   const body = {
     serviceName: agentName,
     image: PIPECAT_AGENT_IMAGE,
@@ -1464,6 +1467,8 @@ async function pipecatCreateAgent({ agentName, secretSetName }) {
     region: PIPECAT_REGION,
     secretSet: secretSetName,
     agentProfile: PIPECAT_AGENT_PROFILE,
+    ...(autoScaling ? { autoScaling } : {}),
+    ...(enableKrisp !== undefined ? { enableKrisp } : {}),
     enableManagedKeys: false,
     ...(PIPECAT_IMAGE_PULL_SECRET_SET ? { imagePullSecretSet: PIPECAT_IMAGE_PULL_SECRET_SET } : {})
   };
@@ -1474,11 +1479,16 @@ async function pipecatCreateAgent({ agentName, secretSetName }) {
 async function pipecatUpdateAgent({ agentName, secretSetName, regionOverride }) {
   assertConfiguredOrThrow('PIPECAT_AGENT_IMAGE', PIPECAT_AGENT_IMAGE);
   // Pipecat Cloud update endpoint expects a subset of the agent configuration.
+  const autoScaling = buildPipecatAutoScaling();
+  const enableKrisp = parseOptionalBoolEnv(PIPECAT_ENABLE_KRISP);
+
   const body = {
     image: PIPECAT_AGENT_IMAGE,
     nodeType: 'arm',
     secretSet: secretSetName,
     agentProfile: PIPECAT_AGENT_PROFILE,
+    ...(autoScaling ? { autoScaling } : {}),
+    ...(enableKrisp !== undefined ? { enableKrisp } : {}),
     enableManagedKeys: false,
     ...(PIPECAT_IMAGE_PULL_SECRET_SET ? { imagePullSecretSet: PIPECAT_IMAGE_PULL_SECRET_SET } : {})
   };
@@ -4268,8 +4278,33 @@ const PIPECAT_ORG_ID = process.env.PIPECAT_ORG_ID || '';
 const PIPECAT_AGENT_IMAGE = process.env.PIPECAT_AGENT_IMAGE || '';
 const PIPECAT_REGION = process.env.PIPECAT_REGION || 'us-west';
 const PIPECAT_AGENT_PROFILE = process.env.PIPECAT_AGENT_PROFILE || 'agent-1x';
+// Optional autoscaling + integrations
+const PIPECAT_MIN_AGENTS = process.env.PIPECAT_MIN_AGENTS;
+const PIPECAT_MAX_AGENTS = process.env.PIPECAT_MAX_AGENTS;
+const PIPECAT_ENABLE_KRISP = process.env.PIPECAT_ENABLE_KRISP;
 const PIPECAT_IMAGE_PULL_SECRET_SET = process.env.PIPECAT_IMAGE_PULL_SECRET_SET || '';
 const PIPECAT_DIALIN_WEBHOOK_BASE = process.env.PIPECAT_DIALIN_WEBHOOK_BASE || 'https://api.pipecat.daily.co/v1/public/webhooks';
+
+function parseOptionalIntEnv(v) {
+  if (v === undefined || v === null || String(v).trim() === '') return undefined;
+  const n = parseInt(String(v), 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function parseOptionalBoolEnv(v) {
+  if (v === undefined || v === null || String(v).trim() === '') return undefined;
+  const s = String(v).trim().toLowerCase();
+  return s === '1' || s === 'true' || s === 'yes' || s === 'on';
+}
+
+function buildPipecatAutoScaling() {
+  const minAgents = parseOptionalIntEnv(PIPECAT_MIN_AGENTS);
+  const maxAgents = parseOptionalIntEnv(PIPECAT_MAX_AGENTS);
+  const obj = {};
+  if (Number.isFinite(minAgents)) obj.minAgents = minAgents;
+  if (Number.isFinite(maxAgents)) obj.maxAgents = maxAgents;
+  return Object.keys(obj).length ? obj : undefined;
+}
 
 // Daily Telephony
 const DAILY_API_KEY = process.env.DAILY_API_KEY || '';
