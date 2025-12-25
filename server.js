@@ -2161,6 +2161,7 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
     duration: r.duration != null ? Number(r.duration) : null,
     billsec: r.billsec != null ? Number(r.billsec) : null,
     price: r.price != null ? Number(r.price) : null,
+    status: 'completed',
     createdAt: r.created_at ? r.created_at.toISOString() : null
   }));
 
@@ -2185,7 +2186,7 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
 
     const [aiRows] = await pool.query(
       `SELECT id, call_id, call_domain, direction, from_number, to_number,
-              time_start, time_end, duration, billsec, created_at
+              time_start, time_connect, time_end, duration, billsec, status, created_at
        FROM ai_call_logs
        ${whereAiSql}
        ORDER BY time_start DESC, id DESC`,
@@ -2200,11 +2201,12 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
       srcNumber: r.from_number || '',
       dstNumber: r.to_number || '',
       timeStart: r.time_start ? r.time_start.toISOString() : null,
-      timeConnect: null,
+      timeConnect: r.time_connect ? r.time_connect.toISOString() : null,
       timeEnd: r.time_end ? r.time_end.toISOString() : null,
       duration: r.duration != null ? Number(r.duration) : (r.billsec != null ? Number(r.billsec) : null),
       billsec: r.billsec != null ? Number(r.billsec) : (r.duration != null ? Number(r.duration) : null),
       price: null,
+      status: r.status || null,
       createdAt: r.created_at ? r.created_at.toISOString() : null
     }));
   } catch (e) {
@@ -2356,6 +2358,7 @@ async function loadLocalOutboundCdrs({ userId, fromRaw, toRaw, didFilter }) {
     duration: r.duration != null ? Number(r.duration) : (r.billsec != null ? Number(r.billsec) : null),
     billsec: r.billsec != null ? Number(r.billsec) : (r.duration != null ? Number(r.duration) : null),
     price: r.price != null ? Number(r.price) : null,
+    status: 'completed',
     createdAt: r.created_at ? r.created_at.toISOString() : null
   }));
 }
@@ -4100,27 +4103,59 @@ app.post('/webhooks/daily/events', async (req, res) => {
     }
 
     const evt = (req.body && typeof req.body === 'object') ? req.body : {};
-    const type = String(evt.type || '').trim();
-    const payload = (evt.payload && typeof evt.payload === 'object') ? evt.payload : {};
+
+    // Daily webhook payloads can vary slightly depending on event source/version.
+    // Support common keys for the event type and payload wrapper.
+    const typeRaw = String(
+      evt.type || evt.eventType || evt.event_type || evt.event || evt.name || ''
+    ).trim();
+    const type = typeRaw.toLowerCase();
+
+    const payload = (evt.payload && typeof evt.payload === 'object')
+      ? evt.payload
+      : ((evt.data && typeof evt.data === 'object') ? evt.data : {});
+
+    const src = (payload && Object.keys(payload).length) ? payload : evt;
 
     if (!type || !type.startsWith('dialin.')) {
       return res.status(200).json({ success: true, ignored: true });
     }
 
-    const callId = String(payload.session_id || payload.sessionId || '').trim();
-    const callDomain = String(payload.domain_id || payload.domainId || '').trim();
+    const callId = String(
+      src.session_id ||
+      src.sessionId ||
+      src.call_id ||
+      src.callId ||
+      src.callID ||
+      evt.call_id ||
+      evt.callId ||
+      ''
+    ).trim();
+    const callDomain = String(
+      src.domain_id ||
+      src.domainId ||
+      src.call_domain ||
+      src.callDomain ||
+      evt.call_domain ||
+      evt.callDomain ||
+      ''
+    ).trim();
     if (!callId || !callDomain) {
-      if (DEBUG) console.warn('[daily.webhook] Missing session_id/domain_id:', { type });
+      if (DEBUG) console.warn('[daily.webhook] Missing call identifiers:', { type: typeRaw, keys: Object.keys(src || {}).slice(0, 25) });
       return res.status(200).json({ success: true, ignored: true });
     }
 
     // Timestamps are seconds since epoch.
-    const tsRaw = payload.timestamp != null ? Number(payload.timestamp) : (evt.event_ts != null ? Number(evt.event_ts) : null);
+    const tsRaw = src.timestamp != null
+      ? Number(src.timestamp)
+      : (evt.timestamp != null
+        ? Number(evt.timestamp)
+        : (evt.event_ts != null ? Number(evt.event_ts) : null));
     const ts = (tsRaw && Number.isFinite(tsRaw)) ? new Date(tsRaw * 1000) : new Date();
 
     if (DEBUG) {
       console.log('[daily.webhook]', {
-        type,
+        type: typeRaw,
         callId,
         callDomain,
         ts: ts.toISOString()

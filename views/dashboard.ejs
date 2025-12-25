@@ -1217,7 +1217,10 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           const durSec = c.billsec != null ? Number(c.billsec) : (c.duration != null ? Number(c.duration) : 0);
           const priceNum = c.price != null ? Number(c.price) : null;
           const priceStr = priceNum != null ? `$${priceNum.toFixed(4)}` : '';
-          const statusLabel = 'Completed';
+          const statusRaw = (c.status != null ? String(c.status) : '').trim();
+          const statusLabel = statusRaw
+            ? statusRaw.replace(/_/g, ' ').replace(/(^|\s)\S/g, m => m.toUpperCase())
+            : 'Completed';
 
           const tr = document.createElement('tr');
           tr.innerHTML =
