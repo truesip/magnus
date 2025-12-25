@@ -4144,28 +4144,57 @@ app.post('/webhooks/daily/events', async (req, res) => {
       return res.status(200).json({ success: true, ignored: true });
     }
 
-    const callId = String(
-      src.session_id ||
-      src.sessionId ||
-      src.call_id ||
-      src.callId ||
-      src.callID ||
-      evt.call_id ||
-      evt.callId ||
-      ''
-    ).trim();
-    const callDomain = String(
-      src.domain_id ||
-      src.domainId ||
-      src.call_domain ||
-      src.callDomain ||
-      evt.call_domain ||
-      evt.callDomain ||
-      ''
-    ).trim();
-    if (!callId || !callDomain) {
+    const callIdCandidates = [
+      src.call_id,
+      src.callId,
+      src.callID,
+      evt.call_id,
+      evt.callId,
+      evt.callID,
+      src.session_id,
+      src.sessionId,
+      evt.session_id,
+      evt.sessionId
+    ]
+      .map(v => String(v || '').trim())
+      .filter(Boolean);
+
+    const callDomainCandidates = [
+      src.call_domain,
+      src.callDomain,
+      evt.call_domain,
+      evt.callDomain,
+      src.domain_id,
+      src.domainId,
+      evt.domain_id,
+      evt.domainId
+    ]
+      .map(v => String(v || '').trim())
+      .filter(Boolean);
+
+    if (!callIdCandidates.length) {
       if (DEBUG) console.warn('[daily.webhook] Missing call identifiers:', { type: typeRaw, keys: Object.keys(src || {}).slice(0, 25) });
       return res.status(200).json({ success: true, ignored: true });
+    }
+
+    // Prefer call_id/callId for display/logging; fall back to session_id.
+    const callId = callIdCandidates[0];
+    const callDomain = callDomainCandidates[0] || '';
+
+    async function tryUpdateAiCallLog({ sqlByDomain, buildParamsByDomain, sqlById, buildParamsById }) {
+      for (const cid of callIdCandidates) {
+        if (sqlByDomain && callDomainCandidates.length) {
+          for (const dom of callDomainCandidates) {
+            const [r] = await pool.execute(sqlByDomain, buildParamsByDomain(cid, dom));
+            if (r && r.affectedRows) return { updated: true, callId: cid, callDomain: dom };
+          }
+        }
+
+        const [r2] = await pool.execute(sqlById, buildParamsById(cid));
+        if (r2 && r2.affectedRows) return { updated: true, callId: cid, callDomain: null };
+      }
+
+      return { updated: false };
     }
 
     // Timestamps are seconds since epoch.
@@ -4187,26 +4216,28 @@ app.post('/webhooks/daily/events', async (req, res) => {
 
     if (type === 'dialin.connected') {
       // Mark when the PSTN call actually connected to a room.
-      const [r1] = await pool.execute(
-        `UPDATE ai_call_logs
+      const result = await tryUpdateAiCallLog({
+        sqlByDomain: `UPDATE ai_call_logs
          SET status = ?,
              time_connect = COALESCE(time_connect, ?),
              updated_at = CURRENT_TIMESTAMP
          WHERE call_id = ? AND call_domain = ?
          LIMIT 1`,
-        ['connected', ts, callId, callDomain]
-      );
-      if (!r1 || !r1.affectedRows) {
-        // Fallback: some Daily payloads may vary in call_domain formatting.
-        await pool.execute(
-          `UPDATE ai_call_logs
+        buildParamsByDomain: (cid, dom) => ['connected', ts, cid, dom],
+        sqlById: `UPDATE ai_call_logs
            SET status = ?,
                time_connect = COALESCE(time_connect, ?),
                updated_at = CURRENT_TIMESTAMP
            WHERE call_id = ?
            LIMIT 1`,
-          ['connected', ts, callId]
-        );
+        buildParamsById: (cid) => ['connected', ts, cid]
+      });
+
+      if (DEBUG && !result.updated) {
+        console.warn('[daily.webhook] No matching ai_call_logs row for dialin.connected', {
+          callIdCandidates: callIdCandidates.slice(0, 10),
+          callDomainCandidates: callDomainCandidates.slice(0, 10)
+        });
       }
 
       return res.status(200).json({ success: true });
@@ -4214,8 +4245,8 @@ app.post('/webhooks/daily/events', async (req, res) => {
 
     if (type === 'dialin.stopped') {
       // Call ended. Compute billsec/duration from time_connect if present, otherwise time_start.
-      const [r1] = await pool.execute(
-        `UPDATE ai_call_logs
+      const result = await tryUpdateAiCallLog({
+        sqlByDomain: `UPDATE ai_call_logs
          SET status = CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END,
              time_end = ?,
              duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), ?)),
@@ -4223,11 +4254,8 @@ app.post('/webhooks/daily/events', async (req, res) => {
              updated_at = CURRENT_TIMESTAMP
          WHERE call_id = ? AND call_domain = ?
          LIMIT 1`,
-        [ts, ts, ts, ts, ts, callId, callDomain]
-      );
-      if (!r1 || !r1.affectedRows) {
-        await pool.execute(
-          `UPDATE ai_call_logs
+        buildParamsByDomain: (cid, dom) => [ts, ts, ts, ts, ts, cid, dom],
+        sqlById: `UPDATE ai_call_logs
            SET status = CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END,
                time_end = ?,
                duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), ?)),
@@ -4235,8 +4263,14 @@ app.post('/webhooks/daily/events', async (req, res) => {
                updated_at = CURRENT_TIMESTAMP
            WHERE call_id = ?
            LIMIT 1`,
-          [ts, ts, ts, ts, ts, callId]
-        );
+        buildParamsById: (cid) => [ts, ts, ts, ts, ts, cid]
+      });
+
+      if (DEBUG && !result.updated) {
+        console.warn('[daily.webhook] No matching ai_call_logs row for dialin.stopped', {
+          callIdCandidates: callIdCandidates.slice(0, 10),
+          callDomainCandidates: callDomainCandidates.slice(0, 10)
+        });
       }
 
       return res.status(200).json({ success: true });
@@ -4244,25 +4278,28 @@ app.post('/webhooks/daily/events', async (req, res) => {
 
     if (type === 'dialin.error') {
       // Call failed.
-      const [r1] = await pool.execute(
-        `UPDATE ai_call_logs
+      const result = await tryUpdateAiCallLog({
+        sqlByDomain: `UPDATE ai_call_logs
          SET status = 'error',
              time_end = COALESCE(time_end, ?),
              updated_at = CURRENT_TIMESTAMP
          WHERE call_id = ? AND call_domain = ?
          LIMIT 1`,
-        [ts, callId, callDomain]
-      );
-      if (!r1 || !r1.affectedRows) {
-        await pool.execute(
-          `UPDATE ai_call_logs
+        buildParamsByDomain: (cid, dom) => [ts, cid, dom],
+        sqlById: `UPDATE ai_call_logs
            SET status = 'error',
                time_end = COALESCE(time_end, ?),
                updated_at = CURRENT_TIMESTAMP
            WHERE call_id = ?
            LIMIT 1`,
-          [ts, callId]
-        );
+        buildParamsById: (cid) => [ts, cid]
+      });
+
+      if (DEBUG && !result.updated) {
+        console.warn('[daily.webhook] No matching ai_call_logs row for dialin.error', {
+          callIdCandidates: callIdCandidates.slice(0, 10),
+          callDomainCandidates: callDomainCandidates.slice(0, 10)
+        });
       }
 
       return res.status(200).json({ success: true });
@@ -4270,23 +4307,26 @@ app.post('/webhooks/daily/events', async (req, res) => {
 
     if (type === 'dialin.warning') {
       // Non-terminal; do not overwrite status if call is already in progress/completed.
-      const [r1] = await pool.execute(
-        `UPDATE ai_call_logs
+      const result = await tryUpdateAiCallLog({
+        sqlByDomain: `UPDATE ai_call_logs
          SET status = IF(status IS NULL OR status = '', 'warning', status),
              updated_at = CURRENT_TIMESTAMP
          WHERE call_id = ? AND call_domain = ?
          LIMIT 1`,
-        [callId, callDomain]
-      );
-      if (!r1 || !r1.affectedRows) {
-        await pool.execute(
-          `UPDATE ai_call_logs
+        buildParamsByDomain: (cid, dom) => [cid, dom],
+        sqlById: `UPDATE ai_call_logs
            SET status = IF(status IS NULL OR status = '', 'warning', status),
                updated_at = CURRENT_TIMESTAMP
            WHERE call_id = ?
            LIMIT 1`,
-          [callId]
-        );
+        buildParamsById: (cid) => [cid]
+      });
+
+      if (DEBUG && !result.updated) {
+        console.warn('[daily.webhook] No matching ai_call_logs row for dialin.warning', {
+          callIdCandidates: callIdCandidates.slice(0, 10),
+          callDomainCandidates: callDomainCandidates.slice(0, 10)
+        });
       }
 
       return res.status(200).json({ success: true });
