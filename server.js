@@ -909,6 +909,16 @@ async function initDb() {
     CONSTRAINT fk_user_smtp_settings_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
 
+  // Per-user AI call transfer settings (used by AI agent cold transfers)
+  await pool.query(`CREATE TABLE IF NOT EXISTS user_ai_transfer_settings (
+    user_id BIGINT NOT NULL,
+    transfer_to_number VARCHAR(64) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id),
+    CONSTRAINT fk_user_ai_transfer_settings_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
   // AI document templates (DOCX) used by the AI agent to generate emails
   await pool.query(`CREATE TABLE IF NOT EXISTS ai_doc_templates (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -2323,6 +2333,92 @@ app.post('/api/ai/agent/send-document', async (req, res) => {
 const AI_MAX_AGENTS = Math.max(1, parseInt(process.env.AI_MAX_AGENTS || '5', 10) || 5);
 const AI_MAX_NUMBERS = Math.max(1, parseInt(process.env.AI_MAX_NUMBERS || '5', 10) || 5);
 
+// Per-user AI transfer destination (used by the agent runtime via OPERATOR_NUMBER)
+app.get('/api/me/ai/transfer-settings', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const transfer_to_number = await getUserAiTransferDestination(userId);
+    return res.json({ success: true, data: { transfer_to_number: transfer_to_number || '' } });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.transfer.get] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load transfer settings' });
+  }
+});
+
+async function syncUserAiTransferDestinationToAgents({ userId, transferToNumber }) {
+  if (!pool) return;
+  const transferVal = String(transferToNumber || '').trim();
+
+  const [agents] = await pool.execute('SELECT * FROM ai_agents WHERE user_id = ? ORDER BY created_at DESC', [userId]);
+  for (const agent of agents || []) {
+    // Preserve portal token if present (document emailing).
+    let portalToken = '';
+    try {
+      if (agent.agent_action_token_enc && agent.agent_action_token_iv && agent.agent_action_token_tag) {
+        const key = getUserSmtpEncryptionKey();
+        if (key) {
+          portalToken = decryptAes256Gcm(agent.agent_action_token_enc, agent.agent_action_token_iv, agent.agent_action_token_tag, key);
+        }
+      }
+    } catch {}
+
+    const secrets = buildPipecatSecrets({
+      greeting: agent.greeting,
+      prompt: agent.prompt,
+      cartesiaVoiceId: agent.cartesia_voice_id,
+      portalAgentActionToken: portalToken,
+      operatorNumber: transferVal
+    });
+
+    await pipecatUpsertSecretSet(agent.pipecat_secret_set, secrets, agent.pipecat_region || PIPECAT_REGION);
+    await pipecatUpdateAgent({
+      agentName: agent.pipecat_agent_name,
+      secretSetName: agent.pipecat_secret_set,
+      regionOverride: agent.pipecat_region || PIPECAT_REGION
+    });
+  }
+}
+
+app.put('/api/me/ai/transfer-settings', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const raw = (req.body && (req.body.transfer_to_number ?? req.body.transferToNumber)) ?? '';
+    const normalized = normalizeAiTransferDestination(raw);
+
+    if (normalized && !isValidAiTransferDestination(normalized)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid transfer destination. Use E.164 phone format like +18005551234 or a SIP URI like sip:agent@domain.'
+      });
+    }
+
+    if (normalized && normalized.length > 64) {
+      return res.status(400).json({ success: false, message: 'Transfer destination is too long' });
+    }
+
+    await pool.execute(
+      'INSERT INTO user_ai_transfer_settings (user_id, transfer_to_number) VALUES (?, ?) ON DUPLICATE KEY UPDATE transfer_to_number = VALUES(transfer_to_number), updated_at = CURRENT_TIMESTAMP',
+      [userId, normalized ? String(normalized) : null]
+    );
+
+    try {
+      await syncUserAiTransferDestinationToAgents({ userId, transferToNumber: normalized });
+    } catch (syncErr) {
+      const msg = syncErr?.message || 'Failed to update AI agents in Pipecat';
+      if (DEBUG) console.warn('[ai.transfer.sync] error:', msg);
+      return res.status(502).json({ success: false, message: msg });
+    }
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.transfer.put] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to save transfer settings' });
+  }
+});
+
 function slugifyName(s) {
   return String(s || '')
     .toLowerCase()
@@ -2335,7 +2431,7 @@ function assertConfiguredOrThrow(name, val) {
   if (!val) throw new Error(`${name} not configured`);
 }
 
-function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl, portalAgentActionToken }) {
+function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl, portalAgentActionToken, operatorNumber }) {
   const deepgram = process.env.DEEPGRAM_API_KEY || '';
   const cartesia = process.env.CARTESIA_API_KEY || '';
   const xai = process.env.XAI_API_KEY || '';
@@ -2353,6 +2449,8 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl,
     CARTESIA_VOICE_ID: String(cartesiaVoiceId || ''),
     XAI_API_KEY: xai,
     DAILY_API_KEY: daily,
+    // Used by the agent runtime for cold call transfers.
+    OPERATOR_NUMBER: String(operatorNumber || ''),
     AGENT_GREETING: String(greeting || ''),
     AGENT_PROMPT: String(prompt || '')
   };
@@ -2364,6 +2462,45 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl,
   if (token) secrets.PORTAL_AGENT_ACTION_TOKEN = token;
 
   return secrets;
+}
+
+function normalizeAiTransferDestination(s) {
+  // Allow either E.164 numbers like +18005551234 or SIP URIs like sip:agent@domain
+  let v = String(s || '').trim();
+  if (!v) return '';
+
+  // If it looks like a SIP URI / address, preserve it (but remove whitespace).
+  // IMPORTANT: don't strip '.' here, or we'd corrupt domains like example.com.
+  if (/^sip:/i.test(v) || v.includes('@')) {
+    return v.replace(/\s+/g, '');
+  }
+
+  // Otherwise, treat as a phone number and strip common formatting chars.
+  v = v.replace(/[\s\-().]/g, '');
+  return v;
+}
+
+function isValidAiTransferDestination(s) {
+  const v = String(s || '').trim();
+  if (!v) return true;
+  if (/^sip:/i.test(v)) return true;
+  if (v.includes('@')) return true;
+  // Require E.164-style phone number
+  return /^\+\d{8,16}$/.test(v);
+}
+
+async function getUserAiTransferDestination(userId) {
+  try {
+    if (!pool) return '';
+    const [rows] = await pool.execute(
+      'SELECT transfer_to_number FROM user_ai_transfer_settings WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    return row && row.transfer_to_number ? String(row.transfer_to_number) : '';
+  } catch {
+    return '';
+  }
 }
 
 function pipecatSecretsObjectToArray(secretsObj) {
@@ -2757,11 +2894,13 @@ app.post('/api/me/ai/agents', requireAuth, async (req, res) => {
 
     // Provision Pipecat secret set + agent
     try {
+      const operatorNumber = await getUserAiTransferDestination(userId);
       const secrets = buildPipecatSecrets({
         greeting,
         prompt,
         cartesiaVoiceId: cartesiaVoiceIdClean,
-        portalAgentActionToken: actionTokenPlain
+        portalAgentActionToken: actionTokenPlain,
+        operatorNumber
       });
       await pipecatUpsertSecretSet(secretSetName, secrets, PIPECAT_REGION);
       await pipecatCreateAgent({ agentName, secretSetName });
@@ -2868,11 +3007,13 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
         portalToken = decryptAes256Gcm(agent.agent_action_token_enc, agent.agent_action_token_iv, agent.agent_action_token_tag, key);
       }
 
+      const operatorNumber = await getUserAiTransferDestination(userId);
       const secrets = buildPipecatSecrets({
         greeting: nextGreeting,
         prompt: nextPrompt,
         cartesiaVoiceId: nextVoiceIdClean,
-        portalAgentActionToken: portalToken
+        portalAgentActionToken: portalToken,
+        operatorNumber
       });
       await pipecatUpsertSecretSet(agent.pipecat_secret_set, secrets, agent.pipecat_region || PIPECAT_REGION);
       await pipecatUpdateAgent({
@@ -3084,11 +3225,13 @@ app.post('/api/me/ai/numbers/:id/assign', requireAuth, async (req, res) => {
         portalToken = decryptAes256Gcm(agent.agent_action_token_enc, agent.agent_action_token_iv, agent.agent_action_token_tag, key);
       }
 
+      const operatorNumber = await getUserAiTransferDestination(userId);
       const secrets = buildPipecatSecrets({
         greeting: agent.greeting,
         prompt: agent.prompt,
         cartesiaVoiceId: agent.cartesia_voice_id,
-        portalAgentActionToken: portalToken
+        portalAgentActionToken: portalToken,
+        operatorNumber
       });
       await pipecatUpsertSecretSet(agent.pipecat_secret_set, secrets, agent.pipecat_region || PIPECAT_REGION);
       await pipecatUpdateAgent({

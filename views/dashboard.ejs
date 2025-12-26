@@ -373,6 +373,18 @@
             </div>
 
             <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+              <h3 style="margin:0 0 10px 0">Call Transfer</h3>
+              <div class="muted" style="margin-bottom:10px">When a caller asks to be transferred, your AI agent can cold-transfer the call to this destination and then leave the call.</div>
+              <div style="display:grid;grid-template-columns:1fr;gap:8px">
+                <input id="aiTransferNumber" type="text" placeholder="Transfer destination (E.164 like +18005551234 or sip:agent@domain)">
+              </div>
+              <div class="toolbar" style="margin-top:10px">
+                <button id="saveAiTransferBtn">Save Transfer</button>
+                <span id="aiTransferStatus" class="muted" style="margin-left:auto"></span>
+              </div>
+            </div>
+
+            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
               <h3 style="margin:0 0 10px 0">Document Templates</h3>
               <div class="muted" style="margin-bottom:10px">Upload a .docx with placeholders like <code>[[Name]]</code> and <code>[[Address]]</code>.</div>
               <div class="toolbar" style="flex-wrap:wrap">
@@ -575,6 +587,7 @@
         e.preventDefault();
         activateAiSubtab('tools');
         loadSmtpSettings();
+        loadAiTransferSettings();
         loadDocTemplates();
       });
     }
@@ -708,6 +721,55 @@
         showToast('Test email sent.');
       } catch (e) {
         showToast('SMTP test failed', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    }
+
+    async function loadAiTransferSettings(){
+      const status = $('#aiTransferStatus');
+      if (status) status.textContent = 'Loading…';
+      try {
+        const r = await fetch('/api/me/ai/transfer-settings');
+        const j = await r.json();
+        if (!j || j.success === false) {
+          if (status) status.textContent = j?.message || 'Failed to load';
+          return;
+        }
+        const d = j.data || {};
+        const v = d && d.transfer_to_number ? String(d.transfer_to_number) : '';
+        const input = $('#aiTransferNumber');
+        if (input) input.value = v;
+        if (status) status.textContent = v ? 'Configured' : 'Not configured';
+      } catch (e) {
+        if (status) status.textContent = 'Failed to load';
+      }
+    }
+
+    async function saveAiTransferSettings(){
+      const btn = $('#saveAiTransferBtn');
+      if (!btn) return;
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = 'Saving...';
+      try {
+        const input = $('#aiTransferNumber');
+        const transfer_to_number = input ? String(input.value || '').trim() : '';
+        const r = await fetch('/api/me/ai/transfer-settings', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ transfer_to_number })
+        });
+        const j = await r.json();
+        if (!j || j.success === false) {
+          showToast(j?.message || 'Failed to save transfer settings', 'error');
+          return;
+        }
+        showToast('Transfer settings saved.');
+        await loadAiTransferSettings();
+      } catch (e) {
+        showToast('Failed to save transfer settings', 'error');
       } finally {
         btn.disabled = false;
         btn.textContent = old;
@@ -1076,6 +1138,7 @@
     // SMTP + templates controls
     $('#saveSmtpBtn').addEventListener('click', (e) => { e.preventDefault(); saveSmtpSettings(); });
     $('#testSmtpBtn').addEventListener('click', (e) => { e.preventDefault(); testSmtpSettings(); });
+    $('#saveAiTransferBtn').addEventListener('click', (e) => { e.preventDefault(); saveAiTransferSettings(); });
 
     $('#uploadDocTemplateBtn').addEventListener('click', async (e) => {
       e.preventDefault();

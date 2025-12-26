@@ -5,9 +5,10 @@ from typing import Any, Optional
 
 import httpx
 from deepgram.clients.listen.v1.websocket.options import LiveOptions
+from loguru import logger
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import AggregationType, TTSTextFrame
+from pipecat.frames.frames import AggregationType, TTSTextFrame, EndFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -178,10 +179,30 @@ async def bot(session_args: Any):
     greeting = _env("AGENT_GREETING", "").strip()
     base_prompt = _env("AGENT_PROMPT", "You are a helpful voice assistant. Keep responses concise.").strip()
 
+    # Tools configured via secret set
+    operator_number = _env("OPERATOR_NUMBER", "").strip()
+
     # Portal integration (used for emailing templated documents)
     portal_base_url = _env("PORTAL_BASE_URL", "").strip().rstrip("/")
     portal_token = _env("PORTAL_AGENT_ACTION_TOKEN", "").strip()
+
     tools = []
+    has_send_document_tool = False
+    has_transfer_tool = False
+
+    # Call transfer (cold transfer) - uses the configured OPERATOR_NUMBER destination.
+    if operator_number:
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "transfer_call",
+                    "description": "Cold-transfer the caller to the configured transfer destination and leave the call.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        )
+        has_transfer_tool = True
 
     if portal_base_url and portal_token:
         tools.append(
@@ -211,15 +232,21 @@ async def bot(session_args: Any):
                 },
             }
         )
+        has_send_document_tool = True
 
     # Extend the user-provided prompt with minimal tool guidance.
     prompt = base_prompt
-    if tools:
+    if has_send_document_tool:
         prompt += (
             "\n\nYou can email the caller a document when requested. "
             "Collect their email and any details needed for the template placeholders, "
             "then call the send_document tool with to_email and variables. "
             "After the tool returns, confirm whether the email was sent."
+        )
+    if has_transfer_tool:
+        prompt += (
+            "\n\nIf the caller asks to be transferred to a representative or operator, "
+            "confirm they want to be transferred, then call the transfer_call tool."
         )
 
     room_url = getattr(session_args, "room_url", None) or getattr(session_args, "roomUrl", None) or ""
@@ -273,7 +300,7 @@ async def bot(session_args: Any):
     )
 
     # Register tool handler (if portal integration is configured)
-    if tools:
+    if has_send_document_tool:
         async def _send_document(params: FunctionCallParams) -> None:
             args = dict(params.arguments or {})
             to_email = str(args.get("to_email") or args.get("toEmail") or args.get("email") or "").strip()
@@ -377,6 +404,79 @@ async def bot(session_args: Any):
             audio_out_sample_rate=sample_rate,
         ),
     )
+
+    # Register tool handler (if call transfer is configured)
+    call_transfer_in_progress = False
+
+    if has_transfer_tool:
+        async def _transfer_call(params: FunctionCallParams) -> None:
+            nonlocal call_transfer_in_progress
+
+            if call_transfer_in_progress:
+                await params.result_callback({
+                    "success": False,
+                    "message": "Transfer already in progress",
+                })
+                return
+
+            if not operator_number:
+                await params.result_callback({
+                    "success": False,
+                    "message": "Transfer destination not configured",
+                })
+                return
+
+            call_transfer_in_progress = True
+
+            # Try SIP REFER first (exits Daily media path), then fall back to call transfer.
+            # NOTE: sip_refer requires an explicit sessionId. Pipecat auto-fills sessionId for
+            # sip_call_transfer, but not for sip_refer.
+            session_id = ""
+            try:
+                client = getattr(transport, "_client", None)
+                if client is not None:
+                    session_id = (
+                        str(getattr(client, "_dial_out_session_id", "") or "").strip()
+                        or str(getattr(client, "_dial_in_session_id", "") or "").strip()
+                    )
+            except Exception:
+                session_id = ""
+
+            refer_settings = {"toEndPoint": operator_number}
+            if session_id:
+                refer_settings["sessionId"] = session_id
+
+            try:
+                error = None
+
+                if session_id:
+                    error = await transport.sip_refer(refer_settings)
+                else:
+                    error = "Missing sessionId for SIP REFER"
+
+                if error:
+                    logger.warning(f"sip_refer failed, falling back to sip_call_transfer: {error}")
+                    error = await transport.sip_call_transfer({"toEndPoint": operator_number})
+
+                if error:
+                    call_transfer_in_progress = False
+                    await params.result_callback({"success": False, "message": str(error)})
+                    return
+
+                # We successfully initiated the transfer; end the bot's pipeline.
+                await params.result_callback({"success": True})
+
+                # Stop the pipeline and leave the room so the bot disconnects.
+                await task.queue_frames([EndFrame()])
+                try:
+                    await transport.leave()
+                except Exception:
+                    pass
+            except Exception as e:
+                call_transfer_in_progress = False
+                await params.result_callback({"success": False, "message": str(e)})
+
+        llm.register_function("transfer_call", _transfer_call)
 
     # Speak first (direct TTS), once.
     if greeting:
