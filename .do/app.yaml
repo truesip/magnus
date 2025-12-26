@@ -4,9 +4,10 @@ services:
   - name: web
     github:
       repo: your-github-username/your-repo-name
-      branch: main
+      branch: master
       deploy_on_push: true
-    environment_slug: node-js
+    # Use a Dockerfile so we can install system dependencies like LibreOffice
+    dockerfile_path: Dockerfile
     instance_count: 1
     instance_size_slug: basic-xxs
     http_port: 8080
@@ -19,7 +20,9 @@ services:
         value: production
       - key: PORT
         value: "8080"
-- key: MAGNUSBILLING_URL
+      - key: LIBREOFFICE_BIN
+        value: /usr/bin/soffice
+      - key: MAGNUSBILLING_URL
         value: https://sip.dialerone.net/mbilling
         type: SECRET
       - key: MAGNUSBILLING_API_KEY
