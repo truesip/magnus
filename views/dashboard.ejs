@@ -520,6 +520,15 @@
           <div class="muted" style="margin-top:6px">Leave as Default to use the voice configured in your agent image.</div>
         </div>
         <div style="margin-bottom:12px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Background Sound (WAV upload)</label>
+          <input id="aiAgentBackgroundAudioFile" type="file" accept=".wav,audio/wav,audio/x-wav" style="width:100%;box-sizing:border-box">
+          <div id="aiAgentBackgroundAudioUploadInfo" class="muted" style="margin-top:6px;display:none"></div>
+          <div style="margin-top:8px;display:flex;gap:8px">
+            <button id="aiRemoveBackgroundAudioBtn" type="button" style="background:#6b7280;display:none">Remove uploaded audio</button>
+          </div>
+          <div class="muted" style="margin-top:6px">Upload a small WAV (max 5MB). If uploaded, it overrides the URL below.</div>
+        </div>
+        <div style="margin-bottom:12px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Background Sound (WAV URL)</label>
           <input id="aiAgentBackgroundAudioUrl" type="url" placeholder="https://.../office.wav" style="width:100%;box-sizing:border-box">
           <div class="muted" style="margin-top:6px">Plays only while the AI speaks. Use a small WAV file (mono 16kHz recommended).</div>
@@ -1065,8 +1074,34 @@
       // Background ambience
       const bgUrl = agent ? String(agent.background_audio_url || '') : '';
       const bgGain = agent && agent.background_audio_gain != null ? String(agent.background_audio_gain) : '';
+      const bgUploaded = agent ? Boolean(Number(agent.background_audio_uploaded || 0)) : false;
+      const bgUploadName = agent ? String(agent.background_audio_upload_filename || '') : '';
+      const bgUploadSize = agent && agent.background_audio_upload_size_bytes != null ? Number(agent.background_audio_upload_size_bytes) : null;
+
       try { $('#aiAgentBackgroundAudioUrl').value = bgUrl; } catch {}
-      try { $('#aiAgentBackgroundAudioGain').value = bgGain || (bgUrl ? '0.06' : ''); } catch {}
+      try { $('#aiAgentBackgroundAudioGain').value = bgGain || ((bgUrl || bgUploaded) ? '0.06' : ''); } catch {}
+      try { $('#aiAgentBackgroundAudioFile').value = ''; } catch {}
+
+      const bgInfo = $('#aiAgentBackgroundAudioUploadInfo');
+      const bgRemoveBtn = $('#aiRemoveBackgroundAudioBtn');
+      if (bgInfo) {
+        if (bgUploaded) {
+          const pieces = [];
+          if (bgUploadName) pieces.push(bgUploadName);
+          if (bgUploadSize != null && Number.isFinite(bgUploadSize)) {
+            pieces.push(`${Math.max(1, Math.round(bgUploadSize / 1024))} KB`);
+          }
+          bgInfo.textContent = `Uploaded: ${pieces.join(' • ') || 'WAV file'}`;
+          bgInfo.style.display = 'block';
+        } else {
+          bgInfo.textContent = '';
+          bgInfo.style.display = 'none';
+        }
+      }
+      if (bgRemoveBtn) {
+        bgRemoveBtn.style.display = bgUploaded ? 'inline-block' : 'none';
+      }
+      try { $('#aiAgentBackgroundAudioUrl').disabled = Boolean(bgUploaded); } catch {}
 
       // Default template selection
       const desiredTemplateId = agent && agent.default_doc_template_id ? String(agent.default_doc_template_id) : '';
@@ -1094,6 +1129,37 @@
     $('#createAiAgentBtn').addEventListener('click', () => openAiAgentModal(null));
     $('#cancelAiAgentBtn').addEventListener('click', () => closeAiAgentModal());
     $('#aiAgentModal').addEventListener('click', (e) => { if (e.target === $('#aiAgentModal')) closeAiAgentModal(); });
+
+    // Remove uploaded background audio
+    $('#aiRemoveBackgroundAudioBtn').addEventListener('click', async (e) => {
+      e.preventDefault();
+      const id = ($('#aiAgentId').value || '').trim();
+      if (!id) return showToast('Save the agent first.', 'error');
+      if (!confirm('Remove uploaded background audio for this agent?')) return;
+
+      const btn = $('#aiRemoveBackgroundAudioBtn');
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = 'Removing...';
+
+      try {
+        const r = await fetch(`/api/me/ai/agents/${encodeURIComponent(id)}/background-audio`, { method: 'DELETE' });
+        const j = await r.json();
+        if (!j || j.success === false) {
+          showToast(j?.message || 'Failed to remove background audio', 'error');
+          return;
+        }
+        showToast('Background audio removed.');
+        closeAiAgentModal();
+        await loadAiAgents();
+        await loadAiNumbers();
+      } catch (err) {
+        showToast('Failed to remove background audio', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    });
 
     // Voice picker handlers
     $('#aiLoadVoicesBtn').addEventListener('click', () => loadCartesiaVoices(true));
@@ -1154,7 +1220,32 @@
           showToast(j?.message || 'Failed to save agent', 'error');
           return;
         }
-        showToast(id ? 'Agent updated.' : 'Agent created.');
+
+        const savedId = id || (j && j.data && j.data.id != null ? String(j.data.id) : '');
+        if (!id && savedId) {
+          try { $('#aiAgentId').value = savedId; } catch {}
+        }
+
+        // Optional: upload background WAV (replaces any prior upload)
+        const bgFileInput = $('#aiAgentBackgroundAudioFile');
+        const bgFile = bgFileInput && bgFileInput.files ? bgFileInput.files[0] : null;
+        if (bgFile && savedId) {
+          if (bgFile.size && bgFile.size > (5 * 1024 * 1024)) {
+            showToast('Background WAV must be 5MB or smaller.', 'error');
+            return;
+          }
+          const fd = new FormData();
+          fd.append('file', bgFile);
+          const ur = await fetch(`/api/me/ai/agents/${encodeURIComponent(savedId)}/background-audio`, { method: 'POST', body: fd });
+          const uj = await ur.json();
+          if (!uj || uj.success === false) {
+            showToast(uj?.message || 'Background audio upload failed', 'error');
+            return;
+          }
+        }
+
+        const msg = (id ? 'Agent updated.' : 'Agent created.') + (bgFile ? ' Background audio uploaded.' : '');
+        showToast(msg);
         closeAiAgentModal();
         await loadAiAgents();
         await loadAiNumbers();

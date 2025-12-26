@@ -846,6 +846,24 @@ async function initDb() {
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
 
+  // Per-agent uploaded background audio (WAV), served via a tokenized public URL.
+  await pool.query(`CREATE TABLE IF NOT EXISTS ai_agent_background_audio (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    agent_id BIGINT NOT NULL,
+    original_filename VARCHAR(255) NULL,
+    mime_type VARCHAR(128) NULL,
+    size_bytes BIGINT NULL,
+    access_token CHAR(64) NOT NULL,
+    wav_blob LONGBLOB NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_ai_agent_bg_audio_agent (agent_id),
+    KEY idx_ai_agent_bg_audio_user (user_id),
+    CONSTRAINT fk_ai_agent_bg_audio_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_ai_agent_bg_audio_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE CASCADE
+  )`);
+
   // AI Phone Numbers (Daily Telephony)
   // One number can be assigned to at most one agent, and an agent can have at most one number.
   await pool.query(`CREATE TABLE IF NOT EXISTS ai_numbers (
@@ -2362,6 +2380,55 @@ app.post('/api/ai/agent/send-document', async (req, res) => {
 const AI_MAX_AGENTS = Math.max(1, parseInt(process.env.AI_MAX_AGENTS || '5', 10) || 5);
 const AI_MAX_NUMBERS = Math.max(1, parseInt(process.env.AI_MAX_NUMBERS || '5', 10) || 5);
 
+// Per-agent background WAV upload (stored in DB, served via tokenized public URL)
+const aiAgentBackgroundAudioUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 } // 5MB
+});
+
+function getPublicBaseUrlFromReq(req) {
+  const envBase = String(process.env.PUBLIC_BASE_URL || process.env.PORTAL_BASE_URL || '').trim();
+  const fromReq = `${req.protocol}://${req.get('host')}`;
+  return String(envBase || fromReq).replace(/\/$/, '');
+}
+
+function looksLikeWav(buf) {
+  if (!buf || !Buffer.isBuffer(buf) || buf.length < 12) return false;
+  // RIFF....WAVE
+  return buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WAVE';
+}
+
+function buildAgentBackgroundAudioPublicUrl({ baseUrl, agentId, token }) {
+  const b = String(baseUrl || '').trim().replace(/\/$/, '');
+  const t = String(token || '').trim();
+  if (!b || !t) return '';
+  const rel = `/api/public/ai/agents/${encodeURIComponent(String(agentId))}/background-audio.wav?token=${encodeURIComponent(t)}`;
+  return b + rel;
+}
+
+async function getAgentBackgroundAudioUploadToken({ userId, agentId }) {
+  if (!pool) return '';
+  try {
+    const [rows] = await pool.execute(
+      'SELECT access_token FROM ai_agent_background_audio WHERE user_id = ? AND agent_id = ? LIMIT 1',
+      [userId, agentId]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    return row && row.access_token ? String(row.access_token) : '';
+  } catch {
+    return '';
+  }
+}
+
+async function resolveAgentBackgroundAudioUrl({ userId, agentId, fallbackUrl, publicBaseUrl }) {
+  const token = await getAgentBackgroundAudioUploadToken({ userId, agentId });
+  const base = String(publicBaseUrl || process.env.PUBLIC_BASE_URL || process.env.PORTAL_BASE_URL || '').trim();
+  if (token && base) {
+    return buildAgentBackgroundAudioPublicUrl({ baseUrl: base, agentId, token });
+  }
+  return String(fallbackUrl || '');
+}
+
 // Per-user AI transfer destination (used by the agent runtime via OPERATOR_NUMBER)
 app.get('/api/me/ai/transfer-settings', requireAuth, async (req, res) => {
   try {
@@ -2375,7 +2442,7 @@ app.get('/api/me/ai/transfer-settings', requireAuth, async (req, res) => {
   }
 });
 
-async function syncUserAiTransferDestinationToAgents({ userId, transferToNumber }) {
+async function syncUserAiTransferDestinationToAgents({ userId, transferToNumber, publicBaseUrl }) {
   if (!pool) return;
   const transferVal = String(transferToNumber || '').trim();
 
@@ -2392,13 +2459,20 @@ async function syncUserAiTransferDestinationToAgents({ userId, transferToNumber 
       }
     } catch {}
 
+    const bgUrlResolved = await resolveAgentBackgroundAudioUrl({
+      userId,
+      agentId: agent.id,
+      fallbackUrl: agent.background_audio_url,
+      publicBaseUrl
+    });
+
     const secrets = buildPipecatSecrets({
       greeting: agent.greeting,
       prompt: agent.prompt,
       cartesiaVoiceId: agent.cartesia_voice_id,
       portalAgentActionToken: portalToken,
       operatorNumber: transferVal,
-      backgroundAudioUrl: agent.background_audio_url,
+      backgroundAudioUrl: bgUrlResolved,
       backgroundAudioGain: agent.background_audio_gain
     });
 
@@ -2435,8 +2509,10 @@ app.put('/api/me/ai/transfer-settings', requireAuth, async (req, res) => {
       [userId, normalized ? String(normalized) : null]
     );
 
+    const publicBaseUrl = getPublicBaseUrlFromReq(req);
+
     try {
-      await syncUserAiTransferDestinationToAgents({ userId, transferToNumber: normalized });
+      await syncUserAiTransferDestinationToAgents({ userId, transferToNumber: normalized, publicBaseUrl });
     } catch (syncErr) {
       const msg = syncErr?.message || 'Failed to update AI agents in Pipecat';
       if (DEBUG) console.warn('[ai.transfer.sync] error:', msg);
@@ -2850,12 +2926,17 @@ app.get('/api/me/ai/agents', requireAuth, async (req, res) => {
     const [rows] = await pool.execute(
       `SELECT a.id, a.display_name, a.greeting, a.prompt, a.cartesia_voice_id,
               a.background_audio_url, a.background_audio_gain,
+              CASE WHEN ba.agent_id IS NULL THEN 0 ELSE 1 END AS background_audio_uploaded,
+              ba.original_filename AS background_audio_upload_filename,
+              ba.size_bytes AS background_audio_upload_size_bytes,
+              ba.updated_at AS background_audio_upload_updated_at,
               a.pipecat_agent_name, a.pipecat_region,
               a.default_doc_template_id,
               a.created_at, a.updated_at,
               n.id AS number_id, n.phone_number AS phone_number
        FROM ai_agents a
        LEFT JOIN ai_numbers n ON n.agent_id = a.id
+       LEFT JOIN ai_agent_background_audio ba ON ba.agent_id = a.id
        WHERE a.user_id = ?
        ORDER BY a.created_at DESC`,
       [userId]
@@ -3111,9 +3192,7 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
       }
     }
 
-    if (!nextBgUrl) {
-      nextBgGain = null;
-    } else if (nextBgGain == null) {
+    if (nextBgUrl && nextBgGain == null) {
       nextBgGain = 0.06;
     }
 
@@ -3157,13 +3236,21 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
       }
 
       const operatorNumber = await getUserAiTransferDestination(userId);
+      const publicBaseUrl = getPublicBaseUrlFromReq(req);
+      const bgUrlResolved = await resolveAgentBackgroundAudioUrl({
+        userId,
+        agentId,
+        fallbackUrl: nextBgUrl,
+        publicBaseUrl
+      });
+
       const secrets = buildPipecatSecrets({
         greeting: nextGreeting,
         prompt: nextPrompt,
         cartesiaVoiceId: nextVoiceIdClean,
         portalAgentActionToken: portalToken,
         operatorNumber,
-        backgroundAudioUrl: nextBgUrl,
+        backgroundAudioUrl: bgUrlResolved,
         backgroundAudioGain: nextBgGain
       });
       await pipecatUpsertSecretSet(agent.pipecat_secret_set, secrets, agent.pipecat_region || PIPECAT_REGION);
@@ -3181,6 +3268,177 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
   } catch (e) {
     if (DEBUG) console.error('[ai.agents.update] error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to update agent' });
+  }
+});
+
+// Upload/replace per-agent background audio (WAV)
+app.post('/api/me/ai/agents/:id/background-audio', requireAuth, aiAgentBackgroundAudioUpload.single('file'), async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const agentId = String(req.params.id || '').trim();
+    if (!agentId) return res.status(400).json({ success: false, message: 'Missing agent id' });
+
+    const [rows] = await pool.execute('SELECT * FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1', [agentId, userId]);
+    const agent = rows && rows[0];
+    if (!agent) return res.status(404).json({ success: false, message: 'Agent not found' });
+
+    const file = req.file;
+    if (!file || !file.buffer) {
+      return res.status(400).json({ success: false, message: 'Missing file upload (field name: file)' });
+    }
+
+    if (!looksLikeWav(file.buffer)) {
+      return res.status(400).json({ success: false, message: 'Uploaded file must be a WAV file (RIFF/WAVE)' });
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const original = String(file.originalname || '').trim() || null;
+    const mime = String(file.mimetype || '').trim() || 'audio/wav';
+    const sizeBytes = file.size != null ? Number(file.size) : (file.buffer ? file.buffer.length : null);
+
+    await pool.execute(
+      `INSERT INTO ai_agent_background_audio (user_id, agent_id, original_filename, mime_type, size_bytes, access_token, wav_blob)
+       VALUES (?,?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE
+         original_filename=VALUES(original_filename),
+         mime_type=VALUES(mime_type),
+         size_bytes=VALUES(size_bytes),
+         access_token=VALUES(access_token),
+         wav_blob=VALUES(wav_blob),
+         updated_at=CURRENT_TIMESTAMP`,
+      [userId, agentId, original, mime, sizeBytes, token, file.buffer]
+    );
+
+    // Update secret set + redeploy so the agent starts using the uploaded WAV
+    try {
+      let portalToken = '';
+      if (agent.agent_action_token_enc && agent.agent_action_token_iv && agent.agent_action_token_tag) {
+        const key = getUserSmtpEncryptionKey();
+        if (!key) throw new Error('USER_SMTP_ENCRYPTION_KEY not configured');
+        portalToken = decryptAes256Gcm(agent.agent_action_token_enc, agent.agent_action_token_iv, agent.agent_action_token_tag, key);
+      }
+
+      const operatorNumber = await getUserAiTransferDestination(userId);
+      const publicBaseUrl = getPublicBaseUrlFromReq(req);
+      const audioUrl = buildAgentBackgroundAudioPublicUrl({ baseUrl: publicBaseUrl, agentId, token });
+
+      const secrets = buildPipecatSecrets({
+        greeting: agent.greeting,
+        prompt: agent.prompt,
+        cartesiaVoiceId: agent.cartesia_voice_id,
+        portalAgentActionToken: portalToken,
+        operatorNumber,
+        backgroundAudioUrl: audioUrl,
+        backgroundAudioGain: agent.background_audio_gain
+      });
+
+      await pipecatUpsertSecretSet(agent.pipecat_secret_set, secrets, agent.pipecat_region || PIPECAT_REGION);
+      await pipecatUpdateAgent({
+        agentName: agent.pipecat_agent_name,
+        secretSetName: agent.pipecat_secret_set,
+        regionOverride: agent.pipecat_region || PIPECAT_REGION
+      });
+    } catch (provErr) {
+      const msg = provErr?.message || 'Failed to update agent in Pipecat';
+      return res.status(502).json({ success: false, message: msg, error: provErr?.data });
+    }
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[ai.agents.background-audio.upload] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to upload background audio' });
+  }
+});
+
+// Delete uploaded background audio for an agent
+app.delete('/api/me/ai/agents/:id/background-audio', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const agentId = String(req.params.id || '').trim();
+    if (!agentId) return res.status(400).json({ success: false, message: 'Missing agent id' });
+
+    const [rows] = await pool.execute('SELECT * FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1', [agentId, userId]);
+    const agent = rows && rows[0];
+    if (!agent) return res.status(404).json({ success: false, message: 'Agent not found' });
+
+    await pool.execute('DELETE FROM ai_agent_background_audio WHERE user_id = ? AND agent_id = ?', [userId, agentId]);
+
+    // Update secret set + redeploy so the agent stops using the uploaded WAV
+    try {
+      let portalToken = '';
+      if (agent.agent_action_token_enc && agent.agent_action_token_iv && agent.agent_action_token_tag) {
+        const key = getUserSmtpEncryptionKey();
+        if (!key) throw new Error('USER_SMTP_ENCRYPTION_KEY not configured');
+        portalToken = decryptAes256Gcm(agent.agent_action_token_enc, agent.agent_action_token_iv, agent.agent_action_token_tag, key);
+      }
+
+      const operatorNumber = await getUserAiTransferDestination(userId);
+      const publicBaseUrl = getPublicBaseUrlFromReq(req);
+      const bgUrlResolved = await resolveAgentBackgroundAudioUrl({
+        userId,
+        agentId,
+        fallbackUrl: agent.background_audio_url,
+        publicBaseUrl
+      });
+
+      const secrets = buildPipecatSecrets({
+        greeting: agent.greeting,
+        prompt: agent.prompt,
+        cartesiaVoiceId: agent.cartesia_voice_id,
+        portalAgentActionToken: portalToken,
+        operatorNumber,
+        backgroundAudioUrl: bgUrlResolved,
+        backgroundAudioGain: agent.background_audio_gain
+      });
+
+      await pipecatUpsertSecretSet(agent.pipecat_secret_set, secrets, agent.pipecat_region || PIPECAT_REGION);
+      await pipecatUpdateAgent({
+        agentName: agent.pipecat_agent_name,
+        secretSetName: agent.pipecat_secret_set,
+        regionOverride: agent.pipecat_region || PIPECAT_REGION
+      });
+    } catch (provErr) {
+      const msg = provErr?.message || 'Failed to update agent in Pipecat';
+      return res.status(502).json({ success: false, message: msg, error: provErr?.data });
+    }
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[ai.agents.background-audio.delete] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to delete background audio' });
+  }
+});
+
+// Public: serve uploaded background audio via token (used by the Pipecat agent runtime)
+app.get('/api/public/ai/agents/:id/background-audio.wav', async (req, res) => {
+  try {
+    if (!pool) return res.status(404).send('Not found');
+    const agentId = String(req.params.id || '').trim();
+    const token = String(req.query.token || '').trim();
+    if (!agentId || !token) return res.status(404).send('Not found');
+
+    const [rows] = await pool.execute(
+      'SELECT original_filename, size_bytes, wav_blob FROM ai_agent_background_audio WHERE agent_id = ? AND access_token = ? LIMIT 1',
+      [agentId, token]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    if (!row || !row.wav_blob) return res.status(404).send('Not found');
+
+    const buf = row.wav_blob;
+    const name = row.original_filename ? String(row.original_filename) : '';
+    const safeName = (name ? name.replace(/[^a-z0-9_.-]+/gi, '_').slice(0, 120) : 'background.wav') || 'background.wav';
+
+    res.set('Content-Type', 'audio/wav');
+    res.set('Cache-Control', 'no-store');
+    if (row.size_bytes != null) res.set('Content-Length', String(row.size_bytes));
+    res.set('Content-Disposition', `inline; filename="${safeName}"`);
+
+    return res.status(200).send(buf);
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.public.background-audio] error:', e.message || e);
+    return res.status(404).send('Not found');
   }
 });
 
@@ -3377,13 +3635,21 @@ app.post('/api/me/ai/numbers/:id/assign', requireAuth, async (req, res) => {
       }
 
       const operatorNumber = await getUserAiTransferDestination(userId);
+      const publicBaseUrl = getPublicBaseUrlFromReq(req);
+      const bgUrlResolved = await resolveAgentBackgroundAudioUrl({
+        userId,
+        agentId: agent.id,
+        fallbackUrl: agent.background_audio_url,
+        publicBaseUrl
+      });
+
       const secrets = buildPipecatSecrets({
         greeting: agent.greeting,
         prompt: agent.prompt,
         cartesiaVoiceId: agent.cartesia_voice_id,
         portalAgentActionToken: portalToken,
         operatorNumber,
-        backgroundAudioUrl: agent.background_audio_url,
+        backgroundAudioUrl: bgUrlResolved,
         backgroundAudioGain: agent.background_audio_gain
       });
       await pipecatUpsertSecretSet(agent.pipecat_secret_set, secrets, agent.pipecat_region || PIPECAT_REGION);
