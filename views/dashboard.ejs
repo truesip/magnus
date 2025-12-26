@@ -521,11 +521,11 @@
         </div>
         <div style="margin-bottom:12px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Background Sound (WAV upload)</label>
-          <input id="aiAgentBackgroundAudioFile" type="file" accept=".wav,audio/wav,audio/x-wav" style="width:100%;box-sizing:border-box">
-          <div id="aiAgentBackgroundAudioUploadInfo" class="muted" style="margin-top:6px;display:none"></div>
-          <div style="margin-top:8px;display:flex;gap:8px">
-            <button id="aiRemoveBackgroundAudioBtn" type="button" style="background:#6b7280;display:none">Remove uploaded audio</button>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input id="aiAgentBackgroundAudioFile" type="file" accept=".wav,audio/wav,audio/x-wav" style="max-width:340px;width:100%;box-sizing:border-box">
+            <button id="aiRemoveBackgroundAudioBtn" type="button" style="background:#6b7280;display:none;white-space:nowrap">Remove</button>
           </div>
+          <div id="aiAgentBackgroundAudioUploadInfo" class="muted" style="margin-top:6px;display:none"></div>
           <div class="muted" style="margin-top:6px">Upload a small WAV (max 5MB). If uploaded, it overrides the URL below.</div>
         </div>
         <div style="margin-bottom:12px">
