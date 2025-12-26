@@ -2116,7 +2116,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       try {
         const endpoint = method === 'crypto'
           ? '/api/me/nowpayments/checkout'
-          : '/api/me/square/checkout';
+          : '/api/me/card/checkout';
         const r = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2135,7 +2135,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         const label = method === 'crypto' ? 'Crypto payment' : 'Card payment';
         showLinkToast(`${label} checkout page is ready. If you are not redirected automatically, click the link below.`, 'Open payment page', j.payment_url, 'success');
 
-        // Redirect user to hosted checkout page (Square or NOWPayments)
+        // Redirect user to hosted checkout page (Card provider or NOWPayments)
         window.location.href = j.payment_url;
       } catch (e) {
         console.error('[addFunds]', e);

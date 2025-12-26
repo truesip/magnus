@@ -15,6 +15,7 @@ if (fs.existsSync(envLocalPath)) {
 const express = require('express');
 const bodyParser = require('body-parser');
 const axios = require('axios');
+const Stripe = require('stripe');
 const crypto = require('crypto');
 const https = require('https');
 const zlib = require('zlib');
@@ -795,6 +796,27 @@ async function initDb() {
     KEY idx_sq_user (user_id),
     KEY idx_sq_order (square_order_id),
     KEY idx_sq_local_order (order_id),
+    FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
+  // Stripe payments table - tracks card payments (Stripe Checkout) and credits
+  await pool.query(`CREATE TABLE IF NOT EXISTS stripe_payments (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    session_id VARCHAR(191) NOT NULL,
+    order_id VARCHAR(191) NOT NULL,
+    payment_intent_id VARCHAR(191) NULL,
+    amount DECIMAL(10,2) NOT NULL,
+    currency VARCHAR(16) NOT NULL DEFAULT 'USD',
+    status VARCHAR(64) NOT NULL DEFAULT 'pending',
+    credited TINYINT(1) NOT NULL DEFAULT 0,
+    raw_payload JSON NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_stripe_session (session_id),
+    KEY idx_stripe_user (user_id),
+    KEY idx_stripe_order (order_id),
+    KEY idx_stripe_payment_intent (payment_intent_id),
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
 
@@ -4531,7 +4553,7 @@ app.post('/api/me/nowpayments/checkout', requireAuth, async (req, res) => {
 
 // Create a Square Payment Link checkout for card payments
 // Returns a hosted Square URL where the user can pay with card.
-app.post('/api/me/square/checkout', requireAuth, async (req, res) => {
+async function handleSquareCheckout(req, res) {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     if (!SQUARE_ACCESS_TOKEN || !SQUARE_APPLICATION_ID) {
@@ -4565,8 +4587,6 @@ app.post('/api/me/square/checkout', requireAuth, async (req, res) => {
       if (DEBUG) console.warn('[square.checkout] Failed to fetch user info:', e.message || e);
     }
     const baseUser = username || (req.session.username || 'unknown');
-    const fullName = `${firstName || ''} ${lastName || ''}`.trim();
-    const displayName = fullName || baseUser;
     const descRaw = `${baseUser} - $${amountNum.toFixed(2)} - TalkUSA card refill`;
     const desc = descRaw.substring(0, 255);
 
@@ -4656,7 +4676,133 @@ app.post('/api/me/square/checkout', requireAuth, async (req, res) => {
     if (DEBUG) console.error('[square.checkout] error:', e.response?.data || e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to create card payment' });
   }
+}
+
+// Create a Stripe Checkout Session (hosted) for card payments
+// Returns a hosted Stripe URL where the user can pay with card.
+async function handleStripeCheckout(req, res) {
+  let billingId = null;
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    if (!STRIPE_SECRET_KEY) {
+      return res.status(500).json({ success: false, message: 'Card payments are not configured' });
+    }
+
+    const userId = req.session.userId;
+    const { amount } = req.body || {};
+
+    const amountNum = parseFloat(amount);
+    if (!Number.isFinite(amountNum)) {
+      return res.status(400).json({ success: false, message: 'Invalid amount' });
+    }
+    if (amountNum < CHECKOUT_MIN_AMOUNT || amountNum > CHECKOUT_MAX_AMOUNT) {
+      return res.status(400).json({ success: false, message: `Amount must be between $${CHECKOUT_MIN_AMOUNT} and $${CHECKOUT_MAX_AMOUNT}` });
+    }
+
+    // Fetch user info for description + email
+    let username = '';
+    let userEmail = '';
+    try {
+      const [rows] = await pool.execute('SELECT username, email FROM signup_users WHERE id=? LIMIT 1', [userId]);
+      if (rows && rows[0]) {
+        if (rows[0].username) username = String(rows[0].username);
+        if (rows[0].email) userEmail = String(rows[0].email);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[stripe.checkout] Failed to fetch user info:', e.message || e);
+    }
+
+    const baseUser = username || (req.session.username || 'unknown');
+    const descRaw = `${baseUser} - $${amountNum.toFixed(2)} - TalkUSA card refill`;
+    const desc = descRaw.substring(0, 255);
+
+    // Insert pending billing record (we will mark completed after successful webhook)
+    const [insertResult] = await pool.execute(
+      'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
+      [userId, amountNum, desc, 'pending']
+    );
+    billingId = insertResult.insertId;
+
+    // Build deterministic order_id encoding userId + billingId for correlation with Stripe
+    const orderId = `st-${userId}-${billingId}`;
+
+    const baseUrl = PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+    const successUrl = joinUrl(baseUrl, '/dashboard?payment=success&method=card');
+    const cancelUrl = joinUrl(baseUrl, '/dashboard?payment=cancel&method=card');
+
+    const stripe = getStripeApiClient();
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      client_reference_id: orderId,
+      ...(userEmail ? { customer_email: userEmail } : {}),
+      line_items: [
+        {
+          price_data: {
+            currency: 'usd',
+            product_data: {
+              name: desc.substring(0, 60) || 'TalkUSA refill'
+            },
+            unit_amount: Math.round(amountNum * 100)
+          },
+          quantity: 1
+        }
+      ],
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+      metadata: {
+        order_id: orderId,
+        user_id: String(userId),
+        billing_id: String(billingId)
+      }
+    });
+
+    const paymentUrl = session && session.url ? String(session.url) : null;
+    if (!paymentUrl) {
+      if (DEBUG) console.error('[stripe.checkout] Missing Checkout Session url in response:', session);
+      await pool.execute(
+        'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+        ['failed', JSON.stringify(session || {}), billingId]
+      );
+      return res.status(502).json({ success: false, message: 'Card payment provider did not return a checkout URL' });
+    }
+
+    // Record Stripe checkout session for tracking/idempotency
+    try {
+      await pool.execute(
+        'INSERT INTO stripe_payments (user_id, session_id, order_id, payment_intent_id, amount, currency, status, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)',
+        [userId, String(session.id || ''), String(orderId), session.payment_intent ? String(session.payment_intent) : null, amountNum, 'USD', 'pending', JSON.stringify(session)]
+      );
+    } catch (e) {
+      if (DEBUG) console.warn('[stripe.checkout] Failed to insert stripe_payments row:', e.message || e);
+      // Do not fail the checkout creation if this insert fails; webhook can still be correlated via order_id.
+    }
+
+    return res.json({ success: true, payment_url: paymentUrl });
+  } catch (e) {
+    if (billingId) {
+      try {
+        await pool.execute(
+          'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+          ['failed', String(e?.message || e), billingId]
+        );
+      } catch {}
+    }
+    if (DEBUG) console.error('[stripe.checkout] error:', e?.raw?.message || e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to create card payment' });
+  }
+}
+
+// Provider switch: choose Square or Stripe for card checkout
+app.post('/api/me/card/checkout', requireAuth, async (req, res) => {
+  const provider = String(process.env.CARD_PAYMENT_PROVIDER || CARD_PAYMENT_PROVIDER || 'square').trim().toLowerCase();
+  if (provider === 'stripe') return handleStripeCheckout(req, res);
+  if (provider === 'square') return handleSquareCheckout(req, res);
+  return res.status(500).json({ success: false, message: 'Card payment provider is not configured' });
 });
+
+// Provider-specific endpoints (kept for compatibility)
+app.post('/api/me/square/checkout', requireAuth, handleSquareCheckout);
+app.post('/api/me/stripe/checkout', requireAuth, handleStripeCheckout);
 
 // NOWPayments IPN webhook (server-to-server callback)
 app.post('/nowpayments/ipn', async (req, res) => {
@@ -5112,6 +5258,259 @@ app.post('/webhooks/square', async (req, res) => {
     return res.status(200).json({ success: true });
   } catch (e) {
     if (DEBUG) console.error('[square.webhook] Unhandled error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Webhook handling failed' });
+  }
+});
+
+// Stripe webhook for card payments (Checkout Session)
+// Configure in Stripe dashboard to send at least:
+// - checkout.session.completed
+// - checkout.session.expired (optional)
+app.post('/webhooks/stripe', async (req, res) => {
+  try {
+    if (!pool) {
+      return res.status(500).json({ success: false, message: 'Database not configured' });
+    }
+
+    const raw = req.rawBody;
+    if (!raw || !Buffer.isBuffer(raw)) {
+      if (DEBUG) console.warn('[stripe.webhook] Missing rawBody');
+      return res.status(400).json({ success: false, message: 'Invalid payload' });
+    }
+
+    const webhookSecret = String(STRIPE_WEBHOOK_SECRET || '').trim();
+    let event = null;
+
+    if (webhookSecret) {
+      const sig = req.headers['stripe-signature'];
+      if (!sig) {
+        if (DEBUG) console.warn('[stripe.webhook] Missing stripe-signature header');
+        return res.status(400).json({ success: false, message: 'Missing signature' });
+      }
+      try {
+        const stripe = getStripeWebhookClient();
+        event = stripe.webhooks.constructEvent(raw, String(sig), webhookSecret);
+      } catch (e) {
+        if (DEBUG) console.warn('[stripe.webhook] Signature verification failed:', e?.message || e);
+        return res.status(400).json({ success: false, message: 'Invalid signature' });
+      }
+    } else {
+      if (DEBUG) console.warn('[stripe.webhook] STRIPE_WEBHOOK_SECRET not set; skipping signature verification');
+      try {
+        event = JSON.parse(raw.toString('utf8'));
+      } catch (e) {
+        return res.status(400).json({ success: false, message: 'Invalid JSON' });
+      }
+    }
+
+    const type = String(event?.type || '').toLowerCase();
+    if (!type.startsWith('checkout.session.')) {
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const session = event?.data?.object || null;
+    if (!session || typeof session !== 'object') {
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const sessionId = String(session.id || '').trim();
+    const orderId = String(session.client_reference_id || session.metadata?.order_id || '').trim();
+    const paymentStatus = String(session.payment_status || '').toLowerCase();
+    const paymentIntentId = session.payment_intent ? String(session.payment_intent) : null;
+
+    const payloadJson = JSON.stringify(event);
+
+    // Best-effort: save latest event payload for debugging
+    if (sessionId) {
+      try {
+        await pool.execute(
+          'UPDATE stripe_payments SET status = ?, payment_intent_id = COALESCE(?, payment_intent_id), raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ? LIMIT 1',
+          [type, paymentIntentId, payloadJson, sessionId]
+        );
+      } catch {}
+    }
+
+    if (!sessionId || !orderId) {
+      if (DEBUG) console.warn('[stripe.webhook] Missing sessionId/orderId:', { sessionId, orderId });
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const m = /^st-(\d+)-(\d+)$/.exec(orderId);
+    if (!m) {
+      if (DEBUG) console.warn('[stripe.webhook] order_id does not match expected pattern:', orderId);
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const userId = Number(m[1]);
+    const billingId = Number(m[2]);
+
+    // Terminal failure: session expired
+    if (type === 'checkout.session.expired') {
+      try {
+        const [bRows] = await pool.execute(
+          'SELECT id, user_id, status FROM billing_history WHERE id = ? LIMIT 1',
+          [billingId]
+        );
+        const bRow = bRows && bRows[0] ? bRows[0] : null;
+        if (bRow && String(bRow.user_id) === String(userId) && bRow.status !== 'completed') {
+          await pool.execute(
+            'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+            ['failed', 'Stripe status: expired', billingId]
+          );
+        }
+      } catch {}
+
+      try {
+        await pool.execute(
+          'UPDATE stripe_payments SET status = ?, credited = 0, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ? LIMIT 1',
+          ['EXPIRED', payloadJson, sessionId]
+        );
+      } catch {}
+
+      return res.status(200).json({ success: true, failed: true });
+    }
+
+    // Only credit on completed + paid
+    if (type !== 'checkout.session.completed') {
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    if (paymentStatus !== 'paid') {
+      if (DEBUG) console.log('[stripe.webhook] Session completed but not paid yet:', { sessionId, paymentStatus });
+      return res.status(200).json({ success: true, pending: true });
+    }
+
+    // Fetch billing_history row
+    const [billingRows] = await pool.execute(
+      'SELECT id, user_id, amount, description, status FROM billing_history WHERE id = ? LIMIT 1',
+      [billingId]
+    );
+    const billing = billingRows && billingRows[0] ? billingRows[0] : null;
+    if (!billing || String(billing.user_id) !== String(userId)) {
+      if (DEBUG) console.warn('[stripe.webhook] Billing row not found or user mismatch for order:', { orderId, userId, billingId });
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    // Acquire a per-session lock to prevent double-crediting.
+    let lockAcquired = false;
+    try {
+      const [lockResult] = await pool.execute(
+        'UPDATE stripe_payments SET status = ?, credited = 2, payment_intent_id = COALESCE(?, payment_intent_id), raw_payload = ? WHERE session_id = ? AND credited = 0',
+        ['PROCESSING', paymentIntentId, payloadJson, sessionId]
+      );
+      lockAcquired = !!(lockResult && lockResult.affectedRows > 0);
+    } catch (e) {
+      if (DEBUG) console.warn('[stripe.webhook] Failed to acquire processing lock:', e.message || e);
+    }
+
+    if (!lockAcquired) {
+      // If the session row was not inserted at checkout time, insert a lock row now.
+      try {
+        await pool.execute(
+          'INSERT INTO stripe_payments (user_id, session_id, order_id, payment_intent_id, amount, currency, status, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, 2, ?)',
+          [userId, sessionId, orderId, paymentIntentId, Number(billing.amount || 0), 'USD', 'PROCESSING', payloadJson]
+        );
+        lockAcquired = true;
+      } catch (e) {
+        if (e?.code !== 'ER_DUP_ENTRY' && DEBUG) console.warn('[stripe.webhook] Failed to insert lock row:', e.message || e);
+      }
+    }
+
+    if (!lockAcquired) {
+      // Someone else has already processed or is processing.
+      try {
+        const [freshRows] = await pool.execute(
+          'SELECT credited FROM stripe_payments WHERE session_id = ? LIMIT 1',
+          [sessionId]
+        );
+        const creditedVal = freshRows && freshRows[0] ? Number(freshRows[0].credited || 0) : 0;
+        if (creditedVal === 1) {
+          return res.status(200).json({ success: true, alreadyCredited: true });
+        }
+        return res.status(200).json({ success: true, pending: true, duplicate: true });
+      } catch {
+        return res.status(200).json({ success: true, pending: true });
+      }
+    }
+
+    // If billing row is already completed, treat this as already credited.
+    if (billing.status === 'completed') {
+      try {
+        await pool.execute(
+          'UPDATE stripe_payments SET status = ?, credited = 1, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND credited <> 1',
+          ['COMPLETED', payloadJson, sessionId]
+        );
+      } catch {}
+      return res.status(200).json({ success: true, alreadyCredited: true });
+    }
+
+    // Fetch user row for MagnusBilling id and email
+    const [userRows] = await pool.execute(
+      'SELECT id, magnus_user_id, username, firstname, lastname, email FROM signup_users WHERE id = ? LIMIT 1',
+      [userId]
+    );
+    const user = userRows && userRows[0] ? userRows[0] : null;
+    if (!user) {
+      try { await pool.execute('UPDATE stripe_payments SET credited = 0, status = ? WHERE session_id = ? AND credited = 2', ['FAILED', sessionId]); } catch {}
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const magnusUserId = String(user.magnus_user_id || '').trim();
+    if (!magnusUserId) {
+      try { await pool.execute('UPDATE stripe_payments SET credited = 0, status = ? WHERE session_id = ? AND credited = 2', ['FAILED', sessionId]); } catch {}
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const nameBase = user.username || '';
+    const fullName = `${user.firstname || ''} ${user.lastname || ''}`.trim();
+    const displayName = fullName || nameBase || 'Customer';
+    const userEmail = user.email || '';
+
+    // Use amount from billing_history as source of truth
+    const amountNum = Number(billing.amount || 0);
+    const desc = billing.description || `TalkUSA card refill (${orderId})`;
+
+    const httpsAgent = magnusBillingAgent;
+    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+
+    const result = await applyMagnusRefill({
+      userId,
+      magnusUserId,
+      amountNum,
+      desc,
+      displayName,
+      userEmail,
+      httpsAgent,
+      hostHeader,
+      billingId
+    });
+
+    if (!result.success) {
+      if (DEBUG) console.error('[stripe.webhook] Failed to credit MagnusBilling for order:', { orderId, error: result.error });
+      // Release the processing lock so a future retry can attempt again.
+      try {
+        await pool.execute(
+          'UPDATE stripe_payments SET status = ?, credited = 0, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND credited = 2',
+          ['FAILED', payloadJson, sessionId]
+        );
+      } catch {}
+      return res.status(500).json({ success: false, message: 'Failed to credit MagnusBilling' });
+    }
+
+    // Mark as credited
+    try {
+      await pool.execute(
+        'UPDATE stripe_payments SET status = ?, payment_intent_id = COALESCE(?, payment_intent_id), credited = 1, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ?',
+        ['COMPLETED', paymentIntentId, payloadJson, sessionId]
+      );
+    } catch (e) {
+      if (DEBUG) console.warn('[stripe.webhook] Failed to mark payment as credited:', e.message || e);
+    }
+
+    if (DEBUG) console.log('[stripe.webhook] Successfully credited order:', { orderId, billingId, userId });
+    return res.status(200).json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[stripe.webhook] Unhandled error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Webhook handling failed' });
   }
 });
@@ -6548,6 +6947,33 @@ const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY || '';
 const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || '';
 const NOWPAYMENTS_API_URL = process.env.NOWPAYMENTS_API_URL || 'https://api.nowpayments.io/v1';
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || '';
+
+// Card payment provider selector
+// - square (default): Square Payment Links
+// - stripe: Stripe hosted Checkout
+const CARD_PAYMENT_PROVIDER = String(process.env.CARD_PAYMENT_PROVIDER || 'square').trim().toLowerCase();
+
+// Stripe configuration (hosted Checkout)
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
+
+let stripeApiClient;
+function getStripeApiClient() {
+  if (stripeApiClient) return stripeApiClient;
+  const key = String(STRIPE_SECRET_KEY || '').trim();
+  if (!key) throw new Error('STRIPE_SECRET_KEY not configured');
+  stripeApiClient = Stripe(key);
+  return stripeApiClient;
+}
+
+let stripeWebhookClient;
+function getStripeWebhookClient() {
+  if (stripeWebhookClient) return stripeWebhookClient;
+  // Webhook signature verification does not require live API calls; use a dummy key if unset.
+  const key = String(STRIPE_SECRET_KEY || '').trim() || 'sk_test_dummy';
+  stripeWebhookClient = Stripe(key);
+  return stripeWebhookClient;
+}
 
 function nowpaymentsAxios() {
   if (!NOWPAYMENTS_API_KEY) {
