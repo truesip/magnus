@@ -58,6 +58,11 @@
     #callsChartContainer{margin-top:8px;margin-bottom:16px;background:#ffffff;border-radius:12px;border:1px solid #e5e7eb;padding:12px}
     #callsChart{width:100%;max-height:220px}
 
+    /* AI subtabs */
+    .ai-subtabs{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 14px 0}
+    .ai-subtab{background:#e5e7eb !important;color:#111827 !important;border:1px solid #d1d5db !important;border-radius:999px !important;padding:6px 10px !important;font-size:12px !important}
+    .ai-subtab.active{background:#4f46e5 !important;color:#ffffff !important;border-color:#4338ca !important}
+
     /* Mobile optimizations */
     @media (max-width: 768px) {
       header{flex-wrap:wrap;align-items:flex-start;}
@@ -160,6 +165,7 @@
             <div class="kpi-card">
               <div class="kpi-label">Total DIDs</div>
               <div class="kpi-value" id="kpiTotalDids">–</div>
+              <div class="kpi-sub" id="kpiTotalDidsSub"></div>
             </div>
             <div class="kpi-card">
               <div class="kpi-label">Inbound Calls</div>
@@ -175,6 +181,11 @@
               <div class="kpi-label">SIP Accounts</div>
               <div class="kpi-value" id="kpiSipTotal">–</div>
               <div class="kpi-sub" id="kpiSipOnline"></div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-label">AI Agent</div>
+              <div class="kpi-value" id="kpiAiAgents">–</div>
+              <div class="kpi-sub"><span id="kpiAiEmailsSent">–</span> emails sent</div>
             </div>
           </div>
           <div id="callsChartContainer">
@@ -299,72 +310,82 @@
       <section id="view-ai" style="display:none">
         <h2>AI Agent</h2>
         <div class="muted" style="margin-bottom:10px">Create an AI voice agent and assign a phone number for inbound calls.</div>
-        <div style="display:flex;gap:16px;flex-wrap:wrap">
-          <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-              <h3 style="margin:0">Agents <span id="aiAgentsCount" class="muted"></span></h3>
-              <div style="margin-left:auto"></div>
-              <button id="createAiAgentBtn" style="background:#4f46e5">➕ Create Agent</button>
-            </div>
-            <table id="ai-agents-table" style="display:none">
-              <thead><tr><th>Name</th><th>Voice</th><th>Greeting</th><th>Number</th><th>Actions</th></tr></thead>
-              <tbody></tbody>
-            </table>
-            <div id="ai-agents-empty" class="muted">Loading…</div>
-          </div>
 
-          <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-              <h3 style="margin:0">Phone Numbers <span id="aiNumbersCount" class="muted"></span></h3>
-              <div style="margin-left:auto"></div>
-              <button id="buyAiNumberBtn" style="background:#059669">➕ Buy Number</button>
+        <div class="ai-subtabs">
+          <button id="ai-subtab-agents" type="button" class="ai-subtab active">Agents</button>
+          <button id="ai-subtab-tools" type="button" class="ai-subtab">Tools</button>
+        </div>
+
+        <div id="ai-pane-agents">
+          <div style="display:flex;gap:16px;flex-wrap:wrap">
+            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                <h3 style="margin:0">Agents <span id="aiAgentsCount" class="muted"></span></h3>
+                <div style="margin-left:auto"></div>
+                <button id="createAiAgentBtn" style="background:#4f46e5">➕ Create Agent</button>
+              </div>
+              <table id="ai-agents-table" style="display:none">
+                <thead><tr><th>Name</th><th>Voice</th><th>Greeting</th><th>Number</th><th>Actions</th></tr></thead>
+                <tbody></tbody>
+              </table>
+              <div id="ai-agents-empty" class="muted">Loading…</div>
             </div>
-            <table id="ai-numbers-table" style="display:none">
-              <thead><tr><th>Number</th><th>Assigned Agent</th><th>Actions</th></tr></thead>
-              <tbody></tbody>
-            </table>
-            <div id="ai-numbers-empty" class="muted">Loading…</div>
+
+            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                <h3 style="margin:0">Phone Numbers <span id="aiNumbersCount" class="muted"></span></h3>
+                <div style="margin-left:auto"></div>
+                <button id="buyAiNumberBtn" style="background:#059669">➕ Buy Number</button>
+              </div>
+              <table id="ai-numbers-table" style="display:none">
+                <thead><tr><th>Number</th><th>Assigned Agent</th><th>Actions</th></tr></thead>
+                <tbody></tbody>
+              </table>
+              <div id="ai-numbers-empty" class="muted">Loading…</div>
+            </div>
           </div>
         </div>
 
-        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:16px">
-          <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-            <h3 style="margin:0 0 10px 0">Email (SMTP)</h3>
-            <div class="muted" style="margin-bottom:10px">Used when your AI agent emails documents to callers.</div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-              <input id="smtpHost" type="text" placeholder="SMTP host (e.g. smtp.gmail.com)">
-              <input id="smtpPort" type="number" placeholder="Port (e.g. 587)">
-              <label style="display:flex;align-items:center;gap:6px;font-size:13px">
-                <input id="smtpSecure" type="checkbox"> Use SSL (secure)
-              </label>
-              <div></div>
-              <input id="smtpUsername" type="text" placeholder="Username">
-              <input id="smtpPassword" type="password" placeholder="Password (leave blank to keep current)">
-              <input id="smtpFromEmail" type="email" placeholder="From email (e.g. you@domain.com)">
-              <input id="smtpFromName" type="text" placeholder="From name (optional)">
-              <input id="smtpReplyTo" type="email" placeholder="Reply-to (optional)">
-              <input id="smtpTestToEmail" type="email" placeholder="Test recipient (optional)">
+        <div id="ai-pane-tools" style="display:none">
+          <div style="display:flex;gap:16px;flex-wrap:wrap">
+            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+              <h3 style="margin:0 0 10px 0">Email (SMTP)</h3>
+              <div class="muted" style="margin-bottom:10px">Used when your AI agent emails documents to callers.</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                <input id="smtpHost" type="text" placeholder="SMTP host (e.g. smtp.gmail.com)">
+                <input id="smtpPort" type="number" placeholder="Port (e.g. 587)">
+                <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+                  <input id="smtpSecure" type="checkbox"> Use SSL (secure)
+                </label>
+                <div></div>
+                <input id="smtpUsername" type="text" placeholder="Username">
+                <input id="smtpPassword" type="password" placeholder="Password (leave blank to keep current)">
+                <input id="smtpFromEmail" type="email" placeholder="From email (e.g. you@domain.com)">
+                <input id="smtpFromName" type="text" placeholder="From name (optional)">
+                <input id="smtpReplyTo" type="email" placeholder="Reply-to (optional)">
+                <input id="smtpTestToEmail" type="email" placeholder="Test recipient (optional)">
+              </div>
+              <div class="toolbar" style="margin-top:10px">
+                <button id="saveSmtpBtn">Save SMTP</button>
+                <button id="testSmtpBtn" style="background:#6b7280">Send Test Email</button>
+                <span id="smtpStatus" class="muted" style="margin-left:auto"></span>
+              </div>
             </div>
-            <div class="toolbar" style="margin-top:10px">
-              <button id="saveSmtpBtn">Save SMTP</button>
-              <button id="testSmtpBtn" style="background:#6b7280">Send Test Email</button>
-              <span id="smtpStatus" class="muted" style="margin-left:auto"></span>
-            </div>
-          </div>
 
-          <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-            <h3 style="margin:0 0 10px 0">Document Templates</h3>
-            <div class="muted" style="margin-bottom:10px">Upload a .docx with placeholders like <code>[[Name]]</code> and <code>[[Address]]</code>.</div>
-            <div class="toolbar" style="flex-wrap:wrap">
-              <input id="docTemplateName" type="text" placeholder="Template name" style="flex:1;min-width:160px">
-              <input id="docTemplateFile" type="file" accept=".docx">
-              <button id="uploadDocTemplateBtn" style="background:#4f46e5">Upload</button>
+            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+              <h3 style="margin:0 0 10px 0">Document Templates</h3>
+              <div class="muted" style="margin-bottom:10px">Upload a .docx with placeholders like <code>[[Name]]</code> and <code>[[Address]]</code>.</div>
+              <div class="toolbar" style="flex-wrap:wrap">
+                <input id="docTemplateName" type="text" placeholder="Template name" style="flex:1;min-width:160px">
+                <input id="docTemplateFile" type="file" accept=".docx">
+                <button id="uploadDocTemplateBtn" style="background:#4f46e5">Upload</button>
+              </div>
+              <table id="ai-doc-templates-table" style="display:none">
+                <thead><tr><th>Name</th><th>File</th><th>Updated</th><th>Actions</th></tr></thead>
+                <tbody></tbody>
+              </table>
+              <div id="ai-doc-templates-empty" class="muted">Loading…</div>
             </div>
-            <table id="ai-doc-templates-table" style="display:none">
-              <thead><tr><th>Name</th><th>File</th><th>Updated</th><th>Actions</th></tr></thead>
-              <tbody></tbody>
-            </table>
-            <div id="ai-doc-templates-empty" class="muted">Loading…</div>
           </div>
         </div>
       </section>
@@ -520,6 +541,43 @@
     function activate(name){
       Object.keys(tabs).forEach(k=>{ tabs[k].classList.toggle('active',k===name); views[k].style.display = (k===name?'block':'none'); });
     }
+
+    // AI submenu tabs
+    const aiSubtabs = {
+      agents: document.getElementById('ai-subtab-agents'),
+      tools: document.getElementById('ai-subtab-tools'),
+    };
+    const aiPanes = {
+      agents: document.getElementById('ai-pane-agents'),
+      tools: document.getElementById('ai-pane-tools'),
+    };
+
+    function activateAiSubtab(name){
+      if (!aiSubtabs.agents || !aiSubtabs.tools || !aiPanes.agents || !aiPanes.tools) return;
+      const n = String(name || '').toLowerCase();
+      const active = (n === 'tools') ? 'tools' : 'agents';
+      aiSubtabs.agents.classList.toggle('active', active === 'agents');
+      aiSubtabs.tools.classList.toggle('active', active === 'tools');
+      aiPanes.agents.style.display = active === 'agents' ? 'block' : 'none';
+      aiPanes.tools.style.display = active === 'tools' ? 'block' : 'none';
+    }
+
+    if (aiSubtabs.agents) {
+      aiSubtabs.agents.addEventListener('click', (e) => {
+        e.preventDefault();
+        activateAiSubtab('agents');
+        loadAiAgents();
+        loadAiNumbers();
+      });
+    }
+    if (aiSubtabs.tools) {
+      aiSubtabs.tools.addEventListener('click', (e) => {
+        e.preventDefault();
+        activateAiSubtab('tools');
+        loadSmtpSettings();
+        loadDocTemplates();
+      });
+    }
     tabs.overview.addEventListener('click',e=>{e.preventDefault();activate('overview');loadStats();});
     tabs.profile.addEventListener('click',e=>{e.preventDefault();activate('profile');loadProfile();});
     tabs.sip.addEventListener('click',e=>{e.preventDefault();activate('sip');sipPage=0;loadSip();});
@@ -527,7 +585,7 @@
     tabs.billing.addEventListener('click',e=>{e.preventDefault();activate('billing');billingPage=0;loadBillingHistory();});
     tabs.buydid.addEventListener('click',e=>{e.preventDefault();activate('buydid');loadCountries();});
     tabs.mydids.addEventListener('click',e=>{e.preventDefault();activate('mydids');mydidsPage=0;loadMyDids();});
-    tabs.ai.addEventListener('click',e=>{e.preventDefault();activate('ai');loadAiAgents();loadAiNumbers();loadSmtpSettings();loadDocTemplates();});
+    tabs.ai.addEventListener('click',e=>{e.preventDefault();activate('ai');activateAiSubtab('agents');loadAiAgents();loadAiNumbers();});
     tabs.cdr.addEventListener('click',e=>{e.preventDefault();activate('cdr');cdrPage=0;loadCdrDidOptions();loadCdr();});
 
     function grabRows(payload){
@@ -1199,16 +1257,28 @@
         const k = j.kpis || {};
         const range = j.range || {};
         const elTotalDids = document.getElementById('kpiTotalDids');
+        const elTotalDidsSub = document.getElementById('kpiTotalDidsSub');
         const elInbound = document.getElementById('kpiInbound');
         const elOutbound = document.getElementById('kpiOutbound');
         const elInboundToday = document.getElementById('kpiInboundToday');
         const elOutboundToday = document.getElementById('kpiOutboundToday');
         const elSipTotal = document.getElementById('kpiSipTotal');
         const elSipOnline = document.getElementById('kpiSipOnline');
+        const elAiAgents = document.getElementById('kpiAiAgents');
+        const elAiEmailsSent = document.getElementById('kpiAiEmailsSent');
         const elRange = document.getElementById('statsRangeText');
         if (elTotalDids) elTotalDids.textContent = (k.totalDids != null ? String(k.totalDids) : '–');
+        if (elTotalDidsSub) {
+          const didww = (k.didwwDidCount != null ? Number(k.didwwDidCount) : null);
+          const ai = (k.aiDidCount != null ? Number(k.aiDidCount) : null);
+          if (didww != null && ai != null) elTotalDidsSub.textContent = `Standard: ${didww} • AI: ${ai}`;
+          else if (ai != null) elTotalDidsSub.textContent = `AI: ${ai}`;
+          else elTotalDidsSub.textContent = '';
+        }
         if (elInbound) elInbound.textContent = (k.inboundCount != null ? String(k.inboundCount) : '–');
         if (elOutbound) elOutbound.textContent = (k.outboundCount != null ? String(k.outboundCount) : '–');
+        if (elAiAgents) elAiAgents.textContent = (k.aiAgentCount != null ? String(k.aiAgentCount) : '–');
+        if (elAiEmailsSent) elAiEmailsSent.textContent = (k.aiEmailSentCount != null ? String(k.aiEmailSentCount) : '–');
         if (elInboundToday) {
           if (k.inboundToday != null) elInboundToday.textContent = `Today: ${k.inboundToday}`;
           else elInboundToday.textContent = '';
@@ -1507,9 +1577,12 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           const priceNum = c.price != null ? Number(c.price) : null;
           const priceStr = priceNum != null ? `$${priceNum.toFixed(4)}` : '';
           const statusRaw = (c.status != null ? String(c.status) : '').trim();
-          const statusLabel = statusRaw
+          let statusLabel = statusRaw
             ? statusRaw.replace(/_/g, ' ').replace(/(^|\s)\S/g, m => m.toUpperCase())
             : 'Completed';
+
+          // Branding: don't expose internal vendor name ("Pipecat") in customer UI.
+          statusLabel = statusLabel.replace(/^Pipecat\b/i, 'AI Agent');
 
           const tr = document.createElement('tr');
           tr.innerHTML =

@@ -3939,16 +3939,52 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
       if (!to) to = rng.to;
     }
 
-    // Total DIDs for this user
-    let totalDids = 0;
+    // Total DIDs for this user (DIDWW + AI numbers)
+    let didwwDidCount = 0;
     try {
       const [[row]] = await pool.execute(
         'SELECT COUNT(*) AS total FROM user_dids WHERE user_id = ?',
         [userId]
       );
-      totalDids = Number(row?.total || 0);
+      didwwDidCount = Number(row?.total || 0);
     } catch (e) {
       if (DEBUG) console.warn('[me.stats.dids] failed:', e.message || e);
+    }
+
+    let aiDidCount = 0;
+    try {
+      const [[row]] = await pool.execute(
+        'SELECT COUNT(*) AS total FROM ai_numbers WHERE user_id = ?',
+        [userId]
+      );
+      aiDidCount = Number(row?.total || 0);
+    } catch (e) {
+      if (DEBUG) console.warn('[me.stats.ai.dids] failed:', e.message || e);
+    }
+
+    const totalDids = didwwDidCount + aiDidCount;
+
+    // AI stats: agent count + emails sent
+    let aiAgentCount = 0;
+    try {
+      const [[row]] = await pool.execute(
+        'SELECT COUNT(*) AS total FROM ai_agents WHERE user_id = ?',
+        [userId]
+      );
+      aiAgentCount = Number(row?.total || 0);
+    } catch (e) {
+      if (DEBUG) console.warn('[me.stats.ai.agents] failed:', e.message || e);
+    }
+
+    let aiEmailSentCount = 0;
+    try {
+      const [[row]] = await pool.execute(
+        "SELECT COUNT(*) AS total FROM ai_email_sends WHERE user_id = ? AND status = 'completed'",
+        [userId]
+      );
+      aiEmailSentCount = Number(row?.total || 0);
+    } catch (e) {
+      if (DEBUG) console.warn('[me.stats.ai.emails] failed:', e.message || e);
     }
 
     // Inbound calls grouped by day from user_did_cdrs (DIDWW) + ai_call_logs (Daily/Pipecat)
@@ -4061,12 +4097,16 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
       range: { from, to },
       kpis: {
         totalDids,
+        didwwDidCount,
+        aiDidCount,
         inboundCount,
         outboundCount,
         inboundToday,
         outboundToday,
         totalSip,
-        onlineSip
+        onlineSip,
+        aiAgentCount,
+        aiEmailSentCount
       },
       series: {
         callsByDay
