@@ -828,6 +828,8 @@ async function initDb() {
     greeting TEXT NULL,
     prompt TEXT NULL,
     cartesia_voice_id VARCHAR(191) NULL,
+    background_audio_url VARCHAR(512) NULL,
+    background_audio_gain DECIMAL(4,3) NULL,
     pipecat_agent_name VARCHAR(191) NOT NULL,
     pipecat_secret_set VARCHAR(191) NOT NULL,
     pipecat_region VARCHAR(64) NULL,
@@ -1111,6 +1113,33 @@ async function initDb() {
       }
     } catch (e) {
       if (DEBUG) console.warn('[schema] ai_agents.idx_ai_agents_default_template check failed', e.message || e);
+    }
+
+    // Ensure ai_agents background audio settings exist (per-agent ambience while bot speaks)
+    try {
+      const [hasBgUrl] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_agents' AND column_name='background_audio_url' LIMIT 1",
+        [dbName]
+      );
+      if (!hasBgUrl || !hasBgUrl.length) {
+        await pool.query('ALTER TABLE ai_agents ADD COLUMN background_audio_url VARCHAR(512) NULL AFTER cartesia_voice_id');
+        if (DEBUG) console.log('[schema] Added ai_agents.background_audio_url column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_agents.background_audio_url check failed', e.message || e);
+    }
+
+    try {
+      const [hasBgGain] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_agents' AND column_name='background_audio_gain' LIMIT 1",
+        [dbName]
+      );
+      if (!hasBgGain || !hasBgGain.length) {
+        await pool.query('ALTER TABLE ai_agents ADD COLUMN background_audio_gain DECIMAL(4,3) NULL AFTER background_audio_url');
+        if (DEBUG) console.log('[schema] Added ai_agents.background_audio_gain column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_agents.background_audio_gain check failed', e.message || e);
     }
 
     // Ensure ai_call_logs.time_connect exists (Daily dial-in connected timestamp)
@@ -2368,7 +2397,9 @@ async function syncUserAiTransferDestinationToAgents({ userId, transferToNumber 
       prompt: agent.prompt,
       cartesiaVoiceId: agent.cartesia_voice_id,
       portalAgentActionToken: portalToken,
-      operatorNumber: transferVal
+      operatorNumber: transferVal,
+      backgroundAudioUrl: agent.background_audio_url,
+      backgroundAudioGain: agent.background_audio_gain
     });
 
     await pipecatUpsertSecretSet(agent.pipecat_secret_set, secrets, agent.pipecat_region || PIPECAT_REGION);
@@ -2431,7 +2462,7 @@ function assertConfiguredOrThrow(name, val) {
   if (!val) throw new Error(`${name} not configured`);
 }
 
-function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl, portalAgentActionToken, operatorNumber }) {
+function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl, portalAgentActionToken, operatorNumber, backgroundAudioUrl, backgroundAudioGain }) {
   const deepgram = process.env.DEEPGRAM_API_KEY || '';
   const cartesia = process.env.CARTESIA_API_KEY || '';
   const xai = process.env.XAI_API_KEY || '';
@@ -2451,6 +2482,9 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl,
     DAILY_API_KEY: daily,
     // Used by the agent runtime for cold call transfers.
     OPERATOR_NUMBER: String(operatorNumber || ''),
+    // Used by the agent runtime to add ambience while the bot speaks.
+    BACKGROUND_AUDIO_URL: String(backgroundAudioUrl || ''),
+    BACKGROUND_AUDIO_GAIN: (backgroundAudioGain == null ? '' : String(backgroundAudioGain)),
     AGENT_GREETING: String(greeting || ''),
     AGENT_PROMPT: String(prompt || '')
   };
@@ -2814,7 +2848,9 @@ app.get('/api/me/ai/agents', requireAuth, async (req, res) => {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     const userId = req.session.userId;
     const [rows] = await pool.execute(
-      `SELECT a.id, a.display_name, a.greeting, a.prompt, a.cartesia_voice_id, a.pipecat_agent_name, a.pipecat_region,
+      `SELECT a.id, a.display_name, a.greeting, a.prompt, a.cartesia_voice_id,
+              a.background_audio_url, a.background_audio_gain,
+              a.pipecat_agent_name, a.pipecat_region,
               a.default_doc_template_id,
               a.created_at, a.updated_at,
               n.id AS number_id, n.phone_number AS phone_number
@@ -2836,10 +2872,58 @@ app.post('/api/me/ai/agents', requireAuth, async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     const userId = req.session.userId;
-    const { display_name, greeting, prompt, cartesia_voice_id, cartesiaVoiceId, default_doc_template_id, defaultDocTemplateId } = req.body || {};
+    const {
+      display_name,
+      greeting,
+      prompt,
+      cartesia_voice_id,
+      cartesiaVoiceId,
+      default_doc_template_id,
+      defaultDocTemplateId,
+      background_audio_url,
+      backgroundAudioUrl,
+      background_audio_gain,
+      backgroundAudioGain
+    } = req.body || {};
+
     const name = String(display_name || '').trim();
     const voiceIdRaw = (cartesia_voice_id != null ? cartesia_voice_id : cartesiaVoiceId);
     const cartesiaVoiceIdClean = (voiceIdRaw != null ? String(voiceIdRaw) : '').trim();
+
+    // Optional: per-agent background ambience
+    const bgUrlRaw = (background_audio_url != null ? background_audio_url : backgroundAudioUrl);
+    let bgUrl = (bgUrlRaw != null ? String(bgUrlRaw) : '').trim();
+    if (bgUrl) {
+      try {
+        const u = new URL(bgUrl);
+        if (u.protocol !== 'https:') {
+          return res.status(400).json({ success: false, message: 'Background audio URL must start with https://' });
+        }
+        bgUrl = u.toString();
+      } catch {
+        return res.status(400).json({ success: false, message: 'Background audio URL is invalid' });
+      }
+      if (bgUrl.length > 512) {
+        return res.status(400).json({ success: false, message: 'Background audio URL is too long' });
+      }
+    }
+
+    const bgGainRaw = (background_audio_gain != null ? background_audio_gain : backgroundAudioGain);
+    let bgGain = null;
+    if (bgGainRaw != null && String(bgGainRaw).trim()) {
+      const g = parseFloat(String(bgGainRaw));
+      if (!Number.isFinite(g)) {
+        return res.status(400).json({ success: false, message: 'Background audio gain must be a number' });
+      }
+      if (g < 0 || g > 0.2) {
+        return res.status(400).json({ success: false, message: 'Background audio gain must be between 0.0 and 0.2' });
+      }
+      bgGain = g;
+    } else if (bgUrl) {
+      // Default gain when a URL is provided.
+      bgGain = 0.06;
+    }
+
     if (!name) return res.status(400).json({ success: false, message: 'display_name is required' });
 
     // Optional: default document template
@@ -2900,7 +2984,9 @@ app.post('/api/me/ai/agents', requireAuth, async (req, res) => {
         prompt,
         cartesiaVoiceId: cartesiaVoiceIdClean,
         portalAgentActionToken: actionTokenPlain,
-        operatorNumber
+        operatorNumber,
+        backgroundAudioUrl: bgUrl,
+        backgroundAudioGain: bgGain
       });
       await pipecatUpsertSecretSet(secretSetName, secrets, PIPECAT_REGION);
       await pipecatCreateAgent({ agentName, secretSetName });
@@ -2913,13 +2999,15 @@ app.post('/api/me/ai/agents', requireAuth, async (req, res) => {
 
     // Persist
     const [ins] = await pool.execute(
-      'INSERT INTO ai_agents (user_id, display_name, greeting, prompt, cartesia_voice_id, pipecat_agent_name, pipecat_secret_set, pipecat_region, agent_action_token_hash, agent_action_token_enc, agent_action_token_iv, agent_action_token_tag, default_doc_template_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      'INSERT INTO ai_agents (user_id, display_name, greeting, prompt, cartesia_voice_id, background_audio_url, background_audio_gain, pipecat_agent_name, pipecat_secret_set, pipecat_region, agent_action_token_hash, agent_action_token_enc, agent_action_token_iv, agent_action_token_tag, default_doc_template_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
       [
         userId,
         name,
         String(greeting || ''),
         String(prompt || ''),
         cartesiaVoiceIdClean || null,
+        bgUrl || null,
+        bgGain,
         agentName,
         secretSetName,
         PIPECAT_REGION,
@@ -2956,7 +3044,19 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     const userId = req.session.userId;
     const agentId = req.params.id;
-    const { display_name, greeting, prompt, cartesia_voice_id, cartesiaVoiceId, default_doc_template_id, defaultDocTemplateId } = req.body || {};
+    const {
+      display_name,
+      greeting,
+      prompt,
+      cartesia_voice_id,
+      cartesiaVoiceId,
+      default_doc_template_id,
+      defaultDocTemplateId,
+      background_audio_url,
+      backgroundAudioUrl,
+      background_audio_gain,
+      backgroundAudioGain
+    } = req.body || {};
 
     const [rows] = await pool.execute('SELECT * FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1', [agentId, userId]);
     const agent = rows && rows[0];
@@ -2968,6 +3068,55 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
     const voiceIdRaw = (cartesia_voice_id != null ? cartesia_voice_id : cartesiaVoiceId);
     const nextVoiceId = voiceIdRaw != null ? String(voiceIdRaw).trim() : (agent.cartesia_voice_id || '');
     const nextVoiceIdClean = nextVoiceId ? String(nextVoiceId).trim() : '';
+
+    // Optional: per-agent background ambience
+    const bgUrlRaw = (background_audio_url !== undefined) ? background_audio_url : backgroundAudioUrl;
+    const hasBgUrlUpdate = bgUrlRaw !== undefined;
+    let nextBgUrl = agent.background_audio_url ? String(agent.background_audio_url) : '';
+    if (hasBgUrlUpdate) {
+      let v = (bgUrlRaw != null ? String(bgUrlRaw) : '').trim();
+      if (v) {
+        try {
+          const u = new URL(v);
+          if (u.protocol !== 'https:') {
+            return res.status(400).json({ success: false, message: 'Background audio URL must start with https://' });
+          }
+          v = u.toString();
+        } catch {
+          return res.status(400).json({ success: false, message: 'Background audio URL is invalid' });
+        }
+        if (v.length > 512) {
+          return res.status(400).json({ success: false, message: 'Background audio URL is too long' });
+        }
+      }
+      nextBgUrl = v;
+    }
+
+    const bgGainRaw = (background_audio_gain !== undefined) ? background_audio_gain : backgroundAudioGain;
+    const hasBgGainUpdate = bgGainRaw !== undefined;
+    let nextBgGain = (agent.background_audio_gain != null) ? Number(agent.background_audio_gain) : null;
+    if (hasBgGainUpdate) {
+      const s = String(bgGainRaw == null ? '' : bgGainRaw).trim();
+      if (!s) {
+        nextBgGain = null;
+      } else {
+        const g = parseFloat(s);
+        if (!Number.isFinite(g)) {
+          return res.status(400).json({ success: false, message: 'Background audio gain must be a number' });
+        }
+        if (g < 0 || g > 0.2) {
+          return res.status(400).json({ success: false, message: 'Background audio gain must be between 0.0 and 0.2' });
+        }
+        nextBgGain = g;
+      }
+    }
+
+    if (!nextBgUrl) {
+      nextBgGain = null;
+    } else if (nextBgGain == null) {
+      nextBgGain = 0.06;
+    }
+
     if (!nextName) return res.status(400).json({ success: false, message: 'display_name cannot be empty' });
 
     // Optional: update default template
@@ -2994,8 +3143,8 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
     }
 
     await pool.execute(
-      'UPDATE ai_agents SET display_name = ?, greeting = ?, prompt = ?, cartesia_voice_id = ?, default_doc_template_id = ? WHERE id = ? AND user_id = ?',
-      [nextName, nextGreeting, nextPrompt, nextVoiceIdClean || null, nextDefaultTpl, agentId, userId]
+      'UPDATE ai_agents SET display_name = ?, greeting = ?, prompt = ?, cartesia_voice_id = ?, background_audio_url = ?, background_audio_gain = ?, default_doc_template_id = ? WHERE id = ? AND user_id = ?',
+      [nextName, nextGreeting, nextPrompt, nextVoiceIdClean || null, nextBgUrl || null, nextBgGain, nextDefaultTpl, agentId, userId]
     );
 
     // Update secret set + redeploy
@@ -3013,7 +3162,9 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
         prompt: nextPrompt,
         cartesiaVoiceId: nextVoiceIdClean,
         portalAgentActionToken: portalToken,
-        operatorNumber
+        operatorNumber,
+        backgroundAudioUrl: nextBgUrl,
+        backgroundAudioGain: nextBgGain
       });
       await pipecatUpsertSecretSet(agent.pipecat_secret_set, secrets, agent.pipecat_region || PIPECAT_REGION);
       await pipecatUpdateAgent({
@@ -3231,7 +3382,9 @@ app.post('/api/me/ai/numbers/:id/assign', requireAuth, async (req, res) => {
         prompt: agent.prompt,
         cartesiaVoiceId: agent.cartesia_voice_id,
         portalAgentActionToken: portalToken,
-        operatorNumber
+        operatorNumber,
+        backgroundAudioUrl: agent.background_audio_url,
+        backgroundAudioGain: agent.background_audio_gain
       });
       await pipecatUpsertSecretSet(agent.pipecat_secret_set, secrets, agent.pipecat_region || PIPECAT_REGION);
       await pipecatUpdateAgent({

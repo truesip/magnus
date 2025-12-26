@@ -1,6 +1,9 @@
+import audioop
 import inspect
+import io
 import json
 import os
+import wave
 from typing import Any, Optional
 
 import httpx
@@ -8,11 +11,12 @@ from deepgram.clients.listen.v1.websocket.options import LiveOptions
 from loguru import logger
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import AggregationType, TTSTextFrame, EndFrame
+from pipecat.frames.frames import AggregationType, EndFrame, TTSAudioRawFrame, TTSTextFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.llm_service import FunctionCallParams
@@ -41,6 +45,122 @@ def _parse_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _parse_float(name: str, default: float) -> float:
+    raw = _env(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+_background_wav_cache: dict[tuple[str, int], bytes] = {}
+
+
+async def _download_bytes_limited(url: str, *, max_bytes: int, timeout_s: float = 15.0) -> bytes:
+    """Download content with a hard max size."""
+    async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=True) as client:
+        async with client.stream("GET", url) as resp:
+            resp.raise_for_status()
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in resp.aiter_bytes():
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > max_bytes:
+                    raise RuntimeError("Background audio file is too large")
+                chunks.append(chunk)
+            return b"".join(chunks)
+
+
+def _wav_to_pcm16_mono(*, wav_bytes: bytes, target_sample_rate: int) -> bytes:
+    """Convert a WAV file to PCM16 mono at the target sample rate."""
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        channels = int(wf.getnchannels())
+        sampwidth = int(wf.getsampwidth())
+        src_rate = int(wf.getframerate())
+        nframes = int(wf.getnframes())
+        pcm = wf.readframes(nframes)
+
+    # Convert to 16-bit samples.
+    if sampwidth != 2:
+        pcm = audioop.lin2lin(pcm, sampwidth, 2)
+        sampwidth = 2
+
+    # Convert to mono.
+    if channels == 2:
+        pcm = audioop.tomono(pcm, sampwidth, 0.5, 0.5)
+        channels = 1
+    elif channels != 1:
+        raise RuntimeError("Background WAV must be mono or stereo")
+
+    # Resample if needed.
+    if src_rate != target_sample_rate:
+        pcm, _ = audioop.ratecv(pcm, sampwidth, channels, src_rate, target_sample_rate, None)
+
+    # Ensure sample alignment.
+    pcm = pcm[: len(pcm) - (len(pcm) % (sampwidth * channels))]
+    return pcm
+
+
+async def _load_background_pcm16_mono(*, url: str, target_sample_rate: int) -> bytes:
+    """Load and cache a background WAV as PCM16 mono for mixing."""
+    key = (url, int(target_sample_rate))
+    if key in _background_wav_cache:
+        return _background_wav_cache[key]
+
+    if not url.lower().startswith("https://"):
+        raise RuntimeError("Background audio URL must start with https://")
+
+    raw = await _download_bytes_limited(url, max_bytes=5 * 1024 * 1024)
+    pcm = _wav_to_pcm16_mono(wav_bytes=raw, target_sample_rate=target_sample_rate)
+    if not pcm:
+        raise RuntimeError("Background audio WAV contained no audio")
+
+    _background_wav_cache[key] = pcm
+    return pcm
+
+
+class BackgroundTTSMixer(FrameProcessor):
+    """Mixes a looped background track into TTSAudioRawFrame while the bot speaks."""
+
+    def __init__(self, *, background_pcm16_mono: bytes, gain: float):
+        super().__init__()
+        self._bg = background_pcm16_mono or b""
+        self._gain = float(gain)
+        self._pos = 0
+
+    def _next_bg(self, nbytes: int) -> bytes:
+        if not self._bg or nbytes <= 0:
+            return b"" if nbytes <= 0 else (b"\x00" * nbytes)
+
+        out = bytearray()
+        while len(out) < nbytes:
+            if self._pos >= len(self._bg):
+                self._pos = 0
+            take = min(nbytes - len(out), len(self._bg) - self._pos)
+            out.extend(self._bg[self._pos : self._pos + take])
+            self._pos += take
+        return bytes(out)
+
+    async def process_frame(self, frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if direction is FrameDirection.DOWNSTREAM and isinstance(frame, TTSAudioRawFrame):
+            try:
+                if self._gain > 0 and frame.audio:
+                    bg = self._next_bg(len(frame.audio))
+                    bg = audioop.mul(bg, 2, self._gain)
+                    frame.audio = audioop.add(frame.audio, bg, 2)
+                    frame.num_frames = int(len(frame.audio) / (frame.num_channels * 2))
+            except Exception as e:
+                logger.warning(f"Background mixer failed (disabling for this frame): {e}")
+
+        await self.push_frame(frame, direction)
 
 
 def _extract_dialin_settings(body: Any) -> Optional[DailyDialinSettings]:
@@ -181,6 +301,10 @@ async def bot(session_args: Any):
 
     # Tools configured via secret set
     operator_number = _env("OPERATOR_NUMBER", "").strip()
+
+    # Background ambience (mixed into TTS audio while the bot speaks)
+    background_audio_url = _env("BACKGROUND_AUDIO_URL", "").strip()
+    background_audio_gain = _parse_float("BACKGROUND_AUDIO_GAIN", 0.06)
 
     # Portal integration (used for emailing templated documents)
     portal_base_url = _env("PORTAL_BASE_URL", "").strip().rstrip("/")
@@ -381,20 +505,33 @@ async def bot(session_args: Any):
 
     ctx = llm.create_context_aggregator(context)
 
+    # Optional: background ambience mixed into bot speech (TTSAudioRawFrame only).
+    bg_mixer = None
+    if background_audio_url:
+        try:
+            pcm = await _load_background_pcm16_mono(url=background_audio_url, target_sample_rate=sample_rate)
+            bg_mixer = BackgroundTTSMixer(background_pcm16_mono=pcm, gain=background_audio_gain)
+        except Exception as e:
+            logger.warning(f"Background audio disabled: {e}")
+
     # IMPORTANT: assistant context aggregator consumes TextFrames (it aggregates them and does
     # not forward). If it sits *before* TTS, the bot will generate text but you won't hear audio.
     # So we place it after TTS and before the output transport.
-    pipeline = Pipeline(
-        [
-            transport.input(),
-            stt,
-            ctx.user(),
-            llm,
-            tts,
-            ctx.assistant(),
-            transport.output(),
-        ]
-    )
+    steps = [
+        transport.input(),
+        stt,
+        ctx.user(),
+        llm,
+        tts,
+    ]
+    if bg_mixer:
+        steps.append(bg_mixer)
+    steps.extend([
+        ctx.assistant(),
+        transport.output(),
+    ])
+
+    pipeline = Pipeline(steps)
 
     task = PipelineTask(
         pipeline,

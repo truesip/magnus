@@ -519,6 +519,15 @@
           </div>
           <div class="muted" style="margin-top:6px">Leave as Default to use the voice configured in your agent image.</div>
         </div>
+        <div style="margin-bottom:12px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Background Sound (WAV URL)</label>
+          <input id="aiAgentBackgroundAudioUrl" type="url" placeholder="https://.../office.wav" style="width:100%;box-sizing:border-box">
+          <div class="muted" style="margin-top:6px">Plays only while the AI speaks. Use a small WAV file (mono 16kHz recommended).</div>
+        </div>
+        <div style="margin-bottom:16px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Background Volume <span class="muted">(0.0 to 0.2)</span></label>
+          <input id="aiAgentBackgroundAudioGain" type="number" min="0" max="0.2" step="0.01" placeholder="0.06" style="width:160px;box-sizing:border-box">
+        </div>
         <div style="margin-bottom:16px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Custom Prompt</label>
           <textarea id="aiAgentPrompt" rows="6" placeholder="Instructions for the agent..." style="width:100%;box-sizing:border-box"></textarea>
@@ -1053,6 +1062,12 @@
       $('#aiAgentGreeting').value = agent ? String(agent.greeting || '') : '';
       $('#aiAgentPrompt').value = agent ? String(agent.prompt || '') : '';
 
+      // Background ambience
+      const bgUrl = agent ? String(agent.background_audio_url || '') : '';
+      const bgGain = agent && agent.background_audio_gain != null ? String(agent.background_audio_gain) : '';
+      try { $('#aiAgentBackgroundAudioUrl').value = bgUrl; } catch {}
+      try { $('#aiAgentBackgroundAudioGain').value = bgGain || (bgUrl ? '0.06' : ''); } catch {}
+
       // Default template selection
       const desiredTemplateId = agent && agent.default_doc_template_id ? String(agent.default_doc_template_id) : '';
       refreshAgentDefaultTemplateSelectOptions();
@@ -1097,6 +1112,20 @@
       const prompt = ($('#aiAgentPrompt').value || '');
       const cartesia_voice_id = getSelectedCartesiaVoiceId();
       const defaultTpl = ($('#aiAgentDefaultTemplateSelect').value || '').trim();
+
+      const background_audio_url = ($('#aiAgentBackgroundAudioUrl').value || '').trim();
+      const bgGainRaw = ($('#aiAgentBackgroundAudioGain').value || '').trim();
+      let background_audio_gain = null;
+      if (bgGainRaw) {
+        const g = parseFloat(bgGainRaw);
+        if (!Number.isFinite(g)) return showToast('Background volume must be a number.', 'error');
+        if (g < 0 || g > 0.2) return showToast('Background volume must be between 0.0 and 0.2.', 'error');
+        background_audio_gain = g;
+      }
+      if (background_audio_url && !/^https:\/\//i.test(background_audio_url)) {
+        return showToast('Background sound URL must start with https://', 'error');
+      }
+
       if (!display_name) return showToast('Agent name is required.', 'error');
 
       const btn = $('#confirmAiAgentBtn');
@@ -1115,7 +1144,9 @@
             greeting,
             prompt,
             cartesia_voice_id: (cartesia_voice_id || null),
-            default_doc_template_id: defaultTpl ? defaultTpl : null
+            default_doc_template_id: defaultTpl ? defaultTpl : null,
+            background_audio_url: background_audio_url ? background_audio_url : null,
+            background_audio_gain
           })
         });
         const j = await r.json();
