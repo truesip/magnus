@@ -58,6 +58,15 @@
     #callsChartContainer{margin-top:8px;margin-bottom:16px;background:#ffffff;border-radius:12px;border:1px solid #e5e7eb;padding:12px}
     #callsChart{width:100%;max-height:220px}
 
+    /* AI Agent modal (compact) */
+    #aiAgentModal .ai-agent-modal-card{font-size:12px}
+    #aiAgentModal .ai-agent-modal-card label{font-size:12px !important}
+    #aiAgentModal .ai-agent-modal-card .muted{font-size:11px}
+    #aiAgentModal .ai-agent-modal-card input,
+    #aiAgentModal .ai-agent-modal-card select,
+    #aiAgentModal .ai-agent-modal-card textarea{padding:6px 8px;border-radius:6px;font-size:12px}
+    #aiAgentModal .ai-agent-modal-card button{padding:6px 10px;border-radius:6px;font-size:12px}
+
     /* AI subtabs */
     .ai-subtabs{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 14px 0}
     .ai-subtab{background:#e5e7eb !important;color:#111827 !important;border:1px solid #d1d5db !important;border-radius:999px !important;padding:6px 10px !important;font-size:12px !important}
@@ -499,57 +508,57 @@
 
     <!-- AI Agent Modal -->
     <div id="aiAgentModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
-      <div style="background:#fff;padding:24px;border-radius:12px;width:480px;max-width:92%">
-        <h3 style="margin:0 0 16px 0" id="aiAgentModalTitle">🤖 Create AI Agent</h3>
-        <div style="margin-bottom:12px">
+      <div class="ai-agent-modal-card" style="background:#fff;padding:14px;border-radius:10px;width:320px;max-width:92%;max-height:92vh;overflow:auto">
+        <h3 style="margin:0 0 10px 0" id="aiAgentModalTitle">🤖 Create AI Agent</h3>
+        <div style="margin-bottom:8px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Agent Name *</label>
           <input id="aiAgentName" type="text" placeholder="e.g. Support Agent" style="width:100%;box-sizing:border-box">
         </div>
-        <div style="margin-bottom:12px">
+        <div style="margin-bottom:8px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Greeting</label>
-          <textarea id="aiAgentGreeting" rows="3" placeholder="What should the agent say when answering?" style="width:100%;box-sizing:border-box"></textarea>
+          <textarea id="aiAgentGreeting" rows="2" placeholder="What should the agent say when answering?" style="width:100%;box-sizing:border-box"></textarea>
         </div>
-        <div style="margin-bottom:12px">
+        <div style="margin-bottom:8px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Cartesia Voice</label>
-          <div style="display:flex;gap:8px;align-items:center">
+          <div style="display:flex;gap:6px;align-items:center">
             <select id="aiAgentCartesiaVoiceSelect" style="flex:1;min-width:0">
               <option value="">Default voice</option>
               <option value="__custom__">Custom voice id…</option>
             </select>
             <button id="aiLoadVoicesBtn" type="button" style="background:#6b7280">Load Voices</button>
           </div>
-          <div id="aiAgentCartesiaVoiceCustomWrap" style="display:none;margin-top:8px">
+          <div id="aiAgentCartesiaVoiceCustomWrap" style="display:none;margin-top:6px">
             <input id="aiAgentCartesiaVoiceCustom" type="text" placeholder="Paste Cartesia voice_id" style="width:100%;box-sizing:border-box">
           </div>
-          <div class="muted" style="margin-top:6px">Leave as Default to use the voice configured in your agent image.</div>
+          <div class="muted" style="margin-top:4px">Leave as Default to use the voice configured in your agent image.</div>
         </div>
-        <div style="margin-bottom:12px">
+        <div style="margin-bottom:8px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Background Audio (WAV)</label>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <input id="aiAgentBackgroundAudioFile" type="file" accept=".wav,audio/wav,audio/x-wav" style="flex:1;min-width:240px">
+            <input id="aiAgentBackgroundAudioFile" type="file" accept=".wav,audio/wav,audio/x-wav" style="flex:1;min-width:200px">
             <button id="aiRemoveBackgroundAudioBtn" type="button" style="background:#6b7280;display:none">Remove upload</button>
             <span class="muted" style="font-size:12px">Volume</span>
-            <input id="aiAgentBackgroundAudioGain" type="number" min="0" max="0.2" step="0.01" placeholder="0.06" style="width:90px;box-sizing:border-box">
+            <input id="aiAgentBackgroundAudioGain" type="number" min="0" max="0.2" step="0.01" placeholder="0.06" style="width:86px;box-sizing:border-box">
           </div>
-          <div id="aiAgentBackgroundAudioFileName" class="muted" style="margin-top:6px">No file uploaded.</div>
-          <div style="margin-top:8px">
+          <div id="aiAgentBackgroundAudioFileName" class="muted" style="margin-top:4px">No file uploaded.</div>
+          <div style="margin-top:6px">
             <input id="aiAgentBackgroundAudioUrl" type="url" placeholder="https://.../office.wav" style="width:100%;box-sizing:border-box">
           </div>
-          <div class="muted" style="margin-top:6px">Uploaded WAV overrides the URL (URL acts as a fallback).</div>
+          <div class="muted" style="margin-top:4px">Uploaded WAV overrides the URL (URL acts as a fallback).</div>
         </div>
-        <div style="margin-bottom:16px">
+        <div style="margin-bottom:10px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Custom Prompt</label>
-          <textarea id="aiAgentPrompt" rows="6" placeholder="Instructions for the agent..." style="width:100%;box-sizing:border-box"></textarea>
+          <textarea id="aiAgentPrompt" rows="4" placeholder="Instructions for the agent..." style="width:100%;box-sizing:border-box"></textarea>
         </div>
-        <div style="margin-bottom:16px">
+        <div style="margin-bottom:10px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Default Document Template</label>
           <select id="aiAgentDefaultTemplateSelect" style="width:100%;box-sizing:border-box">
             <option value="">None</option>
           </select>
-          <div class="muted" style="margin-top:6px">Used when the agent emails a document to a caller.</div>
+          <div class="muted" style="margin-top:4px">Used when the agent emails a document to a caller.</div>
         </div>
         <input type="hidden" id="aiAgentId">
-        <div style="display:flex;gap:8px;justify-content:flex-end">
+        <div style="display:flex;gap:6px;justify-content:flex-end">
           <button id="cancelAiAgentBtn" style="background:#6b7280">Cancel</button>
           <button id="confirmAiAgentBtn" style="background:#4f46e5">Save Agent</button>
         </div>
