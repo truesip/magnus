@@ -521,18 +521,23 @@
         </div>
         <div style="margin-bottom:12px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Background Sound (WAV upload)</label>
+          <input id="aiAgentBackgroundAudioFile" type="file" accept=".wav,audio/wav,audio/x-wav" style="display:none">
           <div style="display:flex;gap:8px;align-items:center">
-            <input id="aiAgentBackgroundAudioFile" type="file" accept=".wav,audio/wav,audio/x-wav" style="max-width:340px;width:100%;box-sizing:border-box">
+            <button id="aiUploadBackgroundAudioBtn" type="button" style="background:#6b7280;white-space:nowrap">Choose WAV…</button>
+            <span id="aiAgentBackgroundAudioFileName" class="muted" style="font-size:13px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">No file selected</span>
             <button id="aiRemoveBackgroundAudioBtn" type="button" style="background:#6b7280;display:none;white-space:nowrap">Remove</button>
           </div>
           <div id="aiAgentBackgroundAudioUploadInfo" class="muted" style="margin-top:6px;display:none"></div>
-          <div class="muted" style="margin-top:6px">Upload a small WAV (max 5MB). If uploaded, it overrides the URL below.</div>
+          <div class="muted" style="margin-top:6px">Max 5MB. Uploaded WAV overrides the URL below.</div>
         </div>
-        <div style="margin-bottom:12px">
-          <label style="display:block;margin-bottom:4px;font-size:13px">Background Sound (WAV URL)</label>
-          <input id="aiAgentBackgroundAudioUrl" type="url" placeholder="https://.../office.wav" style="width:100%;box-sizing:border-box">
-          <div class="muted" style="margin-top:6px">Plays only while the AI speaks. Use a small WAV file (mono 16kHz recommended).</div>
-        </div>
+        <details id="aiAgentBackgroundAudioUrlDetails" style="margin-bottom:12px">
+          <summary id="aiAgentBackgroundAudioUrlSummary" class="muted" style="cursor:pointer;font-size:13px">Background Sound (WAV URL) (advanced)</summary>
+          <div style="margin-top:10px">
+            <label style="display:block;margin-bottom:4px;font-size:13px">Background Sound (WAV URL)</label>
+            <input id="aiAgentBackgroundAudioUrl" type="url" placeholder="https://.../office.wav" style="width:100%;box-sizing:border-box">
+            <div class="muted" style="margin-top:6px">Plays only while the AI speaks. Use a small WAV file (mono 16kHz recommended).</div>
+          </div>
+        </details>
         <div style="margin-bottom:16px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Background Volume <span class="muted">(0.0 to 0.2)</span></label>
           <input id="aiAgentBackgroundAudioGain" type="number" min="0" max="0.2" step="0.01" placeholder="0.06" style="width:160px;box-sizing:border-box">
@@ -1081,6 +1086,7 @@
       try { $('#aiAgentBackgroundAudioUrl').value = bgUrl; } catch {}
       try { $('#aiAgentBackgroundAudioGain').value = bgGain || ((bgUrl || bgUploaded) ? '0.06' : ''); } catch {}
       try { $('#aiAgentBackgroundAudioFile').value = ''; } catch {}
+      try { $('#aiAgentBackgroundAudioFileName').textContent = 'No file selected'; } catch {}
 
       const bgInfo = $('#aiAgentBackgroundAudioUploadInfo');
       const bgRemoveBtn = $('#aiRemoveBackgroundAudioBtn');
@@ -1102,6 +1108,17 @@
         bgRemoveBtn.style.display = bgUploaded ? 'inline-block' : 'none';
       }
       try { $('#aiAgentBackgroundAudioUrl').disabled = Boolean(bgUploaded); } catch {}
+
+      const urlDetails = $('#aiAgentBackgroundAudioUrlDetails');
+      const urlSummary = $('#aiAgentBackgroundAudioUrlSummary');
+      if (urlSummary) {
+        urlSummary.textContent = bgUploaded
+          ? 'Background Sound (WAV URL) (disabled while upload exists)'
+          : (bgUrl ? 'Background Sound (WAV URL) (set) (advanced)' : 'Background Sound (WAV URL) (advanced)');
+      }
+      if (urlDetails) {
+        urlDetails.open = Boolean(bgUrl && !bgUploaded);
+      }
 
       // Default template selection
       const desiredTemplateId = agent && agent.default_doc_template_id ? String(agent.default_doc_template_id) : '';
@@ -1129,6 +1146,18 @@
     $('#createAiAgentBtn').addEventListener('click', () => openAiAgentModal(null));
     $('#cancelAiAgentBtn').addEventListener('click', () => closeAiAgentModal());
     $('#aiAgentModal').addEventListener('click', (e) => { if (e.target === $('#aiAgentModal')) closeAiAgentModal(); });
+
+    // Background audio upload UI
+    $('#aiUploadBackgroundAudioBtn').addEventListener('click', (e) => {
+      e.preventDefault();
+      try { $('#aiAgentBackgroundAudioFile').click(); } catch {}
+    });
+    $('#aiAgentBackgroundAudioFile').addEventListener('change', () => {
+      const inp = $('#aiAgentBackgroundAudioFile');
+      const f = inp && inp.files ? inp.files[0] : null;
+      const label = $('#aiAgentBackgroundAudioFileName');
+      if (label) label.textContent = f ? String(f.name || 'Selected WAV') : 'No file selected';
+    });
 
     // Remove uploaded background audio
     $('#aiRemoveBackgroundAudioBtn').addEventListener('click', async (e) => {
