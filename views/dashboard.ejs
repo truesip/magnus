@@ -347,56 +347,60 @@
         </div>
 
         <div id="ai-pane-tools" style="display:none">
-          <div style="display:flex;gap:16px;flex-wrap:wrap">
-            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-              <h3 style="margin:0 0 10px 0">Email (SMTP)</h3>
-              <div class="muted" style="margin-bottom:10px">Used when your AI agent emails documents to callers.</div>
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-                <input id="smtpHost" type="text" placeholder="SMTP host (e.g. smtp.gmail.com)">
-                <input id="smtpPort" type="number" placeholder="Port (e.g. 587)">
-                <label style="display:flex;align-items:center;gap:6px;font-size:13px">
-                  <input id="smtpSecure" type="checkbox"> Use SSL (secure)
-                </label>
-                <div></div>
-                <input id="smtpUsername" type="text" placeholder="Username">
-                <input id="smtpPassword" type="password" placeholder="Password (leave blank to keep current)">
-                <input id="smtpFromEmail" type="email" placeholder="From email (e.g. you@domain.com)">
-                <input id="smtpFromName" type="text" placeholder="From name (optional)">
-                <input id="smtpReplyTo" type="email" placeholder="Reply-to (optional)">
-                <input id="smtpTestToEmail" type="email" placeholder="Test recipient (optional)">
-              </div>
-              <div class="toolbar" style="margin-top:10px">
-                <button id="saveSmtpBtn">Save SMTP</button>
-                <button id="testSmtpBtn" style="background:#6b7280">Send Test Email</button>
-                <span id="smtpStatus" class="muted" style="margin-left:auto"></span>
-              </div>
-            </div>
-
-            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-              <h3 style="margin:0 0 10px 0">Call Transfer</h3>
-              <div class="muted" style="margin-bottom:10px">When a caller asks to be transferred, your AI agent can cold-transfer the call to this destination and then leave the call.</div>
-              <div style="display:grid;grid-template-columns:1fr;gap:8px">
-                <input id="aiTransferNumber" type="text" placeholder="Transfer destination (E.164 like +18005551234 or sip:agent@domain)">
-              </div>
-              <div class="toolbar" style="margin-top:10px">
-                <button id="saveAiTransferBtn">Save Transfer</button>
-                <span id="aiTransferStatus" class="muted" style="margin-left:auto"></span>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;align-items:start">
+            <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:16px">
+              <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+                <h3 style="margin:0 0 10px 0">Email (SMTP)</h3>
+                <div class="muted" style="margin-bottom:10px">Used when your AI agent emails documents to callers.</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                  <input id="smtpHost" type="text" placeholder="SMTP host (e.g. smtp.gmail.com)">
+                  <input id="smtpPort" type="number" placeholder="Port (e.g. 587)">
+                  <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+                    <input id="smtpSecure" type="checkbox"> Use SSL (secure)
+                  </label>
+                  <div></div>
+                  <input id="smtpUsername" type="text" placeholder="Username">
+                  <input id="smtpPassword" type="password" placeholder="Password (leave blank to keep current)">
+                  <input id="smtpFromEmail" type="email" placeholder="From email (e.g. you@domain.com)">
+                  <input id="smtpFromName" type="text" placeholder="From name (optional)">
+                  <input id="smtpReplyTo" type="email" placeholder="Reply-to (optional)">
+                  <input id="smtpTestToEmail" type="email" placeholder="Test recipient (optional)">
+                </div>
+                <div class="toolbar" style="margin-top:10px">
+                  <button id="saveSmtpBtn">Save SMTP</button>
+                  <button id="testSmtpBtn" style="background:#6b7280">Send Test Email</button>
+                  <span id="smtpStatus" class="muted" style="margin-left:auto"></span>
+                </div>
               </div>
             </div>
 
-            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-              <h3 style="margin:0 0 10px 0">Document Templates</h3>
-              <div class="muted" style="margin-bottom:10px">Upload a .docx with placeholders like <code>[[Name]]</code> and <code>[[Address]]</code>.</div>
-              <div class="toolbar" style="flex-wrap:wrap">
-                <input id="docTemplateName" type="text" placeholder="Template name" style="flex:1;min-width:160px">
-                <input id="docTemplateFile" type="file" accept=".docx">
-                <button id="uploadDocTemplateBtn" style="background:#4f46e5">Upload</button>
+            <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:16px">
+              <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+                <h3 style="margin:0 0 10px 0">Call Transfer</h3>
+                <div class="muted" style="margin-bottom:10px">When a caller asks to be transferred, your AI agent can cold-transfer the call to this destination and then leave the call.</div>
+                <div style="display:grid;grid-template-columns:1fr;gap:8px">
+                  <input id="aiTransferNumber" type="text" placeholder="Transfer destination (E.164 like +18005551234 or sip:agent@domain)">
+                </div>
+                <div class="toolbar" style="margin-top:10px">
+                  <button id="saveAiTransferBtn">Save Transfer</button>
+                  <span id="aiTransferStatus" class="muted" style="margin-left:auto"></span>
+                </div>
               </div>
-              <table id="ai-doc-templates-table" style="display:none">
-                <thead><tr><th>Name</th><th>File</th><th>Updated</th><th>Actions</th></tr></thead>
-                <tbody></tbody>
-              </table>
-              <div id="ai-doc-templates-empty" class="muted">Loading…</div>
+
+              <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+                <h3 style="margin:0 0 10px 0">Document Templates</h3>
+                <div class="muted" style="margin-bottom:10px">Upload a .docx with placeholders like <code>[[Name]]</code> and <code>[[Address]]</code>.</div>
+                <div class="toolbar" style="flex-wrap:wrap">
+                  <input id="docTemplateName" type="text" placeholder="Template name" style="flex:1;min-width:160px">
+                  <input id="docTemplateFile" type="file" accept=".docx">
+                  <button id="uploadDocTemplateBtn" style="background:#4f46e5">Upload</button>
+                </div>
+                <table id="ai-doc-templates-table" style="display:none">
+                  <thead><tr><th>Name</th><th>File</th><th>Updated</th><th>Actions</th></tr></thead>
+                  <tbody></tbody>
+                </table>
+                <div id="ai-doc-templates-empty" class="muted">Loading…</div>
+              </div>
             </div>
           </div>
         </div>
