@@ -523,19 +523,19 @@
           </div>
           <div class="muted" style="margin-top:6px">Leave as Default to use the voice configured in your agent image.</div>
         </div>
-        <div style="margin-bottom:4px">
-          <input id="aiAgentBackgroundAudioFile" type="file" accept=".wav,audio/wav,audio/x-wav" style="display:none">
-          <div style="display:flex;gap:3px;align-items:center;flex-wrap:nowrap">
-            <span class="muted" style="font-size:10px;line-height:1">BG</span>
-            <button id="aiUploadBackgroundAudioBtn" type="button" style="background:#6b7280;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;height:22px;padding:0 6px;border-radius:4px;font-size:10px;line-height:1" title="Upload WAV (max 5MB).">WAV</button>
-            <span id="aiAgentBackgroundAudioFileName" class="muted" style="font-size:10px;line-height:1;max-width:72px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">—</span>
-            <button id="aiRemoveBackgroundAudioBtn" type="button" style="background:#6b7280;display:none;white-space:nowrap;align-items:center;justify-content:center;height:22px;padding:0 6px;border-radius:4px;font-size:10px;line-height:1" title="Remove uploaded WAV">✕</button>
-            <input id="aiAgentBackgroundAudioGain" type="number" min="0" max="0.2" step="0.01" placeholder="0.06" style="width:54px;height:22px;box-sizing:border-box;padding:0 5px;border-radius:4px;font-size:10px;line-height:1" title="Vol (0.0–0.2)">
-            <button id="aiToggleBackgroundAudioUrlBtn" type="button" style="background:#6b7280;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;height:22px;padding:0 6px;border-radius:4px;font-size:10px;line-height:1" title="URL">URL</button>
+        <div style="margin-bottom:12px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Background Audio (WAV)</label>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input id="aiAgentBackgroundAudioFile" type="file" accept=".wav,audio/wav,audio/x-wav" style="flex:1;min-width:240px">
+            <button id="aiRemoveBackgroundAudioBtn" type="button" style="background:#6b7280;display:none">Remove upload</button>
+            <span class="muted" style="font-size:12px">Volume</span>
+            <input id="aiAgentBackgroundAudioGain" type="number" min="0" max="0.2" step="0.01" placeholder="0.06" style="width:90px;box-sizing:border-box">
           </div>
-          <div id="aiAgentBackgroundAudioUrlWrap" style="display:none;margin-top:3px">
+          <div id="aiAgentBackgroundAudioFileName" class="muted" style="margin-top:6px">No file uploaded.</div>
+          <div style="margin-top:8px">
             <input id="aiAgentBackgroundAudioUrl" type="url" placeholder="https://.../office.wav" style="width:100%;box-sizing:border-box">
           </div>
+          <div class="muted" style="margin-top:6px">Uploaded WAV overrides the URL (URL acts as a fallback).</div>
         </div>
         <div style="margin-bottom:16px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Custom Prompt</label>
@@ -1084,29 +1084,27 @@
 
       const bgRemoveBtn = $('#aiRemoveBackgroundAudioBtn');
       if (bgRemoveBtn) {
-        bgRemoveBtn.style.display = bgUploaded ? 'inline-flex' : 'none';
+        bgRemoveBtn.style.display = bgUploaded ? 'inline-block' : 'none';
       }
 
-      // Compact uploaded filename label
+      // Uploaded file status / selection helper text
       const fileLabel = $('#aiAgentBackgroundAudioFileName');
       if (fileLabel) {
         if (bgUploaded) {
-          fileLabel.textContent = bgUploadName ? bgUploadName : 'Uploaded';
+          const pieces = [];
+          if (bgUploadName) pieces.push(bgUploadName);
+          if (bgUploadSize != null && Number.isFinite(bgUploadSize)) {
+            pieces.push(`${Math.max(1, Math.round(bgUploadSize / 1024))} KB`);
+          }
+          fileLabel.textContent = `Uploaded: ${pieces.join(' • ') || 'WAV file'}`;
         } else {
-          fileLabel.textContent = '—';
+          fileLabel.textContent = bgUrl ? 'No file uploaded (using URL).' : 'No file uploaded.';
         }
+        fileLabel.dataset.defaultText = fileLabel.textContent;
       }
 
-      // URL input is hidden by default; show only when needed and not overridden by upload
-      const urlWrap = $('#aiAgentBackgroundAudioUrlWrap');
-      const urlBtn = $('#aiToggleBackgroundAudioUrlBtn');
-      try { $('#aiAgentBackgroundAudioUrl').disabled = Boolean(bgUploaded); } catch {}
-      if (urlWrap) {
-        urlWrap.style.display = (!bgUploaded && bgUrl) ? 'block' : 'none';
-      }
-      if (urlBtn) {
-        urlBtn.style.display = bgUploaded ? 'none' : 'inline-flex';
-      }
+      // Allow editing URL even when an upload exists (URL acts as fallback)
+      try { $('#aiAgentBackgroundAudioUrl').disabled = false; } catch {}
 
       // Default template selection
       const desiredTemplateId = agent && agent.default_doc_template_id ? String(agent.default_doc_template_id) : '';
@@ -1136,34 +1134,19 @@
     $('#aiAgentModal').addEventListener('click', (e) => { if (e.target === $('#aiAgentModal')) closeAiAgentModal(); });
 
     // Background audio upload UI
-    $('#aiUploadBackgroundAudioBtn').addEventListener('click', (e) => {
-      e.preventDefault();
-      try { $('#aiAgentBackgroundAudioFile').click(); } catch {}
-    });
-    $('#aiAgentBackgroundAudioFile').addEventListener('change', () => {
-      const inp = $('#aiAgentBackgroundAudioFile');
-      const f = inp && inp.files ? inp.files[0] : null;
-      const label = $('#aiAgentBackgroundAudioFileName');
-      if (label) label.textContent = f ? String(f.name || 'Selected WAV') : '—';
-
-      // If they selected a WAV, hide the URL input (upload overrides URL)
-      const urlWrap = $('#aiAgentBackgroundAudioUrlWrap');
-      if (urlWrap) urlWrap.style.display = 'none';
-    });
-
-    // Toggle background audio URL input (advanced)
-    $('#aiToggleBackgroundAudioUrlBtn').addEventListener('click', (e) => {
-      e.preventDefault();
-      const urlInput = $('#aiAgentBackgroundAudioUrl');
-      const urlWrap = $('#aiAgentBackgroundAudioUrlWrap');
-      if (!urlWrap || !urlInput) return;
-      if (urlInput.disabled) return;
-      const isShown = urlWrap.style.display === 'block';
-      urlWrap.style.display = isShown ? 'none' : 'block';
-      if (!isShown) {
-        try { urlInput.focus(); } catch {}
-      }
-    });
+    const bgFileInputEl = $('#aiAgentBackgroundAudioFile');
+    if (bgFileInputEl) {
+      bgFileInputEl.addEventListener('change', () => {
+        const f = bgFileInputEl && bgFileInputEl.files ? bgFileInputEl.files[0] : null;
+        const label = $('#aiAgentBackgroundAudioFileName');
+        if (!label) return;
+        if (f) {
+          label.textContent = `Selected: ${String(f.name || 'WAV file')}`;
+        } else {
+          label.textContent = label.dataset.defaultText || label.textContent;
+        }
+      });
+    }
 
     // Remove uploaded background audio
     $('#aiRemoveBackgroundAudioBtn').addEventListener('click', async (e) => {
@@ -1175,7 +1158,7 @@
       const btn = $('#aiRemoveBackgroundAudioBtn');
       btn.disabled = true;
       const old = btn.textContent;
-      btn.textContent = '…';
+      btn.textContent = 'Removing...';
 
       try {
         const r = await fetch(`/api/me/ai/agents/${encodeURIComponent(id)}/background-audio`, { method: 'DELETE' });
