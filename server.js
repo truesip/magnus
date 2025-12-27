@@ -1610,6 +1610,7 @@ function buildDidPurchaseLineItems(dids, included) {
   const regionsMap = {};
   const countriesMap = {};
   const didGroupsMap = {};
+  const didGroupTypesMap = {};
 
   if (Array.isArray(included)) {
     for (const item of included) {
@@ -1618,6 +1619,7 @@ function buildDidPurchaseLineItems(dids, included) {
       if (item.type === 'regions') regionsMap[item.id] = item.attributes?.name || '';
       if (item.type === 'countries') countriesMap[item.id] = item.attributes?.name || '';
       if (item.type === 'did_groups') didGroupsMap[item.id] = item;
+      if (item.type === 'did_group_types' || item.type === 'did_group_type') didGroupTypesMap[item.id] = item.attributes?.name || '';
     }
   }
 
@@ -1633,8 +1635,9 @@ function buildDidPurchaseLineItems(dids, included) {
     let location = '';
     const didGroupRel = did.relationships?.did_group?.data;
 
-    if (didGroupRel && didGroupsMap[didGroupRel.id]) {
-      const dg = didGroupsMap[didGroupRel.id];
+    const dg = (didGroupRel && didGroupsMap[didGroupRel.id]) ? didGroupsMap[didGroupRel.id] : null;
+
+    if (dg) {
       const parts = [];
       const cityRel = dg.relationships?.city?.data;
       const regionRel = dg.relationships?.region?.data;
@@ -1652,10 +1655,29 @@ function buildDidPurchaseLineItems(dids, included) {
     // Determine if this DID is toll-free for pricing
     const didType = String(attrs.did_type || '').toLowerCase();
     let isTollfreeDid = didType.includes('toll');
-    if (!isTollfreeDid && didGroupRel && didGroupsMap[didGroupRel.id]) {
-      const dg = didGroupsMap[didGroupRel.id];
+
+    // Prefer DID group type when available (works even when group name doesn't contain "toll")
+    if (!isTollfreeDid && dg) {
+      const gtRel = dg.relationships?.did_group_type?.data;
+      const gtName = gtRel ? String(didGroupTypesMap[gtRel.id] || '') : '';
+      if (/toll\s*-?\s*free/i.test(gtName)) isTollfreeDid = true;
+    }
+
+    // Fallback: did group name
+    if (!isTollfreeDid && dg) {
       const name = String(dg.attributes?.name || '').toLowerCase();
       if (name.includes('toll')) isTollfreeDid = true;
+    }
+
+    // Fallback: detect US/CA toll-free by prefix (800, 833, 844, 855, 866, 877, 888)
+    if (!isTollfreeDid) {
+      const rawNum = String(attrs.number || '').replace(/\D/g, '');
+      if (rawNum) {
+        const digits = rawNum.length > 11 ? rawNum.slice(-11) : rawNum;
+        const npa = digits.startsWith('1') ? digits.slice(1, 4) : digits.slice(0, 3);
+        const tollfreeNpas = ['800', '833', '844', '855', '866', '877', '888'];
+        if (tollfreeNpas.includes(npa)) isTollfreeDid = true;
+      }
     }
 
     const monthlyNum = isTollfreeDid ? tollfreeMarkup : localMarkup;
@@ -9379,7 +9401,7 @@ app.post('/api/me/didww/orders', requireAuth, async (req, res) => {
                 const idsFilter = didIds.join(',');
                 const didsResp = await didwwApiCall({
                   method: 'GET',
-                  path: `/dids?filter[id]=${idsFilter}&include=did_group.city,did_group.region,did_group.country,did_group.stock_keeping_units`
+                  path: `/dids?filter[id]=${idsFilter}&include=did_group.city,did_group.region,did_group.country,did_group.stock_keeping_units,did_group.did_group_type`
                 });
                 items = buildDidPurchaseLineItems(didsResp.data || includedDids, didsResp.included || []);
               }
@@ -9388,6 +9410,16 @@ app.post('/api/me/didww/orders', requireAuth, async (req, res) => {
             }
             if (!items || items.length === 0) {
               items = buildDidPurchaseLineItems(includedDids, []);
+            }
+
+            // If the UI indicated this was a toll-free purchase, enforce toll-free markup
+            // on the receipt even if DIDWW metadata doesn't clearly indicate toll-free.
+            if (isTollfreeFlag && Array.isArray(items) && items.length) {
+              const tfMarkup = parseFloat(process.env.DID_TOLLFREE_MONTHLY_MARKUP || '25.20') || 0;
+              for (const it of items) {
+                if (!it) continue;
+                it.monthlyPrice = tfMarkup;
+              }
             }
 
             const totalAmount = parseFloat(order.attributes?.amount || String(purchaseAmount || 0)) || purchaseAmount || 0;
@@ -9473,7 +9505,7 @@ app.get('/api/me/didww/dids', requireAuth, async (req, res) => {
             const orderData = await didwwApiCall({ method: 'GET', path: `/orders/${po.order_id}` });
             if (orderData.data?.attributes?.status === 'Completed') {
               // Fetch DIDs created by this order (with location and pricing includes)
-              const didsData = await didwwApiCall({ method: 'GET', path: `/dids?filter[order.id]=${po.order_id}&include=did_group.city,did_group.region,did_group.country,did_group.stock_keeping_units` });
+              const didsData = await didwwApiCall({ method: 'GET', path: `/dids?filter[order.id]=${po.order_id}&include=did_group.city,did_group.region,did_group.country,did_group.stock_keeping_units,did_group.did_group_type` });
               if (didsData.data && didsData.data.length > 0) {
                 const capacityPoolId = await getCapacityPoolId();
                 const sharedCapacityGroupId = await getSharedCapacityGroupId();
