@@ -3090,7 +3090,9 @@ app.get('/api/me/ai/conversations/sessions', requireAuth, async (req, res) => {
     );
     const total = Number(cntRows && cntRows[0] ? (cntRows[0].total || 0) : 0);
 
-    const [rows] = await pool.execute(
+    // Use query() instead of execute() because some MySQL setups error when binding LIMIT/OFFSET
+    // placeholders in prepared statements ("Incorrect arguments to mysqld_stmt_execute").
+    const [rows] = await pool.query(
       `SELECT c.call_id, c.call_domain, c.agent_id,
               a.display_name AS agent_name,
               c.from_number, c.to_number,
@@ -3108,8 +3110,8 @@ app.get('/api/me/ai/conversations/sessions', requireAuth, async (req, res) => {
        ) m ON m.call_domain = c.call_domain AND m.call_id = c.call_id
        ${whereSql}
        ORDER BY c.time_start DESC, c.id DESC
-       LIMIT ? OFFSET ?`,
-      [userId, ...params, pageSize, offset]
+       LIMIT ${parseInt(pageSize, 10)} OFFSET ${parseInt(offset, 10)}`,
+      [userId, ...params]
     );
 
     return res.json({ success: true, data: rows || [], total });
@@ -3134,13 +3136,14 @@ app.get('/api/me/ai/conversations/messages', requireAuth, async (req, res) => {
     const limitRaw = parseInt(String(req.query.limit || '1000'), 10) || 1000;
     const limit = Math.max(1, Math.min(5000, limitRaw));
 
-    const [rows] = await pool.execute(
+    // Use query() instead of execute() for LIMIT to avoid MySQL prepared-statement edge cases.
+    const [rows] = await pool.query(
       `SELECT id, role, content, created_at
        FROM ai_call_messages
        WHERE user_id = ? AND call_id = ? AND call_domain = ?
        ORDER BY id ASC
-       LIMIT ?`,
-      [userId, callId, callDomain, limit]
+       LIMIT ${parseInt(limit, 10)}`,
+      [userId, callId, callDomain]
     );
 
     return res.json({ success: true, data: rows || [] });
