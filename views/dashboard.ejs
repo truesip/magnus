@@ -75,7 +75,21 @@
     /* AI Tools pane: avoid toolbar content overflowing into adjacent cards */
     #ai-pane-tools .toolbar{flex-wrap:wrap}
     #ai-pane-tools .toolbar > *{min-width:0;max-width:100%}
-    #ai-pane-tools input[type="file"]{max-width:100%}
+
+    /* Allow inputs inside CSS grid/flex to shrink instead of overflowing (prevents overlap) */
+    #ai-pane-tools input[type="text"],
+    #ai-pane-tools input[type="number"],
+    #ai-pane-tools input[type="password"],
+    #ai-pane-tools input[type="email"],
+    #ai-pane-tools input[type="url"],
+    #ai-pane-tools input[type="file"],
+    #ai-pane-tools select,
+    #ai-pane-tools textarea{
+      min-width:0;
+      max-width:100%;
+      box-sizing:border-box;
+    }
+    #ai-pane-tools input[type="file"]{width:100%}
 
     /* Mobile optimizations */
     @media (max-width: 768px) {
