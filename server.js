@@ -1016,6 +1016,26 @@ async function initDb() {
     CONSTRAINT fk_ai_call_number FOREIGN KEY (ai_number_id) REFERENCES ai_numbers(id) ON DELETE SET NULL
   )`);
 
+  // AI call conversation messages (user + assistant) per inbound session.
+  // Logged by the agent runtime using the agent action token.
+  await pool.query(`CREATE TABLE IF NOT EXISTS ai_call_messages (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    message_id CHAR(32) NOT NULL,
+    user_id BIGINT NOT NULL,
+    agent_id BIGINT NULL,
+    call_id VARCHAR(64) NOT NULL,
+    call_domain VARCHAR(64) NOT NULL,
+    role ENUM('user','assistant') NOT NULL,
+    content TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_ai_call_message (call_domain, call_id, message_id),
+    KEY idx_ai_call_messages_user (user_id),
+    KEY idx_ai_call_messages_call (user_id, call_domain, call_id, id),
+    KEY idx_ai_call_messages_agent (agent_id),
+    CONSTRAINT fk_ai_call_messages_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_ai_call_messages_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL
+  )`);
+
   // One-time migration: drop legacy per-user API columns if present and add password_hash if missing
   try {
     const toDrop = ['api_key','api_secret'];
@@ -2398,6 +2418,73 @@ app.post('/api/ai/agent/send-document', async (req, res) => {
   }
 });
 
+// Agent-auth endpoint called by the Pipecat agent runtime.
+// Logs conversation turns (caller/user + assistant) tied to a Daily dial-in session.
+app.post('/api/ai/agent/log-message', async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const token = parseBearerToken(req.headers.authorization);
+    if (!token) return res.status(401).json({ success: false, message: 'Missing Authorization bearer token' });
+
+    const tokenHash = sha256(token);
+    const [arows] = await pool.execute(
+      'SELECT id, user_id FROM ai_agents WHERE agent_action_token_hash = ? LIMIT 1',
+      [tokenHash]
+    );
+    const agent = arows && arows[0];
+    if (!agent) return res.status(401).json({ success: false, message: 'Invalid token' });
+
+    const userId = Number(agent.user_id);
+    const agentId = Number(agent.id);
+
+    const callId = String(req.body?.call_id || req.body?.callId || '').trim();
+    const callDomain = String(req.body?.call_domain || req.body?.callDomain || '').trim();
+    const messageId = String(req.body?.message_id || req.body?.messageId || '').trim();
+
+    const roleRaw = String(req.body?.role || '').trim().toLowerCase();
+    const role = (roleRaw === 'assistant') ? 'assistant' : (roleRaw === 'user' ? 'user' : '');
+
+    let content = String(req.body?.content || '').trim();
+
+    if (!callId || !callDomain) {
+      return res.status(400).json({ success: false, message: 'call_id and call_domain are required' });
+    }
+    if (callId.length > 64 || callDomain.length > 64) {
+      return res.status(400).json({ success: false, message: 'call_id/call_domain are too long' });
+    }
+    if (!messageId || !/^[a-f0-9]{32}$/i.test(messageId)) {
+      return res.status(400).json({ success: false, message: 'message_id must be a 32-char hex string' });
+    }
+    if (!role) {
+      return res.status(400).json({ success: false, message: 'role must be user or assistant' });
+    }
+    if (!content) {
+      return res.json({ success: true, ignored: true });
+    }
+
+    // Hard cap message size to protect DB.
+    if (content.length > 8000) content = content.slice(0, 8000);
+
+    let inserted = false;
+    try {
+      const [ins] = await pool.execute(
+        'INSERT IGNORE INTO ai_call_messages (message_id, user_id, agent_id, call_id, call_domain, role, content) VALUES (?,?,?,?,?,?,?)',
+        [messageId.toLowerCase(), userId, agentId, callId, callDomain, role, content]
+      );
+      inserted = !!(ins && ins.affectedRows > 0);
+    } catch (e) {
+      if (DEBUG) console.warn('[ai.agent.log-message] insert failed:', e?.message || e);
+      return res.status(500).json({ success: false, message: 'Failed to log message' });
+    }
+
+    return res.json({ success: true, inserted });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.agent.log-message] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to log message' });
+  }
+});
+
 // ========== AI Agents (Pipecat Cloud) ==========
 const AI_MAX_AGENTS = Math.max(1, parseInt(process.env.AI_MAX_AGENTS || '5', 10) || 5);
 const AI_MAX_NUMBERS = Math.max(1, parseInt(process.env.AI_MAX_NUMBERS || '5', 10) || 5);
@@ -2967,6 +3054,99 @@ app.get('/api/me/ai/agents', requireAuth, async (req, res) => {
   } catch (e) {
     if (DEBUG) console.error('[ai.agents.list] error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to load agents' });
+  }
+});
+
+// List inbound AI call sessions (Daily dial-in) for the logged-in user.
+// These are the "sessions" used for conversation transcript viewing.
+app.get('/api/me/ai/conversations/sessions', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const page = Math.max(0, parseInt(String(req.query.page || '0'), 10) || 0);
+    const pageSizeRaw = parseInt(String(req.query.pageSize || '25'), 10) || 25;
+    const pageSize = Math.max(1, Math.min(100, pageSizeRaw));
+    const offset = page * pageSize;
+
+    const agentIdRaw = String(req.query.agent_id || req.query.agentId || '').trim();
+    const agentId = agentIdRaw ? agentIdRaw : '';
+
+    const where = [`c.user_id = ?`, `c.direction = 'inbound'`];
+    const params = [userId];
+
+    if (agentId) {
+      where.push('c.agent_id = ?');
+      params.push(agentId);
+    }
+
+    const whereSql = where.length ? ('WHERE ' + where.join(' AND ')) : '';
+
+    const [cntRows] = await pool.execute(
+      `SELECT COUNT(*) AS total
+       FROM ai_call_logs c
+       ${whereSql}`,
+      params
+    );
+    const total = Number(cntRows && cntRows[0] ? (cntRows[0].total || 0) : 0);
+
+    const [rows] = await pool.execute(
+      `SELECT c.call_id, c.call_domain, c.agent_id,
+              a.display_name AS agent_name,
+              c.from_number, c.to_number,
+              c.time_start, c.time_connect, c.time_end,
+              c.duration, c.billsec,
+              c.status,
+              COALESCE(m.msg_count, 0) AS message_count
+       FROM ai_call_logs c
+       LEFT JOIN ai_agents a ON a.id = c.agent_id
+       LEFT JOIN (
+         SELECT call_domain, call_id, COUNT(*) AS msg_count
+         FROM ai_call_messages
+         WHERE user_id = ?
+         GROUP BY call_domain, call_id
+       ) m ON m.call_domain = c.call_domain AND m.call_id = c.call_id
+       ${whereSql}
+       ORDER BY c.time_start DESC, c.id DESC
+       LIMIT ? OFFSET ?`,
+      [userId, ...params, pageSize, offset]
+    );
+
+    return res.json({ success: true, data: rows || [], total });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.conversations.sessions] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load sessions' });
+  }
+});
+
+// List conversation messages for a single inbound session.
+app.get('/api/me/ai/conversations/messages', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const callId = String(req.query.call_id || req.query.callId || '').trim();
+    const callDomain = String(req.query.call_domain || req.query.callDomain || '').trim();
+    if (!callId || !callDomain) {
+      return res.status(400).json({ success: false, message: 'call_id and call_domain are required' });
+    }
+
+    const limitRaw = parseInt(String(req.query.limit || '1000'), 10) || 1000;
+    const limit = Math.max(1, Math.min(5000, limitRaw));
+
+    const [rows] = await pool.execute(
+      `SELECT id, role, content, created_at
+       FROM ai_call_messages
+       WHERE user_id = ? AND call_id = ? AND call_domain = ?
+       ORDER BY id ASC
+       LIMIT ?`,
+      [userId, callId, callDomain, limit]
+    );
+
+    return res.json({ success: true, data: rows || [] });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.conversations.messages] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load messages' });
   }
 });
 

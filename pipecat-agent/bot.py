@@ -1,8 +1,10 @@
+import asyncio
 import audioop
 import inspect
 import io
 import json
 import os
+import uuid
 import wave
 from typing import Any, Optional
 
@@ -384,6 +386,10 @@ async def bot(session_args: Any):
     dialin_settings = _extract_dialin_settings(body)
     daily_api_key, daily_api_url = _extract_daily_api(body)
 
+    # Used for per-session transcript logging back to the portal
+    call_id = str(dialin_settings.call_id) if dialin_settings else ""
+    call_domain = str(dialin_settings.call_domain) if dialin_settings else ""
+
     daily_params = DailyParams(
         api_key=daily_api_key or "",
         api_url=daily_api_url or "https://api.daily.co/v1",
@@ -502,6 +508,56 @@ async def bot(session_args: Any):
         )
     else:
         context = OpenAILLMContext(messages=[{"role": "system", "content": prompt}] if prompt else [])
+
+    # Optional: log conversation turns back to the portal for the dashboard UI.
+    portal_log_client: Optional[httpx.AsyncClient] = None
+    pending_log_tasks: set[asyncio.Task] = set()
+
+    if portal_base_url and portal_token and call_id and call_domain:
+        log_url = f"{portal_base_url}/api/ai/agent/log-message"
+        headers = {
+            "Authorization": f"Bearer {portal_token}",
+            "Accept": "application/json",
+        }
+        portal_log_client = httpx.AsyncClient(timeout=5.0, headers=headers)
+
+        async def _log_turn(role: str, content: str) -> None:
+            if not portal_log_client:
+                return
+            text = str(content or "").strip()
+            if not text:
+                return
+            if len(text) > 8000:
+                text = text[:8000]
+            payload = {
+                "message_id": uuid.uuid4().hex,
+                "role": role,
+                "content": text,
+                "call_id": call_id,
+                "call_domain": call_domain,
+            }
+            try:
+                await portal_log_client.post(log_url, json=payload)
+            except Exception as e:
+                # Best-effort; don't break the call if logging fails.
+                logger.debug(f"Portal transcript log failed: {e}")
+
+        orig_add = context.add_message
+
+        def add_message_hook(msg: Any) -> None:
+            try:
+                if isinstance(msg, dict):
+                    r = str(msg.get("role") or "").strip().lower()
+                    if r in ("user", "assistant"):
+                        c = msg.get("content")
+                        t = asyncio.create_task(_log_turn(r, str(c or "")))
+                        pending_log_tasks.add(t)
+                        t.add_done_callback(lambda tt: pending_log_tasks.discard(tt))
+            except Exception:
+                pass
+            return orig_add(msg)
+
+        context.add_message = add_message_hook  # type: ignore
 
     ctx = llm.create_context_aggregator(context)
 
@@ -632,4 +688,17 @@ async def bot(session_args: Any):
             await task.queue_frames([TTSTextFrame(greeting, aggregated_by=AggregationType.SENTENCE)])
 
     runner = PipelineRunner()
-    await runner.run(task)
+    try:
+        await runner.run(task)
+    finally:
+        # Best-effort: flush a few pending transcript log tasks.
+        try:
+            if pending_log_tasks:
+                await asyncio.wait(pending_log_tasks, timeout=2.0)
+        except Exception:
+            pass
+        if portal_log_client:
+            try:
+                await portal_log_client.aclose()
+            except Exception:
+                pass

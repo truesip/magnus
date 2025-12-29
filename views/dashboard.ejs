@@ -323,6 +323,7 @@
         <div class="ai-subtabs">
           <button id="ai-subtab-agents" type="button" class="ai-subtab active">Agents</button>
           <button id="ai-subtab-tools" type="button" class="ai-subtab">Tools</button>
+          <button id="ai-subtab-conversations" type="button" class="ai-subtab">Conversations</button>
         </div>
 
         <div id="ai-pane-agents">
@@ -357,58 +358,92 @@
 
         <div id="ai-pane-tools" style="display:none">
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;align-items:start">
-            <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:16px">
-              <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-                <h3 style="margin:0 0 10px 0">Email (SMTP)</h3>
-                <div class="muted" style="margin-bottom:10px">Used when your AI agent emails documents to callers.</div>
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-                  <input id="smtpHost" type="text" placeholder="SMTP host (e.g. smtp.gmail.com)">
-                  <input id="smtpPort" type="number" placeholder="Port (e.g. 587)">
-                  <label style="display:flex;align-items:center;gap:6px;font-size:13px">
-                    <input id="smtpSecure" type="checkbox"> Use SSL (secure)
-                  </label>
-                  <div></div>
-                  <input id="smtpUsername" type="text" placeholder="Username">
-                  <input id="smtpPassword" type="password" placeholder="Password (leave blank to keep current)">
-                  <input id="smtpFromEmail" type="email" placeholder="From email (e.g. you@domain.com)">
-                  <input id="smtpFromName" type="text" placeholder="From name (optional)">
-                  <input id="smtpReplyTo" type="email" placeholder="Reply-to (optional)">
-                  <input id="smtpTestToEmail" type="email" placeholder="Test recipient (optional)">
-                </div>
-                <div class="toolbar" style="margin-top:10px">
-                  <button id="saveSmtpBtn">Save SMTP</button>
-                  <button id="testSmtpBtn" style="background:#6b7280">Send Test Email</button>
-                  <span id="smtpStatus" class="muted" style="margin-left:auto"></span>
-                </div>
+            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+              <h3 style="margin:0 0 10px 0">Email (SMTP)</h3>
+              <div class="muted" style="margin-bottom:10px">Used when your AI agent emails documents to callers.</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                <input id="smtpHost" type="text" placeholder="SMTP host (e.g. smtp.gmail.com)">
+                <input id="smtpPort" type="number" placeholder="Port (e.g. 587)">
+                <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+                  <input id="smtpSecure" type="checkbox"> Use SSL (secure)
+                </label>
+                <div></div>
+                <input id="smtpUsername" type="text" placeholder="Username">
+                <input id="smtpPassword" type="password" placeholder="Password (leave blank to keep current)">
+                <input id="smtpFromEmail" type="email" placeholder="From email (e.g. you@domain.com)">
+                <input id="smtpFromName" type="text" placeholder="From name (optional)">
+                <input id="smtpReplyTo" type="email" placeholder="Reply-to (optional)">
+                <input id="smtpTestToEmail" type="email" placeholder="Test recipient (optional)">
+              </div>
+              <div class="toolbar" style="margin-top:10px">
+                <button id="saveSmtpBtn">Save SMTP</button>
+                <button id="testSmtpBtn" style="background:#6b7280">Send Test Email</button>
+                <span id="smtpStatus" class="muted" style="margin-left:auto"></span>
               </div>
             </div>
 
-            <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:16px">
-              <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-                <h3 style="margin:0 0 10px 0">Call Transfer</h3>
-                <div class="muted" style="margin-bottom:10px">When a caller asks to be transferred, your AI agent can cold-transfer the call to this destination and then leave the call.</div>
-                <div style="display:grid;grid-template-columns:1fr;gap:8px">
-                  <input id="aiTransferNumber" type="text" placeholder="Transfer destination (E.164 like +18005551234 or sip:agent@domain)">
-                </div>
-                <div class="toolbar" style="margin-top:10px">
-                  <button id="saveAiTransferBtn">Save Transfer</button>
-                  <span id="aiTransferStatus" class="muted" style="margin-left:auto"></span>
-                </div>
+            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+              <h3 style="margin:0 0 10px 0">Call Transfer</h3>
+              <div class="muted" style="margin-bottom:10px">When a caller asks to be transferred, your AI agent can cold-transfer the call to this destination and then leave the call.</div>
+              <div style="display:grid;grid-template-columns:1fr;gap:8px">
+                <input id="aiTransferNumber" type="text" placeholder="Transfer destination (E.164 like +18005551234 or sip:agent@domain)">
               </div>
+              <div class="toolbar" style="margin-top:10px">
+                <button id="saveAiTransferBtn">Save Transfer</button>
+                <span id="aiTransferStatus" class="muted" style="margin-left:auto"></span>
+              </div>
+            </div>
 
-              <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-                <h3 style="margin:0 0 10px 0">Document Templates</h3>
-                <div class="muted" style="margin-bottom:10px">Upload a .docx with placeholders like <code>[[Name]]</code> and <code>[[Address]]</code>.</div>
-                <div class="toolbar" style="flex-wrap:wrap">
-                  <input id="docTemplateName" type="text" placeholder="Template name" style="flex:1;min-width:160px">
-                  <input id="docTemplateFile" type="file" accept=".docx">
-                  <button id="uploadDocTemplateBtn" style="background:#4f46e5">Upload</button>
-                </div>
-                <table id="ai-doc-templates-table" style="display:none">
-                  <thead><tr><th>Name</th><th>File</th><th>Updated</th><th>Actions</th></tr></thead>
-                  <tbody></tbody>
-                </table>
-                <div id="ai-doc-templates-empty" class="muted">Loading…</div>
+            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+              <h3 style="margin:0 0 10px 0">Document Templates</h3>
+              <div class="muted" style="margin-bottom:10px">Upload a .docx with placeholders like <code>[[Name]]</code> and <code>[[Address]]</code>.</div>
+              <div class="toolbar" style="flex-wrap:wrap">
+                <input id="docTemplateName" type="text" placeholder="Template name" style="flex:1;min-width:160px">
+                <input id="docTemplateFile" type="file" accept=".docx">
+                <button id="uploadDocTemplateBtn" style="background:#4f46e5">Upload</button>
+              </div>
+              <table id="ai-doc-templates-table" style="display:none">
+                <thead><tr><th>Name</th><th>File</th><th>Updated</th><th>Actions</th></tr></thead>
+                <tbody></tbody>
+              </table>
+              <div id="ai-doc-templates-empty" class="muted">Loading…</div>
+            </div>
+          </div>
+        </div>
+
+        <div id="ai-pane-conversations" style="display:none">
+          <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
+            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                <h3 style="margin:0">Inbound Sessions</h3>
+                <div style="margin-left:auto"></div>
+                <select id="aiConvAgentFilter" style="width:170px">
+                  <option value="">All agents</option>
+                </select>
+                <button id="aiConvRefreshBtn" type="button" style="background:#6b7280">Refresh</button>
+              </div>
+              <table id="ai-conv-sessions-table" style="display:none">
+                <thead><tr><th>Start</th><th>From</th><th>Agent</th><th>Msgs</th><th>Actions</th></tr></thead>
+                <tbody></tbody>
+              </table>
+              <div id="ai-conv-sessions-empty" class="muted">Loading…</div>
+              <div class="toolbar" id="ai-conv-sessions-pager" style="display:none">
+                <button id="aiConvPrev">Prev</button>
+                <span id="aiConvPageInfo" class="muted"></span>
+                <button id="aiConvNext">Next</button>
+              </div>
+            </div>
+
+            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                <h3 style="margin:0">Conversation</h3>
+                <span id="aiConvSessionMeta" class="muted" style="margin-left:auto"></span>
+              </div>
+              <div id="aiConvMessages" style="max-height:520px;overflow:auto;border:1px solid #e5e7eb;border-radius:12px;padding:10px;background:#f9fafb"></div>
+              <div id="aiConvMessagesEmpty" class="muted" style="margin-top:8px">Select a session to view the transcript.</div>
+            </div>
+          </div>
+        </div>
               </div>
             </div>
           </div>
@@ -585,20 +620,27 @@
     const aiSubtabs = {
       agents: document.getElementById('ai-subtab-agents'),
       tools: document.getElementById('ai-subtab-tools'),
+      conversations: document.getElementById('ai-subtab-conversations'),
     };
     const aiPanes = {
       agents: document.getElementById('ai-pane-agents'),
       tools: document.getElementById('ai-pane-tools'),
+      conversations: document.getElementById('ai-pane-conversations'),
     };
 
     function activateAiSubtab(name){
-      if (!aiSubtabs.agents || !aiSubtabs.tools || !aiPanes.agents || !aiPanes.tools) return;
       const n = String(name || '').toLowerCase();
-      const active = (n === 'tools') ? 'tools' : 'agents';
-      aiSubtabs.agents.classList.toggle('active', active === 'agents');
-      aiSubtabs.tools.classList.toggle('active', active === 'tools');
-      aiPanes.agents.style.display = active === 'agents' ? 'block' : 'none';
-      aiPanes.tools.style.display = active === 'tools' ? 'block' : 'none';
+      const active = (n === 'tools' || n === 'conversations') ? n : 'agents';
+      Object.keys(aiSubtabs).forEach(k => {
+        const el = aiSubtabs[k];
+        if (!el) return;
+        el.classList.toggle('active', k === active);
+      });
+      Object.keys(aiPanes).forEach(k => {
+        const el = aiPanes[k];
+        if (!el) return;
+        el.style.display = (k === active) ? 'block' : 'none';
+      });
     }
 
     if (aiSubtabs.agents) {
@@ -616,6 +658,13 @@
         loadSmtpSettings();
         loadAiTransferSettings();
         loadDocTemplates();
+      });
+    }
+    if (aiSubtabs.conversations) {
+      aiSubtabs.conversations.addEventListener('click', (e) => {
+        e.preventDefault();
+        activateAiSubtab('conversations');
+        openAiConversationsTab();
       });
     }
     tabs.overview.addEventListener('click',e=>{e.preventDefault();activate('overview');loadStats();});
@@ -646,6 +695,299 @@
     // AI email + doc templates
     let smtpHasPassword = false;
     let docTemplatesData = [];
+
+    // AI Conversations
+    let aiConvUiInit = false;
+    let aiConvPage = 0;
+    const aiConvPageSize = 25;
+    let aiConvTotal = 0;
+    let aiConvSessionsData = [];
+    let aiConvSelected = null; // { call_id, call_domain }
+
+    function fmtDateTime(val){
+      if (!val) return '';
+      try {
+        const d = new Date(val);
+        if (!Number.isNaN(d.getTime())) return d.toLocaleString();
+      } catch {}
+      return String(val);
+    }
+
+    function clearAiConvMessages(msg){
+      const box = $('#aiConvMessages');
+      const empty = $('#aiConvMessagesEmpty');
+      const meta = $('#aiConvSessionMeta');
+      if (box) box.innerHTML = '';
+      if (meta) meta.textContent = '';
+      if (empty) {
+        empty.style.display = 'block';
+        empty.textContent = msg || 'Select a session to view the transcript.';
+      }
+    }
+
+    function renderAiConvAgentFilter(){
+      const sel = $('#aiConvAgentFilter');
+      if (!sel) return;
+      const current = String(sel.value || '');
+      sel.innerHTML = '';
+      sel.appendChild(new Option('All agents', ''));
+      for (const a of (aiAgentsData || [])) {
+        const id = a && a.id != null ? String(a.id) : '';
+        if (!id) continue;
+        const name = String(a.display_name || '').trim();
+        sel.appendChild(new Option(name || `Agent ${id}`, id));
+      }
+      const still = Array.from(sel.options || []).some(o => String(o.value) === current);
+      sel.value = still ? current : '';
+    }
+
+    function initAiConversationsUI(){
+      if (aiConvUiInit) return;
+      aiConvUiInit = true;
+
+      const refreshBtn = $('#aiConvRefreshBtn');
+      if (refreshBtn) refreshBtn.addEventListener('click', (e) => { e.preventDefault(); loadAiConversationSessions(); });
+
+      const agentSel = $('#aiConvAgentFilter');
+      if (agentSel) agentSel.addEventListener('change', () => {
+        aiConvPage = 0;
+        aiConvSelected = null;
+        clearAiConvMessages();
+        loadAiConversationSessions();
+      });
+
+      const prev = $('#aiConvPrev');
+      if (prev) prev.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (aiConvPage > 0) {
+          aiConvPage -= 1;
+          loadAiConversationSessions();
+        }
+      });
+
+      const next = $('#aiConvNext');
+      if (next) next.addEventListener('click', (e) => {
+        e.preventDefault();
+        if ((aiConvPage + 1) * aiConvPageSize < aiConvTotal) {
+          aiConvPage += 1;
+          loadAiConversationSessions();
+        }
+      });
+
+      document.addEventListener('click', (ev) => {
+        const t = ev.target;
+        if (!t || !t.classList || !t.classList.contains('ai-conv-open')) return;
+        ev.preventDefault();
+        const callId = String(t.getAttribute('data-call-id') || '');
+        const callDomain = String(t.getAttribute('data-call-domain') || '');
+        const found = (aiConvSessionsData || []).find(s => String(s.call_id || '') === callId && String(s.call_domain || '') === callDomain);
+        if (found) {
+          selectAiConversationSession(found);
+        } else if (callId && callDomain) {
+          selectAiConversationSession({ call_id: callId, call_domain: callDomain });
+        }
+      });
+    }
+
+    async function openAiConversationsTab(){
+      initAiConversationsUI();
+
+      // Populate agent filter
+      try {
+        if (!Array.isArray(aiAgentsData) || aiAgentsData.length === 0) {
+          await loadAiAgents();
+        }
+      } catch {}
+      renderAiConvAgentFilter();
+
+      // Load sessions
+      loadAiConversationSessions();
+    }
+
+    function renderAiConversationSessions(){
+      const table = $('#ai-conv-sessions-table');
+      const empty = $('#ai-conv-sessions-empty');
+      const pager = $('#ai-conv-sessions-pager');
+      const pageInfo = $('#aiConvPageInfo');
+      const prev = $('#aiConvPrev');
+      const next = $('#aiConvNext');
+      if (!table || !empty) return;
+      const tbody = table.querySelector('tbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+
+      if (!aiConvSessionsData || !aiConvSessionsData.length) {
+        table.style.display = 'none';
+        if (pager) pager.style.display = 'none';
+        if (pageInfo) pageInfo.textContent = '';
+        empty.style.display = 'block';
+        empty.textContent = 'No sessions yet.';
+        return;
+      }
+
+      for (const s of aiConvSessionsData) {
+        const callId = String(s.call_id || '');
+        const callDomain = String(s.call_domain || '');
+        const start = s.time_start ? fmtDateTime(s.time_start) : '';
+        const from = String(s.from_number || '-');
+        const agentName = String(s.agent_name || '-');
+        const msgCount = (s.message_count != null ? String(s.message_count) : '0');
+        const isSelected = aiConvSelected && String(aiConvSelected.call_id || '') === callId && String(aiConvSelected.call_domain || '') === callDomain;
+
+        const tr = document.createElement('tr');
+        if (isSelected) tr.style.background = '#eef2ff';
+        tr.innerHTML =
+          `<td>${escapeHtml(start)}</td>`+
+          `<td>${escapeHtml(from)}</td>`+
+          `<td>${escapeHtml(agentName)}</td>`+
+          `<td>${escapeHtml(msgCount)}</td>`+
+          `<td><button type="button" class="ai-conv-open" data-call-id="${escapeHtml(callId)}" data-call-domain="${escapeHtml(callDomain)}">Open</button></td>`;
+        tbody.appendChild(tr);
+      }
+
+      empty.style.display = 'none';
+      table.style.display = 'table';
+
+      const totalPages = aiConvTotal > 0 ? Math.max(1, Math.ceil(aiConvTotal / aiConvPageSize)) : 1;
+      if (pageInfo) pageInfo.textContent = `Page ${aiConvPage + 1} of ${totalPages}`;
+
+      if (pager) {
+        pager.style.display = (aiConvTotal > aiConvPageSize) ? 'flex' : 'none';
+      }
+      if (prev) prev.disabled = (aiConvPage <= 0);
+      if (next) next.disabled = ((aiConvPage + 1) * aiConvPageSize >= aiConvTotal);
+    }
+
+    async function loadAiConversationSessions(){
+      const table = $('#ai-conv-sessions-table');
+      const empty = $('#ai-conv-sessions-empty');
+      const pager = $('#ai-conv-sessions-pager');
+      if (empty) { empty.style.display = 'block'; empty.textContent = 'Loading…'; }
+      if (table) table.style.display = 'none';
+      if (pager) pager.style.display = 'none';
+
+      try {
+        const agentSel = $('#aiConvAgentFilter');
+        const agentId = agentSel ? String(agentSel.value || '').trim() : '';
+        const url = `/api/me/ai/conversations/sessions?page=${aiConvPage}&pageSize=${aiConvPageSize}` + (agentId ? `&agent_id=${encodeURIComponent(agentId)}` : '');
+        const r = await fetch(url);
+        const j = await r.json();
+        if (!j || j.success === false) {
+          aiConvSessionsData = [];
+          aiConvTotal = 0;
+          renderAiConversationSessions();
+          if (empty) empty.textContent = j?.message || 'Failed to load sessions';
+          return;
+        }
+        aiConvSessionsData = Array.isArray(j.data) ? j.data : [];
+        const total = Number(j.total);
+        aiConvTotal = Number.isFinite(total) ? total : aiConvSessionsData.length;
+
+        // If current page is out of bounds (e.g. filter changed), jump back and refetch.
+        if (aiConvTotal > 0 && aiConvPage > 0 && aiConvPage * aiConvPageSize >= aiConvTotal) {
+          aiConvPage = 0;
+          return loadAiConversationSessions();
+        }
+
+        renderAiConversationSessions();
+      } catch (e) {
+        aiConvSessionsData = [];
+        aiConvTotal = 0;
+        renderAiConversationSessions();
+        if (empty) empty.textContent = 'Failed to load sessions';
+      }
+    }
+
+    function renderAiConversationMessages(msgs){
+      const box = $('#aiConvMessages');
+      const empty = $('#aiConvMessagesEmpty');
+      if (!box || !empty) return;
+
+      box.innerHTML = '';
+
+      const arr = Array.isArray(msgs) ? msgs : [];
+      if (!arr.length) {
+        empty.style.display = 'block';
+        empty.textContent = 'No messages recorded for this session.';
+        return;
+      }
+
+      empty.style.display = 'none';
+
+      for (const m of arr) {
+        const role = String(m.role || '');
+        const isUser = role === 'user';
+        const who = isUser ? 'Caller' : 'AI';
+        const ts = m.created_at ? fmtDateTime(m.created_at) : '';
+
+        const card = document.createElement('div');
+        card.style.margin = '0 0 10px 0';
+        card.style.padding = '8px 10px';
+        card.style.border = '1px solid #e5e7eb';
+        card.style.borderRadius = '12px';
+        card.style.background = isUser ? '#ffffff' : '#f3f4f6';
+
+        const header = document.createElement('div');
+        header.style.fontSize = '12px';
+        header.style.color = '#6b7280';
+        header.style.marginBottom = '4px';
+        header.textContent = ts ? `${who} • ${ts}` : who;
+
+        const body = document.createElement('div');
+        body.style.whiteSpace = 'pre-wrap';
+        body.style.fontSize = '13px';
+        body.textContent = String(m.content || '');
+
+        card.appendChild(header);
+        card.appendChild(body);
+        box.appendChild(card);
+      }
+
+      box.scrollTop = box.scrollHeight;
+    }
+
+    async function loadAiConversationMessages(callDomain, callId){
+      const empty = $('#aiConvMessagesEmpty');
+      if (empty) {
+        empty.style.display = 'block';
+        empty.textContent = 'Loading…';
+      }
+      const box = $('#aiConvMessages');
+      if (box) box.innerHTML = '';
+
+      try {
+        const url = `/api/me/ai/conversations/messages?call_id=${encodeURIComponent(String(callId || ''))}&call_domain=${encodeURIComponent(String(callDomain || ''))}&limit=5000`;
+        const r = await fetch(url);
+        const j = await r.json();
+        if (!j || j.success === false) {
+          if (empty) empty.textContent = j?.message || 'Failed to load messages';
+          return;
+        }
+        renderAiConversationMessages(j.data);
+      } catch (e) {
+        if (empty) empty.textContent = 'Failed to load messages';
+      }
+    }
+
+    function selectAiConversationSession(session){
+      const callId = String(session && session.call_id ? session.call_id : '');
+      const callDomain = String(session && session.call_domain ? session.call_domain : '');
+      if (!callId || !callDomain) return;
+
+      aiConvSelected = { call_id: callId, call_domain: callDomain };
+      renderAiConversationSessions();
+
+      const meta = $('#aiConvSessionMeta');
+      if (meta) {
+        const parts = [];
+        if (session.from_number) parts.push(`From ${String(session.from_number)}`);
+        if (session.time_start) parts.push(fmtDateTime(session.time_start));
+        parts.push(`${callDomain}/${callId}`);
+        meta.textContent = parts.join(' • ');
+      }
+
+      loadAiConversationMessages(callDomain, callId);
+    }
 
     function refreshAgentDefaultTemplateSelectOptions(){
       const sel = $('#aiAgentDefaultTemplateSelect');
