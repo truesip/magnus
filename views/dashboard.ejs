@@ -72,6 +72,11 @@
     .ai-subtab{background:#e5e7eb !important;color:#111827 !important;border:1px solid #d1d5db !important;border-radius:999px !important;padding:6px 10px !important;font-size:12px !important}
     .ai-subtab.active{background:#4f46e5 !important;color:#ffffff !important;border-color:#4338ca !important}
 
+    /* AI Tools pane: avoid toolbar content overflowing into adjacent cards */
+    #ai-pane-tools .toolbar{flex-wrap:wrap}
+    #ai-pane-tools .toolbar > *{min-width:0;max-width:100%}
+    #ai-pane-tools input[type="file"]{max-width:100%}
+
     /* Mobile optimizations */
     @media (max-width: 768px) {
       header{flex-wrap:wrap;align-items:flex-start;}
