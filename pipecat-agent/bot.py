@@ -206,6 +206,14 @@ def _extract_daily_api(body: Any) -> tuple[Optional[str], Optional[str]]:
     return api_key, api_url
 
 
+def _extract_session_mode(body: Any) -> str:
+    """Return a lowercased mode string from the session body (if any)."""
+    if not isinstance(body, dict):
+        return ""
+    mode = body.get("mode") or body.get("session_mode") or body.get("sessionMode")
+    return str(mode or "").strip().lower()
+
+
 _cartesia_default_voice_cache: Optional[str] = None
 
 
@@ -314,6 +322,7 @@ async def bot(session_args: Any):
 
     tools = []
     has_send_document_tool = False
+    has_send_video_meeting_tool = False
     has_transfer_tool = False
 
     # Call transfer (cold transfer) - uses the configured OPERATOR_NUMBER destination.
@@ -360,6 +369,31 @@ async def bot(session_args: Any):
         )
         has_send_document_tool = True
 
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_video_meeting_link",
+                    "description": "Start a live video meeting and email the caller a Daily room link to join.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "to_email": {
+                                "type": "string",
+                                "description": "Recipient email address",
+                            },
+                            "subject": {
+                                "type": "string",
+                                "description": "Email subject (optional)",
+                            },
+                        },
+                        "required": ["to_email"],
+                    },
+                },
+            }
+        )
+        has_send_video_meeting_tool = True
+
     # Extend the user-provided prompt with minimal tool guidance.
     prompt = base_prompt
     if has_send_document_tool:
@@ -368,6 +402,12 @@ async def bot(session_args: Any):
             "Collect their email and any details needed for the template placeholders, "
             "then call the send_document tool with to_email and variables. "
             "After the tool returns, confirm whether the email was sent."
+        )
+    if has_send_video_meeting_tool:
+        prompt += (
+            "\n\nIf the caller asks to switch to a video meeting, collect their email address "
+            "and call the send_video_meeting_link tool with to_email. "
+            "After the tool returns, tell them to open the link from their email to join."
         )
     if has_transfer_tool:
         prompt += (
@@ -386,6 +426,9 @@ async def bot(session_args: Any):
     dialin_settings = _extract_dialin_settings(body)
     daily_api_key, daily_api_url = _extract_daily_api(body)
 
+    session_mode = _extract_session_mode(body)
+    is_video_meeting = session_mode == "video_meeting"
+
     # Used for per-session transcript logging back to the portal
     call_id = str(dialin_settings.call_id) if dialin_settings else ""
     call_domain = str(dialin_settings.call_domain) if dialin_settings else ""
@@ -398,6 +441,9 @@ async def bot(session_args: Any):
         audio_out_enabled=True,
         audio_in_sample_rate=sample_rate,
         audio_out_sample_rate=sample_rate,
+        # Enable video output only for explicit video meeting sessions.
+        video_out_enabled=is_video_meeting,
+        video_out_is_live=is_video_meeting,
         # NOTE: vad_enabled is deprecated in Pipecat 0.0.98; supplying a vad_analyzer is sufficient.
         vad_analyzer=SileroVADAnalyzer(),
     )
@@ -489,6 +535,61 @@ async def bot(session_args: Any):
 
         llm.register_function("send_document", _send_document)
 
+    if has_send_video_meeting_tool:
+        async def _send_video_meeting_link(params: FunctionCallParams) -> None:
+            args = dict(params.arguments or {})
+            to_email = str(args.get("to_email") or args.get("toEmail") or args.get("email") or "").strip()
+            subject = str(args.get("subject") or "").strip()
+
+            if not to_email:
+                await params.result_callback({"success": False, "message": "to_email is required"})
+                return
+
+            if not portal_base_url or not portal_token:
+                await params.result_callback({
+                    "success": False,
+                    "message": "Portal integration not configured (missing PORTAL_BASE_URL or PORTAL_AGENT_ACTION_TOKEN)",
+                })
+                return
+
+            payload: dict[str, Any] = {
+                "to_email": to_email,
+            }
+            if subject:
+                payload["subject"] = subject
+
+            if dialin_settings:
+                payload["call_id"] = str(dialin_settings.call_id)
+                payload["call_domain"] = str(dialin_settings.call_domain)
+
+            url = f"{portal_base_url}/api/ai/agent/send-video-meeting-link"
+            headers = {
+                "Authorization": f"Bearer {portal_token}",
+                "Accept": "application/json",
+            }
+
+            try:
+                async with httpx.AsyncClient(timeout=25.0) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = {"success": False, "message": resp.text}
+
+                if resp.status_code >= 400 or (isinstance(data, dict) and data.get("success") is False):
+                    await params.result_callback({
+                        "success": False,
+                        "status_code": resp.status_code,
+                        "response": data,
+                    })
+                    return
+
+                await params.result_callback({"success": True, "response": data})
+            except Exception as e:
+                await params.result_callback({"success": False, "message": str(e)})
+
+        llm.register_function("send_video_meeting_link", _send_video_meeting_link)
+
     voice_id = await _resolve_cartesia_voice_id(api_key=cartesia_key)
     tts = CartesiaTTSService(
         api_key=cartesia_key,
@@ -562,13 +663,53 @@ async def bot(session_args: Any):
     ctx = llm.create_context_aggregator(context)
 
     # Optional: background ambience mixed into bot speech (TTSAudioRawFrame only).
+    # For video meetings, we intentionally skip this so we don't feed background noise into
+    # the avatar renderer (which can degrade lip-sync quality).
     bg_mixer = None
-    if background_audio_url:
+    if background_audio_url and not is_video_meeting:
         try:
             pcm = await _load_background_pcm16_mono(url=background_audio_url, target_sample_rate=sample_rate)
             bg_mixer = BackgroundTTSMixer(background_pcm16_mono=pcm, gain=background_audio_gain)
         except Exception as e:
             logger.warning(f"Background audio disabled: {e}")
+
+    heygen_http_session = None
+    heygen_service = None
+
+    if is_video_meeting:
+        heygen_key = _require("HEYGEN_API_KEY")
+        try:
+            import aiohttp
+            from pipecat.frames.frames import UserStoppedSpeakingFrame
+            from pipecat.services.heygen.api_interactive_avatar import NewSessionRequest
+            from pipecat.services.heygen.video import HeyGenVideoService
+        except Exception as e:
+            raise RuntimeError("HeyGen dependencies missing. Install pipecat-ai[heygen].") from e
+
+        avatar_id = _env("HEYGEN_AVATAR_ID", "Shawn_Therapist_public").strip() or "Shawn_Therapist_public"
+
+        class ContinuousListeningHeyGenVideoService(HeyGenVideoService):
+            async def start(self, frame):
+                await super().start(frame)
+                # Keep a continuous "listening" gesture when idle.
+                try:
+                    await self._client.start_agent_listening()
+                except Exception:
+                    pass
+
+            async def process_frame(self, frame, direction: FrameDirection):
+                # Don't send stop_listening; keep the idle listening gesture continuous.
+                if isinstance(frame, UserStoppedSpeakingFrame):
+                    await self.push_frame(frame, direction)
+                    return
+                await super().process_frame(frame, direction)
+
+        heygen_http_session = aiohttp.ClientSession()
+        heygen_service = ContinuousListeningHeyGenVideoService(
+            api_key=heygen_key,
+            session=heygen_http_session,
+            session_request=NewSessionRequest(avatar_id=avatar_id, version="v2"),
+        )
 
     # IMPORTANT: assistant context aggregator consumes TextFrames (it aggregates them and does
     # not forward). If it sits *before* TTS, the bot will generate text but you won't hear audio.
@@ -582,6 +723,8 @@ async def bot(session_args: Any):
     ]
     if bg_mixer:
         steps.append(bg_mixer)
+    if heygen_service:
+        steps.append(heygen_service)
     steps.extend([
         ctx.assistant(),
         transport.output(),
@@ -700,5 +843,10 @@ async def bot(session_args: Any):
         if portal_log_client:
             try:
                 await portal_log_client.aclose()
+            except Exception:
+                pass
+        if heygen_http_session:
+            try:
+                await heygen_http_session.close()
             except Exception:
                 pass

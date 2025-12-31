@@ -2418,6 +2418,178 @@ app.post('/api/ai/agent/send-document', async (req, res) => {
   }
 });
 
+function extractDailyRoomUrlFromPipecatStartResponse(obj, depth = 0) {
+  if (!obj || typeof obj !== 'object' || depth > 3) return '';
+
+  // Common variants
+  const direct = obj.dailyRoomUrl || obj.daily_room_url || obj.room_url || obj.roomUrl || obj.dailyRoom || obj.daily_room;
+  if (typeof direct === 'string' && direct.trim()) return String(direct).trim();
+
+  // Nested objects
+  if (direct && typeof direct === 'object') {
+    const nested = direct.url || direct.room_url || direct.roomUrl || direct.dailyRoomUrl || direct.daily_room_url;
+    if (typeof nested === 'string' && nested.trim()) return String(nested).trim();
+  }
+
+  // Sometimes wrapped
+  if (obj.data && typeof obj.data === 'object') {
+    const fromData = extractDailyRoomUrlFromPipecatStartResponse(obj.data, depth + 1);
+    if (fromData) return fromData;
+  }
+
+  return '';
+}
+
+// Agent-auth endpoint called by the Pipecat agent runtime.
+// Starts a new Daily room + Pipecat session (video meeting) and emails the room link.
+app.post('/api/ai/agent/send-video-meeting-link', async (req, res) => {
+  let sendRowId = null;
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const token = parseBearerToken(req.headers.authorization);
+    if (!token) return res.status(401).json({ success: false, message: 'Missing Authorization bearer token' });
+
+    const tokenHash = sha256(token);
+    const [arows] = await pool.execute(
+      'SELECT id, user_id, pipecat_agent_name FROM ai_agents WHERE agent_action_token_hash = ? LIMIT 1',
+      [tokenHash]
+    );
+    const agent = arows && arows[0];
+    if (!agent) return res.status(401).json({ success: false, message: 'Invalid token' });
+
+    const userId = Number(agent.user_id);
+    const agentId = Number(agent.id);
+    const agentName = String(agent.pipecat_agent_name || '').trim();
+    if (!agentName) return res.status(500).json({ success: false, message: 'Agent not configured' });
+
+    const toEmail = String(req.body?.to_email || req.body?.toEmail || '').trim();
+    if (!toEmail || !isValidEmail(toEmail)) {
+      return res.status(400).json({ success: false, message: 'Valid to_email is required' });
+    }
+
+    // This endpoint assumes HeyGen is available for the avatar tile in the video room.
+    if (!process.env.HEYGEN_API_KEY) {
+      return res.status(500).json({ success: false, message: 'HEYGEN_API_KEY not configured' });
+    }
+
+    const callId = String(req.body?.call_id || req.body?.callId || '').trim() || null;
+    const callDomain = String(req.body?.call_domain || req.body?.callDomain || '').trim() || null;
+
+    const subjectRaw = String(req.body?.subject || '').trim();
+    const subject = (subjectRaw ? subjectRaw.slice(0, 255) : 'Your video meeting link');
+
+    let dedupeKey = String(req.body?.dedupe_key || req.body?.dedupeKey || '').trim();
+    if (dedupeKey) {
+      if (!/^[a-f0-9]{64}$/i.test(dedupeKey)) {
+        return res.status(400).json({ success: false, message: 'dedupe_key must be a 64-char hex sha256' });
+      }
+      dedupeKey = dedupeKey.toLowerCase();
+    } else {
+      dedupeKey = sha256(
+        `send-video-meeting-link|agent:${agentId}|call:${callDomain || ''}|${callId || ''}|to:${toEmail.toLowerCase()}`
+      );
+    }
+
+    // Idempotency + audit row (reuses ai_email_sends with template_id NULL)
+    try {
+      const [ins] = await pool.execute(
+        `INSERT INTO ai_email_sends (user_id, agent_id, template_id, dedupe_key, call_id, call_domain, to_email, subject, status, attempt_count)
+         VALUES (?,?,?,?,?,?,?,?, 'pending', 1)`,
+        [userId, agentId, null, dedupeKey, callId, callDomain, toEmail, subject]
+      );
+      sendRowId = ins.insertId;
+    } catch (e) {
+      if (e?.code !== 'ER_DUP_ENTRY') throw e;
+      const [erows] = await pool.execute(
+        'SELECT id, status FROM ai_email_sends WHERE dedupe_key = ? LIMIT 1',
+        [dedupeKey]
+      );
+      const existing = erows && erows[0];
+      if (existing && existing.status === 'completed') {
+        return res.json({ success: true, already_sent: true, dedupe_key: dedupeKey });
+      }
+      if (existing && existing.status === 'pending') {
+        return res.status(202).json({ success: true, in_progress: true, dedupe_key: dedupeKey });
+      }
+      if (existing && existing.status === 'failed') {
+        sendRowId = existing.id;
+        try {
+          await pool.execute(
+            'UPDATE ai_email_sends SET status = \'pending\', attempt_count = attempt_count + 1, error = NULL, to_email = ?, subject = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+            [toEmail, subject, sendRowId]
+          );
+        } catch {}
+      } else {
+        return res.status(202).json({ success: true, in_progress: true, dedupe_key: dedupeKey });
+      }
+    }
+
+    // Start a new Pipecat session (web video meeting). Pipecat creates a Daily room.
+    const startBody = {
+      createDailyRoom: true,
+      body: {
+        mode: 'video_meeting'
+      }
+    };
+
+    const startResp = await pipecatApiCall({
+      method: 'POST',
+      path: `/public/${encodeURIComponent(agentName)}/start`,
+      body: startBody
+    });
+
+    const roomUrl = extractDailyRoomUrlFromPipecatStartResponse(startResp);
+    if (!roomUrl) {
+      throw new Error('Pipecat start response did not include a Daily room URL');
+    }
+
+    const text = `Here is your video meeting link:\n\n${roomUrl}\n\nOpen it in your browser to join.`;
+    const html = `
+      <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+        <p>Here is your video meeting link:</p>
+        <p><a href="${roomUrl}">${roomUrl}</a></p>
+        <p>Open it in your browser to join.</p>
+      </div>`;
+
+    await sendEmailViaUserSmtp({
+      userId,
+      toEmail,
+      subject,
+      text,
+      html
+    });
+
+    if (sendRowId) {
+      try {
+        await pool.execute(
+          'UPDATE ai_email_sends SET status = \'completed\', error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [sendRowId]
+        );
+      } catch {}
+    }
+
+    return res.json({
+      success: true,
+      dedupe_key: dedupeKey,
+      already_sent: false,
+      room_url: roomUrl
+    });
+  } catch (e) {
+    const msg = e?.message || 'Failed to send video meeting link';
+    if (DEBUG) console.warn('[ai.agent.send-video-meeting-link] error:', e?.data || msg);
+    if (sendRowId && pool) {
+      try {
+        await pool.execute(
+          'UPDATE ai_email_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [msg, sendRowId]
+        );
+      } catch {}
+    }
+    return res.status(502).json({ success: false, message: msg });
+  }
+});
+
 // Agent-auth endpoint called by the Pipecat agent runtime.
 // Logs conversation turns (caller/user + assistant) tied to a Daily dial-in session.
 app.post('/api/ai/agent/log-message', async (req, res) => {
@@ -2652,6 +2824,8 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl,
   const cartesia = process.env.CARTESIA_API_KEY || '';
   const xai = process.env.XAI_API_KEY || '';
   const daily = process.env.DAILY_API_KEY || '';
+  const heygen = process.env.HEYGEN_API_KEY || '';
+  const heygenAvatarId = process.env.HEYGEN_AVATAR_ID || '';
   // Platform-owned keys are required.
   assertConfiguredOrThrow('DEEPGRAM_API_KEY', deepgram);
   assertConfiguredOrThrow('CARTESIA_API_KEY', cartesia);
@@ -2673,6 +2847,10 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl,
     AGENT_GREETING: String(greeting || ''),
     AGENT_PROMPT: String(prompt || '')
   };
+
+  // Optional: required only for avatar/video-meeting mode.
+  if (heygen) secrets.HEYGEN_API_KEY = heygen;
+  if (heygenAvatarId) secrets.HEYGEN_AVATAR_ID = String(heygenAvatarId);
 
   const portalBase = String(portalBaseUrl || process.env.PORTAL_BASE_URL || process.env.PUBLIC_BASE_URL || '').trim();
   if (portalBase) secrets.PORTAL_BASE_URL = portalBase;
