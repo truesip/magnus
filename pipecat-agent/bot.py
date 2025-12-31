@@ -732,6 +732,10 @@ async def bot(session_args: Any):
 
     pipeline = Pipeline(steps)
 
+    # Pipecat defaults to a 5-minute idle timeout, which is too short for the
+    # "email a link and join" flow. Keep video meetings alive longer.
+    idle_timeout_secs = 1800 if is_video_meeting else 300
+
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
@@ -739,6 +743,7 @@ async def bot(session_args: Any):
             audio_in_sample_rate=sample_rate,
             audio_out_sample_rate=sample_rate,
         ),
+        idle_timeout_secs=idle_timeout_secs,
     )
 
     # Register tool handler (if call transfer is configured)

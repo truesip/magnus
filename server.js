@@ -2440,6 +2440,28 @@ function extractDailyRoomUrlFromPipecatStartResponse(obj, depth = 0) {
   return '';
 }
 
+function extractDailyRoomTokenFromPipecatStartResponse(obj, depth = 0) {
+  if (!obj || typeof obj !== 'object' || depth > 3) return '';
+
+  // Common variants
+  const direct = obj.token || obj.room_token || obj.roomToken || obj.dailyToken || obj.daily_token || obj.dailyRoomToken || obj.daily_room_token;
+  if (typeof direct === 'string' && direct.trim()) return String(direct).trim();
+
+  // Nested objects
+  if (direct && typeof direct === 'object') {
+    const nested = direct.token || direct.value || direct.jwt || direct.room_token || direct.roomToken;
+    if (typeof nested === 'string' && nested.trim()) return String(nested).trim();
+  }
+
+  // Sometimes wrapped
+  if (obj.data && typeof obj.data === 'object') {
+    const fromData = extractDailyRoomTokenFromPipecatStartResponse(obj.data, depth + 1);
+    if (fromData) return fromData;
+  }
+
+  return '';
+}
+
 // Agent-auth endpoint called by the Pipecat agent runtime.
 // Starts a new Daily room + Pipecat session (video meeting) and emails the room link.
 app.post('/api/ai/agent/send-video-meeting-link', async (req, res) => {
@@ -2544,11 +2566,24 @@ app.post('/api/ai/agent/send-video-meeting-link', async (req, res) => {
       throw new Error('Pipecat start response did not include a Daily room URL');
     }
 
-    const text = `Here is your video meeting link:\n\n${roomUrl}\n\nOpen it in your browser to join.`;
+    // Rooms created by Pipecat/Daily are typically private; Daily Prebuilt requires a meeting
+    // token to join private rooms. Provide a join URL with ?t=<token> when available.
+    const roomToken = extractDailyRoomTokenFromPipecatStartResponse(startResp);
+
+    let joinUrl = roomUrl;
+    if (roomToken) {
+      try {
+        const u = new URL(roomUrl);
+        u.searchParams.set('t', roomToken);
+        joinUrl = u.toString();
+      } catch {}
+    }
+
+    const text = `Here is your video meeting link:\n\n${joinUrl}\n\nOpen it in your browser to join.`;
     const html = `
       <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
         <p>Here is your video meeting link:</p>
-        <p><a href="${roomUrl}">${roomUrl}</a></p>
+        <p><a href="${joinUrl}">${joinUrl}</a></p>
         <p>Open it in your browser to join.</p>
       </div>`;
 
