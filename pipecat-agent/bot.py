@@ -448,10 +448,16 @@ async def bot(session_args: Any):
         vad_analyzer=SileroVADAnalyzer(),
     )
 
+    # Daily Prebuilt always shows a participant name badge. To effectively "hide" the bot
+    # name in video meetings, default to a zero-width space (U+200B).
+    bot_name = _env("BOT_NAME", "")
+    if bot_name == "":
+        bot_name = "\u200B" if is_video_meeting else "TalkUSA AI Agent"
+
     transport = DailyTransport(
         room_url=str(room_url),
         token=str(token) if token else None,
-        bot_name=_env("BOT_NAME", "TalkUSA AI Agent").strip() or "TalkUSA AI Agent",
+        bot_name=bot_name,
         params=daily_params,
     )
 
