@@ -342,6 +342,7 @@
         <div class="ai-subtabs">
           <button id="ai-subtab-agents" type="button" class="ai-subtab active">Agents</button>
           <button id="ai-subtab-conversations" type="button" class="ai-subtab">Conversations</button>
+          <button id="ai-subtab-meetings" type="button" class="ai-subtab">Meeting</button>
           <button id="ai-subtab-tools" type="button" class="ai-subtab">Tools</button>
         </div>
 
@@ -426,6 +427,29 @@
                 <tbody></tbody>
               </table>
               <div id="ai-doc-templates-empty" class="muted">Loading…</div>
+            </div>
+          </div>
+        </div>
+
+        <div id="ai-pane-meetings" style="display:none">
+          <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+              <h3 style="margin:0">Meetings</h3>
+              <div style="margin-left:auto"></div>
+              <select id="aiMeetingsAgentFilter" style="width:170px">
+                <option value="">All agents</option>
+              </select>
+              <button id="aiMeetingsRefreshBtn" type="button" style="background:#6b7280">Refresh</button>
+            </div>
+            <table id="ai-meetings-table" style="display:none">
+              <thead><tr><th>Sent</th><th>To</th><th>Agent</th><th>Link</th><th>Status</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div id="ai-meetings-empty" class="muted">Loading…</div>
+            <div class="toolbar" id="ai-meetings-pager" style="display:none">
+              <button id="aiMeetingsPrev">Prev</button>
+              <span id="aiMeetingsPageInfo" class="muted"></span>
+              <button id="aiMeetingsNext">Next</button>
             </div>
           </div>
         </div>
@@ -634,18 +658,20 @@
     // AI submenu tabs
     const aiSubtabs = {
       agents: document.getElementById('ai-subtab-agents'),
-      tools: document.getElementById('ai-subtab-tools'),
       conversations: document.getElementById('ai-subtab-conversations'),
+      meetings: document.getElementById('ai-subtab-meetings'),
+      tools: document.getElementById('ai-subtab-tools'),
     };
     const aiPanes = {
       agents: document.getElementById('ai-pane-agents'),
-      tools: document.getElementById('ai-pane-tools'),
       conversations: document.getElementById('ai-pane-conversations'),
+      meetings: document.getElementById('ai-pane-meetings'),
+      tools: document.getElementById('ai-pane-tools'),
     };
 
     function activateAiSubtab(name){
       const n = String(name || '').toLowerCase();
-      const active = (n === 'tools' || n === 'conversations') ? n : 'agents';
+      const active = (n === 'tools' || n === 'conversations' || n === 'meetings') ? n : 'agents';
       Object.keys(aiSubtabs).forEach(k => {
         const el = aiSubtabs[k];
         if (!el) return;
@@ -680,6 +706,13 @@
         e.preventDefault();
         activateAiSubtab('conversations');
         openAiConversationsTab();
+      });
+    }
+    if (aiSubtabs.meetings) {
+      aiSubtabs.meetings.addEventListener('click', (e) => {
+        e.preventDefault();
+        activateAiSubtab('meetings');
+        openAiMeetingsTab();
       });
     }
     tabs.overview.addEventListener('click',e=>{e.preventDefault();activate('overview');loadStats();});
@@ -718,6 +751,13 @@
     let aiConvTotal = 0;
     let aiConvSessionsData = [];
     let aiConvSelected = null; // { call_id, call_domain }
+
+    // AI Meetings
+    let aiMeetingsUiInit = false;
+    let aiMeetingsPage = 0;
+    const aiMeetingsPageSize = 25;
+    let aiMeetingsTotal = 0;
+    let aiMeetingsData = [];
 
     function fmtDateTime(val){
       if (!val) return '';
@@ -817,6 +857,187 @@
 
       // Load sessions
       loadAiConversationSessions();
+    }
+
+    // ========== AI Meetings ==========
+    function renderAiMeetingsAgentFilter(){
+      const sel = $('#aiMeetingsAgentFilter');
+      if (!sel) return;
+      const current = String(sel.value || '');
+      sel.innerHTML = '';
+      sel.appendChild(new Option('All agents', ''));
+      for (const a of (aiAgentsData || [])) {
+        const id = a && a.id != null ? String(a.id) : '';
+        if (!id) continue;
+        const name = String(a.display_name || '').trim();
+        sel.appendChild(new Option(name || `Agent ${id}`, id));
+      }
+      const still = Array.from(sel.options || []).some(o => String(o.value) === current);
+      sel.value = still ? current : '';
+    }
+
+    function initAiMeetingsUI(){
+      if (aiMeetingsUiInit) return;
+      aiMeetingsUiInit = true;
+
+      const refreshBtn = $('#aiMeetingsRefreshBtn');
+      if (refreshBtn) refreshBtn.addEventListener('click', (e) => { e.preventDefault(); loadAiMeetings(); });
+
+      const agentSel = $('#aiMeetingsAgentFilter');
+      if (agentSel) agentSel.addEventListener('change', () => {
+        aiMeetingsPage = 0;
+        loadAiMeetings();
+      });
+
+      const prev = $('#aiMeetingsPrev');
+      if (prev) prev.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (aiMeetingsPage > 0) {
+          aiMeetingsPage -= 1;
+          loadAiMeetings();
+        }
+      });
+
+      const next = $('#aiMeetingsNext');
+      if (next) next.addEventListener('click', (e) => {
+        e.preventDefault();
+        if ((aiMeetingsPage + 1) * aiMeetingsPageSize < aiMeetingsTotal) {
+          aiMeetingsPage += 1;
+          loadAiMeetings();
+        }
+      });
+    }
+
+    async function openAiMeetingsTab(){
+      initAiMeetingsUI();
+
+      // Populate agent filter
+      try {
+        if (!Array.isArray(aiAgentsData) || aiAgentsData.length === 0) {
+          await loadAiAgents();
+        }
+      } catch {}
+      renderAiMeetingsAgentFilter();
+
+      loadAiMeetings();
+    }
+
+    function renderAiMeetings(){
+      const table = $('#ai-meetings-table');
+      const empty = $('#ai-meetings-empty');
+      const pager = $('#ai-meetings-pager');
+      const pageInfo = $('#aiMeetingsPageInfo');
+      const prev = $('#aiMeetingsPrev');
+      const next = $('#aiMeetingsNext');
+      if (!table || !empty) return;
+      const tbody = table.querySelector('tbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+
+      if (!aiMeetingsData || !aiMeetingsData.length) {
+        table.style.display = 'none';
+        if (pager) pager.style.display = 'none';
+        if (pageInfo) pageInfo.textContent = '';
+        empty.style.display = 'block';
+        empty.textContent = 'No meetings yet.';
+        return;
+      }
+
+      for (const m of aiMeetingsData) {
+        const sent = m.created_at ? fmtDateTime(m.created_at) : '';
+        const to = String(m.to_email || '-');
+        const agentName = String(m.agent_name || '-');
+        const url = String(m.meeting_join_url || m.meeting_room_url || '');
+        const statusRaw = String(m.meeting_status || '').toLowerCase();
+        const label = statusRaw === 'live' ? 'Live' : statusRaw === 'ended' ? 'Ended' : 'Unknown';
+
+        const tr = document.createElement('tr');
+
+        const tdSent = document.createElement('td');
+        tdSent.textContent = sent;
+        tr.appendChild(tdSent);
+
+        const tdTo = document.createElement('td');
+        tdTo.textContent = to;
+        tr.appendChild(tdTo);
+
+        const tdAgent = document.createElement('td');
+        tdAgent.textContent = agentName;
+        tr.appendChild(tdAgent);
+
+        const tdLink = document.createElement('td');
+        if (url) {
+          const a = document.createElement('a');
+          a.href = url;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.textContent = 'Open';
+          tdLink.appendChild(a);
+        } else {
+          tdLink.textContent = '-';
+        }
+        tr.appendChild(tdLink);
+
+        const tdStatus = document.createElement('td');
+        tdStatus.textContent = label;
+        tdStatus.style.fontWeight = '600';
+        tdStatus.style.color = (statusRaw === 'live') ? '#16a34a' : '#6b7280';
+        tr.appendChild(tdStatus);
+
+        tbody.appendChild(tr);
+      }
+
+      empty.style.display = 'none';
+      table.style.display = 'table';
+
+      const totalPages = aiMeetingsTotal > 0 ? Math.max(1, Math.ceil(aiMeetingsTotal / aiMeetingsPageSize)) : 1;
+      if (pageInfo) pageInfo.textContent = `Page ${aiMeetingsPage + 1} of ${totalPages}`;
+
+      if (pager) {
+        pager.style.display = (aiMeetingsTotal > aiMeetingsPageSize) ? 'flex' : 'none';
+      }
+      if (prev) prev.disabled = (aiMeetingsPage <= 0);
+      if (next) next.disabled = ((aiMeetingsPage + 1) * aiMeetingsPageSize >= aiMeetingsTotal);
+    }
+
+    async function loadAiMeetings(){
+      const table = $('#ai-meetings-table');
+      const empty = $('#ai-meetings-empty');
+      const pager = $('#ai-meetings-pager');
+      if (empty) { empty.style.display = 'block'; empty.textContent = 'Loading…'; }
+      if (table) table.style.display = 'none';
+      if (pager) pager.style.display = 'none';
+
+      try {
+        const agentSel = $('#aiMeetingsAgentFilter');
+        const agentId = agentSel ? String(agentSel.value || '').trim() : '';
+        const url = `/api/me/ai/meetings?page=${aiMeetingsPage}&pageSize=${aiMeetingsPageSize}` + (agentId ? `&agent_id=${encodeURIComponent(agentId)}` : '');
+        const r = await fetch(url);
+        const j = await r.json();
+        if (!j || j.success === false) {
+          aiMeetingsData = [];
+          aiMeetingsTotal = 0;
+          renderAiMeetings();
+          if (empty) empty.textContent = j?.message || 'Failed to load meetings';
+          return;
+        }
+        aiMeetingsData = Array.isArray(j.data) ? j.data : [];
+        const total = Number(j.total);
+        aiMeetingsTotal = Number.isFinite(total) ? total : aiMeetingsData.length;
+
+        // If current page is out of bounds (e.g. filter changed), jump back and refetch.
+        if (aiMeetingsTotal > 0 && aiMeetingsPage > 0 && aiMeetingsPage * aiMeetingsPageSize >= aiMeetingsTotal) {
+          aiMeetingsPage = 0;
+          return loadAiMeetings();
+        }
+
+        renderAiMeetings();
+      } catch (e) {
+        aiMeetingsData = [];
+        aiMeetingsTotal = 0;
+        renderAiMeetings();
+        if (empty) empty.textContent = 'Failed to load meetings';
+      }
     }
 
     function renderAiConversationSessions(){

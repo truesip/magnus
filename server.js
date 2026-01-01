@@ -1075,6 +1075,10 @@ async function initDb() {
     call_domain VARCHAR(64) NULL,
     to_email VARCHAR(255) NOT NULL,
     subject VARCHAR(255) NULL,
+    meeting_provider VARCHAR(32) NULL,
+    meeting_room_name VARCHAR(191) NULL,
+    meeting_room_url TEXT NULL,
+    meeting_join_url TEXT NULL,
     status ENUM('pending','completed','failed') NOT NULL DEFAULT 'pending',
     attempt_count INT NOT NULL DEFAULT 0,
     error TEXT NULL,
@@ -1088,6 +1092,27 @@ async function initDb() {
     CONSTRAINT fk_ai_email_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL,
     CONSTRAINT fk_ai_email_template FOREIGN KEY (template_id) REFERENCES ai_doc_templates(id) ON DELETE SET NULL
   )`);
+
+  // Ensure ai_email_sends meeting-link columns exist (existing DB migrations)
+  for (const col of [
+    { name: 'meeting_provider', ddl: "ALTER TABLE ai_email_sends ADD COLUMN meeting_provider VARCHAR(32) NULL AFTER subject" },
+    { name: 'meeting_room_name', ddl: "ALTER TABLE ai_email_sends ADD COLUMN meeting_room_name VARCHAR(191) NULL AFTER meeting_provider" },
+    { name: 'meeting_room_url', ddl: "ALTER TABLE ai_email_sends ADD COLUMN meeting_room_url TEXT NULL AFTER meeting_room_name" },
+    { name: 'meeting_join_url', ddl: "ALTER TABLE ai_email_sends ADD COLUMN meeting_join_url TEXT NULL AFTER meeting_room_url" },
+  ]) {
+    try {
+      const [rows] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_email_sends' AND column_name=? LIMIT 1",
+        [dbName, col.name]
+      );
+      if (!rows || !rows.length) {
+        await pool.query(col.ddl);
+        if (DEBUG) console.log(`[schema] Added ai_email_sends.${col.name} column`);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn(`[schema] ai_email_sends.${col.name} check failed`, e.message || e);
+    }
+  }
 
   // AI inbound call logs (Daily dial-in -> Pipecat Cloud). These are displayed in Call History.
   await pool.query(`CREATE TABLE IF NOT EXISTS ai_call_logs (
@@ -2703,6 +2728,21 @@ function extractDailyRoomTokenFromPipecatStartResponse(obj, depth = 0) {
   return '';
 }
 
+function extractDailyRoomNameFromRoomUrl(roomUrl) {
+  const raw = String(roomUrl || '').trim();
+  if (!raw) return '';
+  try {
+    const u = new URL(raw);
+    // Daily room URLs are typically https://<domain>.daily.co/<roomName>
+    const p = String(u.pathname || '').replace(/^\/+/, '').replace(/\/+$/, '');
+    if (!p) return '';
+    const first = p.split('/')[0];
+    return first ? decodeURIComponent(first) : '';
+  } catch {
+    return '';
+  }
+}
+
 // Agent-auth endpoint called by the Pipecat agent runtime.
 // Starts a new Daily room + Pipecat session (video meeting) and emails the room link.
 app.post('/api/ai/agent/send-video-meeting-link', async (req, res) => {
@@ -2817,6 +2857,17 @@ app.post('/api/ai/agent/send-video-meeting-link', async (req, res) => {
         const u = new URL(roomUrl);
         u.searchParams.set('t', roomToken);
         joinUrl = u.toString();
+      } catch {}
+    }
+
+    // Store meeting link metadata for the dashboard UI
+    const roomName = extractDailyRoomNameFromRoomUrl(roomUrl);
+    if (sendRowId) {
+      try {
+        await pool.execute(
+          'UPDATE ai_email_sends SET meeting_provider = ?, meeting_room_name = ?, meeting_room_url = ?, meeting_join_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          ['daily', roomName || null, roomUrl, joinUrl, sendRowId]
+        );
       } catch {}
     }
 
@@ -4728,6 +4779,124 @@ app.get('/api/me/ai/conversations/messages', requireAuth, async (req, res) => {
   } catch (e) {
     if (DEBUG) console.warn('[ai.conversations.messages] error:', e?.message || e);
     return res.status(500).json({ success: false, message: 'Failed to load messages' });
+  }
+});
+
+function parseDailyRoomPresenceCount(presence) {
+  try {
+    if (!presence) return null;
+
+    const directTotal = presence.total_count ?? presence.totalCount ?? presence.count ?? presence.total;
+    const n = Number(directTotal);
+    if (Number.isFinite(n)) return n;
+
+    const arr = Array.isArray(presence.data)
+      ? presence.data
+      : (Array.isArray(presence.participants)
+        ? presence.participants
+        : (Array.isArray(presence) ? presence : null));
+    if (arr) return arr.length;
+
+    const obj = (presence.data && typeof presence.data === 'object' && !Array.isArray(presence.data))
+      ? presence.data
+      : ((presence.participants && typeof presence.participants === 'object' && !Array.isArray(presence.participants))
+        ? presence.participants
+        : null);
+
+    if (obj && typeof obj === 'object') return Object.keys(obj).length;
+  } catch {}
+
+  return null;
+}
+
+// List AI meeting-link sends (video meeting links) for the logged-in user.
+app.get('/api/me/ai/meetings', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const page = Math.max(0, parseInt(String(req.query.page || '0'), 10) || 0);
+    const pageSizeRaw = parseInt(String(req.query.pageSize || '25'), 10) || 25;
+    const pageSize = Math.max(1, Math.min(100, pageSizeRaw));
+    const offset = page * pageSize;
+
+    const agentIdRaw = String(req.query.agent_id || req.query.agentId || '').trim();
+    const agentId = agentIdRaw ? agentIdRaw : '';
+
+    const where = [`e.user_id = ?`, `e.meeting_provider IS NOT NULL`];
+    const params = [userId];
+
+    if (agentId) {
+      where.push('e.agent_id = ?');
+      params.push(agentId);
+    }
+
+    const whereSql = where.length ? ('WHERE ' + where.join(' AND ')) : '';
+
+    const [cntRows] = await pool.execute(
+      `SELECT COUNT(*) AS total
+       FROM ai_email_sends e
+       ${whereSql}`,
+      params
+    );
+    const total = Number(cntRows && cntRows[0] ? (cntRows[0].total || 0) : 0);
+
+    const [rows] = await pool.query(
+      `SELECT e.id, e.created_at, e.updated_at,
+              e.agent_id,
+              a.display_name AS agent_name,
+              e.to_email, e.subject,
+              e.status AS email_status,
+              e.meeting_provider, e.meeting_room_name, e.meeting_room_url, e.meeting_join_url
+       FROM ai_email_sends e
+       LEFT JOIN ai_agents a ON a.id = e.agent_id
+       ${whereSql}
+       ORDER BY e.created_at DESC, e.id DESC
+       LIMIT ${parseInt(pageSize, 10)} OFFSET ${parseInt(offset, 10)}`,
+      params
+    );
+
+    const out = [];
+
+    for (const r of rows || []) {
+      const row = { ...r };
+      row.meeting_live = null;
+      row.meeting_status = 'unknown';
+      row.participant_count = null;
+
+      const provider = String(r?.meeting_provider || '').toLowerCase();
+      if (provider === 'daily') {
+        const roomName = String(r?.meeting_room_name || '').trim() || extractDailyRoomNameFromRoomUrl(r?.meeting_room_url);
+        if (roomName) {
+          try {
+            const presence = await dailyApiCall({
+              method: 'GET',
+              path: `/rooms/${encodeURIComponent(roomName)}/presence`
+            });
+            const count = parseDailyRoomPresenceCount(presence);
+            if (count != null) {
+              row.participant_count = count;
+              row.meeting_live = count > 0;
+              row.meeting_status = row.meeting_live ? 'live' : 'ended';
+            }
+          } catch (e) {
+            // If the room doesn't exist anymore, treat as ended.
+            if (e && (e.status === 404 || e.status === 410)) {
+              row.meeting_live = false;
+              row.meeting_status = 'ended';
+              row.participant_count = 0;
+            }
+          }
+        }
+      }
+
+      out.push(row);
+    }
+
+    return res.json({ success: true, data: out, total });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.meetings.list] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load meetings' });
   }
 });
 
