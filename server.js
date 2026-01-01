@@ -66,6 +66,30 @@ const AI_INBOUND_TOLLFREE_RATE_PER_MIN = parseFloat(
 // Default is per-second billing (DIDWW-style). Set AI_INBOUND_BILLING_ROUND_UP_TO_MINUTE=1 to enable minute rounding.
 const AI_INBOUND_BILLING_ROUND_UP_TO_MINUTE = String(process.env.AI_INBOUND_BILLING_ROUND_UP_TO_MINUTE ?? '0') !== '0';
 
+// AI inbound call acceptance gating based on MagnusBilling credit.
+// If a user's credit falls below AI_INBOUND_MIN_CREDIT, inbound AI calls will be blocked.
+const AI_INBOUND_MIN_CREDIT = parseFloat(process.env.AI_INBOUND_MIN_CREDIT || '0') || 0;
+// If enabled, we proactively delete Daily dial-in configs while blocked and restore them when balance is sufficient.
+const AI_INBOUND_DISABLE_NUMBERS_WHEN_BALANCE_LOW = String(process.env.AI_INBOUND_DISABLE_NUMBERS_WHEN_BALANCE_LOW ?? '1') !== '0';
+// If enabled, a credit lookup failure will also block inbound calls (fail closed).
+const AI_INBOUND_BALANCE_FAIL_CLOSED = String(process.env.AI_INBOUND_BALANCE_FAIL_CLOSED ?? '0') !== '0';
+
+// DIDWW inbound call acceptance gating based on MagnusBilling credit.
+// If a user's credit falls below DIDWW_INBOUND_MIN_CREDIT, inbound calls to DIDWW DIDs are blocked
+// by unassigning voice_in_trunk (call forwarding) until the balance is sufficient again.
+const DIDWW_INBOUND_MIN_CREDIT = parseFloat(process.env.DIDWW_INBOUND_MIN_CREDIT || '0') || 0;
+const DIDWW_INBOUND_DISABLE_TRUNKS_WHEN_BALANCE_LOW = String(process.env.DIDWW_INBOUND_DISABLE_TRUNKS_WHEN_BALANCE_LOW ?? '1') !== '0';
+const DIDWW_INBOUND_BALANCE_FAIL_CLOSED = String(process.env.DIDWW_INBOUND_BALANCE_FAIL_CLOSED ?? '0') !== '0';
+
+// Optional: cancel/release numbers when monthly service fees cannot be paid.
+// When enabled, the system will mark numbers as cancel_pending and attempt to release them.
+const DIDWW_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE = String(process.env.DIDWW_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE ?? '0') !== '0';
+const AI_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE = String(process.env.AI_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE ?? '0') !== '0';
+
+// Grace period before cancelling numbers for nonpayment (in days).
+const DIDWW_MONTHLY_GRACE_DAYS = Math.max(0, parseInt(process.env.DIDWW_MONTHLY_GRACE_DAYS || '3', 10) || 3);
+const AI_MONTHLY_GRACE_DAYS = Math.max(0, parseInt(process.env.AI_MONTHLY_GRACE_DAYS || '3', 10) || 3);
+
 app.set('trust proxy', 1);
 app.set('etag', false);
 const COOKIE_SECURE = process.env.COOKIE_SECURE === '1';
@@ -628,11 +652,67 @@ async function initDb() {
     monthly_price DECIMAL(10,4) NULL,
     setup_price DECIMAL(10,4) NULL,
     trunk_id VARCHAR(64) NULL,
+    cancel_pending TINYINT(1) NOT NULL DEFAULT 0,
+    cancel_pending_since DATETIME NULL,
+    cancel_after DATETIME NULL,
+    cancel_billed_to DATETIME NULL,
+    cancel_notice_initial_sent_at DATETIME NULL,
+    cancel_notice_reminder_sent_at DATETIME NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uniq_didww_did (didww_did_id),
     KEY idx_user_id (user_id),
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
+  // Ensure user_dids.trunk_id exists even if table was created on an older schema
+  try {
+    const [trunkCol] = await pool.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='user_dids' AND column_name='trunk_id' LIMIT 1",
+      [dbName]
+    );
+    if (!trunkCol || !trunkCol.length) {
+      await pool.query("ALTER TABLE user_dids ADD COLUMN trunk_id VARCHAR(64) NULL");
+      if (DEBUG) console.log('[schema] Added user_dids.trunk_id column');
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[schema] user_dids.trunk_id check failed', e.message || e);
+  }
+
+  // Ensure user_dids.cancel_pending exists (used for nonpayment cancellations)
+  try {
+    const [cancelCol] = await pool.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='user_dids' AND column_name='cancel_pending' LIMIT 1",
+      [dbName]
+    );
+    if (!cancelCol || !cancelCol.length) {
+      await pool.query("ALTER TABLE user_dids ADD COLUMN cancel_pending TINYINT(1) NOT NULL DEFAULT 0 AFTER trunk_id");
+      if (DEBUG) console.log('[schema] Added user_dids.cancel_pending column');
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[schema] user_dids.cancel_pending check failed', e.message || e);
+  }
+
+  // Ensure user_dids nonpayment/grace columns exist
+  for (const col of [
+    { name: 'cancel_pending_since', ddl: "ALTER TABLE user_dids ADD COLUMN cancel_pending_since DATETIME NULL AFTER cancel_pending" },
+    { name: 'cancel_after', ddl: "ALTER TABLE user_dids ADD COLUMN cancel_after DATETIME NULL AFTER cancel_pending_since" },
+    { name: 'cancel_billed_to', ddl: "ALTER TABLE user_dids ADD COLUMN cancel_billed_to DATETIME NULL AFTER cancel_after" },
+    { name: 'cancel_notice_initial_sent_at', ddl: "ALTER TABLE user_dids ADD COLUMN cancel_notice_initial_sent_at DATETIME NULL AFTER cancel_billed_to" },
+    { name: 'cancel_notice_reminder_sent_at', ddl: "ALTER TABLE user_dids ADD COLUMN cancel_notice_reminder_sent_at DATETIME NULL AFTER cancel_notice_initial_sent_at" },
+  ]) {
+    try {
+      const [rows] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='user_dids' AND column_name=? LIMIT 1",
+        [dbName, col.name]
+      );
+      if (!rows || !rows.length) {
+        await pool.query(col.ddl);
+        if (DEBUG) console.log(`[schema] Added user_dids.${col.name} column`);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn(`[schema] user_dids.${col.name} check failed`, e.message || e);
+    }
+  }
+
   // DID markup tracking table - stores last billed cycle per DID per user (for reporting/debugging)
   await pool.query(`CREATE TABLE IF NOT EXISTS user_did_markups (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -873,6 +953,12 @@ async function initDb() {
     phone_number VARCHAR(64) NOT NULL,
     agent_id BIGINT NULL,
     dialin_config_id VARCHAR(191) NULL,
+    cancel_pending TINYINT(1) NOT NULL DEFAULT 0,
+    cancel_pending_since DATETIME NULL,
+    cancel_after DATETIME NULL,
+    cancel_billed_to DATETIME NULL,
+    cancel_notice_initial_sent_at DATETIME NULL,
+    cancel_notice_reminder_sent_at DATETIME NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uniq_daily_number (daily_number_id),
@@ -882,6 +968,29 @@ async function initDb() {
     CONSTRAINT fk_ai_numbers_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
     CONSTRAINT fk_ai_numbers_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL
   )`);
+
+  // Ensure ai_numbers nonpayment/grace columns exist
+  for (const col of [
+    { name: 'cancel_pending', ddl: "ALTER TABLE ai_numbers ADD COLUMN cancel_pending TINYINT(1) NOT NULL DEFAULT 0 AFTER dialin_config_id" },
+    { name: 'cancel_pending_since', ddl: "ALTER TABLE ai_numbers ADD COLUMN cancel_pending_since DATETIME NULL AFTER cancel_pending" },
+    { name: 'cancel_after', ddl: "ALTER TABLE ai_numbers ADD COLUMN cancel_after DATETIME NULL AFTER cancel_pending_since" },
+    { name: 'cancel_billed_to', ddl: "ALTER TABLE ai_numbers ADD COLUMN cancel_billed_to DATETIME NULL AFTER cancel_after" },
+    { name: 'cancel_notice_initial_sent_at', ddl: "ALTER TABLE ai_numbers ADD COLUMN cancel_notice_initial_sent_at DATETIME NULL AFTER cancel_billed_to" },
+    { name: 'cancel_notice_reminder_sent_at', ddl: "ALTER TABLE ai_numbers ADD COLUMN cancel_notice_reminder_sent_at DATETIME NULL AFTER cancel_notice_initial_sent_at" },
+  ]) {
+    try {
+      const [rows] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_numbers' AND column_name=? LIMIT 1",
+        [dbName, col.name]
+      );
+      if (!rows || !rows.length) {
+        await pool.query(col.ddl);
+        if (DEBUG) console.log(`[schema] Added ai_numbers.${col.name} column`);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn(`[schema] ai_numbers.${col.name} check failed`, e.message || e);
+    }
+  }
 
   // AI number monthly billing tracking
   // Uses a cycle table (idempotency) similar to DIDWW markup billing.
@@ -1621,6 +1730,138 @@ async function sendDidPurchaseReceiptEmail({ toEmail, displayName, items, totalA
     html_body: html
   };
   await smtp2goSendEmail(payload, { kind: 'did-purchase-receipt', to: toEmail, subject });
+}
+
+async function sendNonpaymentGraceInitialEmail({ toEmail, displayName, numbers, graceDays, cancelAfter, portalUrl, productLabel }) {
+  const apiKey = process.env.SMTP2GO_API_KEY;
+  const sender = process.env.SMTP2GO_SENDER || `no-reply@${(process.env.SENDER_DOMAIN || 'talkusa.net')}`;
+  if (!apiKey) return { ok: false, reason: 'SMTP2GO_API_KEY missing' };
+  if (!toEmail) return { ok: false, reason: 'missing_to_email' };
+
+  const safeUser = displayName || 'Customer';
+  const safeNumbers = Array.isArray(numbers) ? numbers.filter(Boolean) : [];
+  const count = safeNumbers.length;
+
+  const dateStr = cancelAfter && Number.isFinite(new Date(cancelAfter).getTime())
+    ? new Date(cancelAfter).toISOString().slice(0, 10)
+    : '';
+
+  const label = productLabel || 'number';
+  const subject = `Action required: add funds to keep your TalkUSA ${label}${count === 1 ? '' : 's'}`;
+
+  const listText = count
+    ? safeNumbers.map(n => ` - ${n}`).join('\n')
+    : ' - (no numbers listed)';
+
+  const safePortal = portalUrl || process.env.PUBLIC_BASE_URL || '';
+  const portalLine = safePortal ? `\nAdd funds / manage billing: ${safePortal}\n` : '';
+
+  const text = `Hello ${safeUser},\n\n` +
+    `We could not process your monthly service fee due to insufficient balance.\n\n` +
+    `Affected ${label}${count === 1 ? '' : 's'}:\n${listText}\n\n` +
+    `Please add funds within ${graceDays} day${graceDays === 1 ? '' : 's'} to avoid losing your ${label}${count === 1 ? '' : 's'}.` +
+    (dateStr ? `\nIf not paid, these ${label}${count === 1 ? '' : 's'} may be released on or after ${dateStr}.` : '') +
+    `${portalLine}\n` +
+    `Thank you,\nTalkUSA`;
+
+  const htmlList = count
+    ? safeNumbers.map(n => `<li><strong>${String(n)}</strong></li>`).join('')
+    : '<li>(no numbers listed)</li>';
+
+  const html = `
+  <div style=\"font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;\">\r
+    <h2>Action required: add funds to keep your ${label}${count === 1 ? '' : 's'}</h2>\r
+    <p>Hello ${safeUser},</p>\r
+    <p>We could not process your monthly service fee due to <strong>insufficient balance</strong>.</p>\r
+    <p><strong>Affected ${label}${count === 1 ? '' : 's'}:</strong></p>\r
+    <ul>${htmlList}</ul>\r
+    <p>Please add funds within <strong>${graceDays} day${graceDays === 1 ? '' : 's'}</strong> to avoid losing your ${label}${count === 1 ? '' : 's'}.</p>\r
+    ${dateStr ? `<p>If not paid, these ${label}${count === 1 ? '' : 's'} may be released on or after <strong>${dateStr}</strong>.</p>` : ''}\r
+    ${safePortal ? `<p><a href=\"${safePortal}\" style=\"background:#4f46e5;color:#fff;padding:10px 14px;border-radius:8px;text-decoration:none;\">Add funds / manage billing</a></p>` : ''}\r
+    <p style=\"color:#555;margin-top:18px;\">Thank you.</p>\r
+  </div>`;
+
+  const payload = {
+    api_key: apiKey,
+    to: [toEmail],
+    sender,
+    subject,
+    text_body: text,
+    html_body: html
+  };
+
+  try {
+    await smtp2goSendEmail(payload, { kind: 'nonpayment-grace-initial', to: toEmail, subject });
+    return { ok: true };
+  } catch (e) {
+    if (DEBUG) console.warn('[email.nonpayment.initial] Failed to send:', e?.message || e);
+    return { ok: false, reason: 'send_failed', error: e?.message || e };
+  }
+}
+
+async function sendNonpaymentGraceReminderEmail({ toEmail, displayName, numbers, graceDays, cancelAfter, portalUrl, productLabel }) {
+  const apiKey = process.env.SMTP2GO_API_KEY;
+  const sender = process.env.SMTP2GO_SENDER || `no-reply@${(process.env.SENDER_DOMAIN || 'talkusa.net')}`;
+  if (!apiKey) return { ok: false, reason: 'SMTP2GO_API_KEY missing' };
+  if (!toEmail) return { ok: false, reason: 'missing_to_email' };
+
+  const safeUser = displayName || 'Customer';
+  const safeNumbers = Array.isArray(numbers) ? numbers.filter(Boolean) : [];
+  const count = safeNumbers.length;
+
+  const dateStr = cancelAfter && Number.isFinite(new Date(cancelAfter).getTime())
+    ? new Date(cancelAfter).toISOString().slice(0, 10)
+    : '';
+
+  const label = productLabel || 'number';
+  const subject = `Reminder: less than 24 hours left to keep your TalkUSA ${label}${count === 1 ? '' : 's'}`;
+
+  const listText = count
+    ? safeNumbers.map(n => ` - ${n}`).join('\n')
+    : ' - (no numbers listed)';
+
+  const safePortal = portalUrl || process.env.PUBLIC_BASE_URL || '';
+  const portalLine = safePortal ? `\nAdd funds / manage billing: ${safePortal}\n` : '';
+
+  const text = `Hello ${safeUser},\n\n` +
+    `This is a reminder that you have less than 24 hours left to add funds to keep your ${label}${count === 1 ? '' : 's'}.\n\n` +
+    `Affected ${label}${count === 1 ? '' : 's'}:\n${listText}\n\n` +
+    (dateStr ? `These ${label}${count === 1 ? '' : 's'} may be released on or after ${dateStr}.\n` : '') +
+    `${portalLine}\n` +
+    `Thank you,\nTalkUSA`;
+
+  const htmlList = count
+    ? safeNumbers.map(n => `<li><strong>${String(n)}</strong></li>`).join('')
+    : '<li>(no numbers listed)</li>';
+
+  const html = `
+  <div style=\"font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;\">\r
+    <h2>Reminder: less than 24 hours left</h2>\r
+    <p>Hello ${safeUser},</p>\r
+    <p>This is a reminder that you have <strong>less than 24 hours</strong> left to add funds to keep your ${label}${count === 1 ? '' : 's'}.</p>\r
+    <p><strong>Affected ${label}${count === 1 ? '' : 's'}:</strong></p>\r
+    <ul>${htmlList}</ul>\r
+    ${dateStr ? `<p>These ${label}${count === 1 ? '' : 's'} may be released on or after <strong>${dateStr}</strong>.</p>` : ''}\r
+    ${safePortal ? `<p><a href=\"${safePortal}\" style=\"background:#4f46e5;color:#fff;padding:10px 14px;border-radius:8px;text-decoration:none;\">Add funds / manage billing</a></p>` : ''}\r
+    <p style=\"color:#555;margin-top:18px;\">Thank you.</p>\r
+  </div>`;
+
+  const payload = {
+    api_key: apiKey,
+    to: [toEmail],
+    sender,
+    subject,
+    text_body: text,
+    html_body: html
+  };
+
+  try {
+    await smtp2goSendEmail(payload, { kind: 'nonpayment-grace-reminder', to: toEmail, subject });
+    return { ok: true };
+  } catch (e) {
+    if (DEBUG) console.warn('[email.nonpayment.reminder] Failed to send:', e?.message || e);
+    return { ok: false, reason: 'send_failed', error: e?.message || e };
+  }
 }
 
 // Build location and pricing information for DID purchase receipt items
@@ -3087,6 +3328,18 @@ async function dailyBuyAnyAvailableNumber() {
   return { dailyNumberId: String(dailyNumberId), phoneNumber: String(phoneNumber) };
 }
 
+async function dailyReleasePhoneNumber(dailyNumberId) {
+  if (!dailyNumberId) return true;
+  try {
+    await dailyApiCall({ method: 'DELETE', path: `/release-phone-number/${encodeURIComponent(String(dailyNumberId))}` });
+    return true;
+  } catch (e) {
+    // Treat missing numbers as already released.
+    if (e && (e.status === 404 || e.status === 410)) return true;
+    throw e;
+  }
+}
+
 function normalizePhoneNumber(s) {
   return String(s || '').replace(/\s+/g, '');
 }
@@ -3198,6 +3451,1118 @@ async function dailyDeleteDialinConfig(dialinConfigId) {
     if (e && e.status === 404) return true;
     throw e;
   }
+}
+
+async function disableAiDialinRoutingForUser({ localUserId }) {
+  if (!pool || !localUserId) return { disabledCount: 0 };
+  let disabledCount = 0;
+
+  const [rows] = await pool.execute(
+    'SELECT id, dialin_config_id FROM ai_numbers WHERE user_id = ? AND dialin_config_id IS NOT NULL',
+    [localUserId]
+  );
+
+  for (const r of rows || []) {
+    const numId = r?.id;
+    const dialinConfigId = r?.dialin_config_id;
+    if (!numId || !dialinConfigId) continue;
+
+    try {
+      await dailyDeleteDialinConfig(dialinConfigId);
+    } catch (e) {
+      if (DEBUG) console.warn('[ai.dialin.disable] Failed to delete dial-in config:', {
+        localUserId,
+        numId,
+        dialinConfigId,
+        message: e?.message || e
+      });
+    }
+
+    try {
+      await pool.execute(
+        'UPDATE ai_numbers SET dialin_config_id = NULL WHERE id = ? AND user_id = ?',
+        [numId, localUserId]
+      );
+    } catch (e) {
+      if (DEBUG) console.warn('[ai.dialin.disable] Failed to clear dialin_config_id:', e?.message || e);
+    }
+
+    disabledCount += 1;
+  }
+
+  return { disabledCount };
+}
+
+async function enableAiDialinRoutingForUser({ localUserId }) {
+  if (!pool || !localUserId) return { enabledCount: 0 };
+  let enabledCount = 0;
+
+  const [rows] = await pool.execute(
+    `SELECT n.id, n.phone_number, n.agent_id, n.dialin_config_id, a.pipecat_agent_name
+     FROM ai_numbers n
+     LEFT JOIN ai_agents a ON a.id = n.agent_id
+     WHERE n.user_id = ? AND n.agent_id IS NOT NULL AND n.cancel_pending = 0`,
+    [localUserId]
+  );
+
+  for (const r of rows || []) {
+    try {
+      const numId = r?.id;
+      const phoneNumber = r?.phone_number;
+      const dialinConfigIdExisting = r?.dialin_config_id;
+      const agentName = r?.pipecat_agent_name;
+
+      if (!numId || !phoneNumber || dialinConfigIdExisting) continue;
+      if (!agentName) continue;
+
+      const roomCreationApi = buildDailyRoomCreationApiUrl({ agentName });
+      const { dialinConfigId } = await dailyUpsertDialinConfig({ phoneNumber, roomCreationApi });
+
+      await pool.execute(
+        'UPDATE ai_numbers SET dialin_config_id = ? WHERE id = ? AND user_id = ?',
+        [dialinConfigId, numId, localUserId]
+      );
+
+      enabledCount += 1;
+    } catch (e) {
+      if (DEBUG) console.warn('[ai.dialin.enable] Failed to enable dial-in routing:', e?.message || e);
+    }
+  }
+
+  return { enabledCount };
+}
+
+async function syncAiDialinRoutingForUser({ localUserId, magnusUserId, httpsAgent, hostHeader }) {
+  if (!pool || !localUserId || !magnusUserId) return { ok: false, reason: 'missing_params' };
+
+  let credit = null;
+  try {
+    const info = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+    credit = info && Number.isFinite(info.credit) ? Number(info.credit) : null;
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.dialin.sync] Failed to fetch Magnus credit:', e?.message || e);
+    return { ok: false, reason: 'credit_fetch_failed' };
+  }
+
+  if (credit == null) return { ok: false, reason: 'credit_missing' };
+
+  const shouldBlock = credit < AI_INBOUND_MIN_CREDIT;
+
+  if (!AI_INBOUND_DISABLE_NUMBERS_WHEN_BALANCE_LOW) {
+    return { ok: true, skipped: true, credit, shouldBlock };
+  }
+
+  if (shouldBlock) {
+    const { disabledCount } = await disableAiDialinRoutingForUser({ localUserId });
+    return { ok: true, credit, shouldBlock, disabledCount, enabledCount: 0 };
+  }
+
+  const { enabledCount } = await enableAiDialinRoutingForUser({ localUserId });
+  return { ok: true, credit, shouldBlock, enabledCount, disabledCount: 0 };
+}
+
+function toMysqlDatetime(d) {
+  try {
+    if (!d) return null;
+    const dt = d instanceof Date ? d : new Date(d);
+    if (!Number.isFinite(dt.getTime())) return null;
+    const pad2 = (n) => String(n).padStart(2, '0');
+    return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())} ${pad2(dt.getHours())}:${pad2(dt.getMinutes())}:${pad2(dt.getSeconds())}`;
+  } catch {
+    return null;
+  }
+}
+
+function addDays(date, days) {
+  try {
+    const dt = date instanceof Date ? new Date(date.getTime()) : new Date(date);
+    if (!Number.isFinite(dt.getTime())) return null;
+    dt.setDate(dt.getDate() + (Number(days) || 0));
+    return dt;
+  } catch {
+    return null;
+  }
+}
+
+async function markAiNumberCancelPending({ localUserId, aiNumberId, billedTo = null }) {
+  if (!pool || !localUserId || !aiNumberId) return false;
+
+  const now = new Date();
+  const cancelAfter = addDays(now, AI_MONTHLY_GRACE_DAYS) || now;
+  const cancelAfterDb = toMysqlDatetime(cancelAfter);
+  const billedToDb = toMysqlDatetime(billedTo);
+
+  try {
+    const [res] = await pool.execute(
+      `UPDATE ai_numbers
+       SET cancel_pending = 1,
+           cancel_pending_since = COALESCE(cancel_pending_since, NOW()),
+           cancel_after = COALESCE(cancel_after, ?),
+           cancel_billed_to = COALESCE(cancel_billed_to, ?),
+           cancel_notice_initial_sent_at = NULL,
+           cancel_notice_reminder_sent_at = NULL
+       WHERE id = ? AND user_id = ? AND cancel_pending = 0
+       LIMIT 1`,
+      [cancelAfterDb, billedToDb, aiNumberId, localUserId]
+    );
+    return !!(res && res.affectedRows > 0);
+  } catch {
+    return false;
+  }
+}
+
+async function markDidwwDidCancelPending({ localUserId, didId, billedTo = null }) {
+  if (!pool || !localUserId || !didId) return false;
+
+  const now = new Date();
+  const cancelAfter = addDays(now, DIDWW_MONTHLY_GRACE_DAYS) || now;
+  const cancelAfterDb = toMysqlDatetime(cancelAfter);
+  const billedToDb = toMysqlDatetime(billedTo);
+
+  try {
+    const [res] = await pool.execute(
+      `UPDATE user_dids
+       SET cancel_pending = 1,
+           cancel_pending_since = COALESCE(cancel_pending_since, NOW()),
+           cancel_after = COALESCE(cancel_after, ?),
+           cancel_billed_to = COALESCE(cancel_billed_to, ?),
+           cancel_notice_initial_sent_at = NULL,
+           cancel_notice_reminder_sent_at = NULL
+       WHERE user_id = ? AND didww_did_id = ? AND cancel_pending = 0
+       LIMIT 1`,
+      [cancelAfterDb, billedToDb, localUserId, didId]
+    );
+    return !!(res && res.affectedRows > 0);
+  } catch {
+    return false;
+  }
+}
+
+async function disableAiDialinRoutingForNumber({ localUserId, aiNumberId, dialinConfigId }) {
+  if (!pool || !localUserId || !aiNumberId) return { ok: false };
+
+  if (dialinConfigId) {
+    try { await dailyDeleteDialinConfig(dialinConfigId); } catch {}
+  }
+
+  try {
+    await pool.execute(
+      'UPDATE ai_numbers SET dialin_config_id = NULL WHERE id = ? AND user_id = ? LIMIT 1',
+      [aiNumberId, localUserId]
+    );
+  } catch {}
+
+  return { ok: true };
+}
+
+async function didwwUnassignVoiceInTrunk(didId) {
+  if (!didId) return true;
+  const body = {
+    data: {
+      type: 'dids',
+      id: String(didId),
+      relationships: {
+        voice_in_trunk: { data: null }
+      }
+    }
+  };
+  try {
+    await didwwApiCall({ method: 'PATCH', path: `/dids/${String(didId)}`, body });
+    return true;
+  } catch (e) {
+    // If the DID is already gone, treat as unassigned.
+    const status = e?.response?.status;
+    if (status === 404) return true;
+    throw e;
+  }
+}
+
+async function cancelDidwwDidForNonpayment({ localUserId, didId }) {
+  if (!pool || !localUserId || !didId) return { ok: false, reason: 'missing_params' };
+
+  // Disable inbound routing immediately so the customer stops receiving calls.
+  try { await didwwUnassignVoiceInTrunk(didId); } catch (e) { if (DEBUG) console.warn('[didww.nonpayment] Failed to unassign trunk:', e?.message || e); }
+
+  // Terminate the DID in DIDWW (provider cancellation).
+  try {
+    const body = {
+      data: {
+        type: 'dids',
+        id: String(didId),
+        attributes: { terminated: true }
+      }
+    };
+    await didwwApiCall({ method: 'PATCH', path: `/dids/${String(didId)}`, body });
+  } catch (e) {
+    const status = e?.response?.status;
+    if (status !== 404) {
+      return { ok: false, reason: 'didww_cancel_failed', error: e?.response?.data || e?.message || e };
+    }
+  }
+
+  // Remove from local DB.
+  try {
+    await pool.execute(
+      'DELETE FROM user_dids WHERE user_id = ? AND didww_did_id = ? LIMIT 1',
+      [localUserId, didId]
+    );
+  } catch {}
+
+  // Best-effort: clean up local markup tracking rows for this DID.
+  try { await pool.execute('DELETE FROM user_did_markups WHERE user_id = ? AND didww_did_id = ?', [localUserId, didId]); } catch {}
+  try { await pool.execute('DELETE FROM user_did_markup_cycles WHERE user_id = ? AND didww_did_id = ?', [localUserId, didId]); } catch {}
+
+  return { ok: true };
+}
+
+async function cancelAiNumberForNonpayment({ localUserId, aiNumberId, dailyNumberId, dialinConfigId }) {
+  if (!pool || !localUserId || !aiNumberId) return { ok: false, reason: 'missing_params' };
+
+  const dailyId = String(dailyNumberId || '').trim();
+  if (!dailyId) {
+    // Without the Daily phone-number id we cannot safely release the number.
+    return { ok: false, reason: 'missing_daily_number_id' };
+  }
+
+  // Disable inbound routing immediately (remove Daily dial-in config).
+  try {
+    await disableAiDialinRoutingForNumber({ localUserId, aiNumberId, dialinConfigId });
+  } catch {}
+
+  // Release the purchased phone number in Daily.
+  try {
+    await dailyReleasePhoneNumber(dailyId);
+  } catch (e) {
+    return { ok: false, reason: 'daily_release_failed', error: e?.data || e?.message || e };
+  }
+
+  // Remove from local DB.
+  try {
+    await pool.execute(
+      'DELETE FROM ai_numbers WHERE id = ? AND user_id = ? LIMIT 1',
+      [aiNumberId, localUserId]
+    );
+  } catch {}
+
+  return { ok: true };
+}
+
+async function processDidwwCancelPendingForUser({ localUserId, magnusUserId, httpsAgent, hostHeader, limit = 100 }) {
+  if (!pool || !localUserId) return { processed: 0, cancelled: 0, charged: 0, failed: 0, deferred: 0 };
+  const safeLimit = Math.max(1, Math.min(500, parseInt(String(limit || '100'), 10) || 100));
+
+  const now = new Date();
+
+  // Load user contact info (best-effort)
+  let toEmail = null;
+  let displayName = null;
+  try {
+    const [[u]] = await pool.execute(
+      'SELECT email, username, firstname, lastname FROM signup_users WHERE id = ? LIMIT 1',
+      [localUserId]
+    );
+    if (u) {
+      toEmail = u.email || null;
+      const name = `${u.firstname || ''} ${u.lastname || ''}`.trim();
+      displayName = name || u.username || null;
+    }
+  } catch {}
+
+  const [rows] = await pool.query(
+    `SELECT id, didww_did_id, did_number, did_type,
+            cancel_pending_since, cancel_after, cancel_billed_to,
+            cancel_notice_initial_sent_at, cancel_notice_reminder_sent_at
+     FROM user_dids
+     WHERE user_id = ? AND cancel_pending = 1
+     ORDER BY id ASC
+     LIMIT ${safeLimit}`,
+    [localUserId]
+  );
+
+  if (!rows || rows.length === 0) {
+    return { processed: 0, cancelled: 0, charged: 0, failed: 0, deferred: 0 };
+  }
+
+  // Ensure cancel_pending_since and cancel_after are set for older rows.
+  for (const r of rows) {
+    const didId = String(r?.didww_did_id || '').trim();
+    if (!didId) continue;
+
+    const hasPendingSince = !!r.cancel_pending_since;
+    const ca = r.cancel_after instanceof Date ? r.cancel_after : (r.cancel_after ? new Date(r.cancel_after) : null);
+    const hasCancelAfter = ca && Number.isFinite(ca.getTime());
+
+    if (!hasPendingSince || !hasCancelAfter) {
+      const cancelAfter = addDays(now, DIDWW_MONTHLY_GRACE_DAYS) || now;
+      try {
+        await pool.execute(
+          'UPDATE user_dids SET cancel_pending_since = COALESCE(cancel_pending_since, NOW()), cancel_after = COALESCE(cancel_after, ?) WHERE user_id = ? AND didww_did_id = ? AND cancel_pending = 1 LIMIT 1',
+          [toMysqlDatetime(cancelAfter), localUserId, didId]
+        );
+      } catch {}
+    }
+  }
+
+  // For older rows, backfill cancel_billed_to from DIDWW if missing (best-effort).
+  const needBilledToIds = (rows || [])
+    .filter(r => !r.cancel_billed_to)
+    .map(r => String(r?.didww_did_id || '').trim())
+    .filter(Boolean);
+
+  const billedToByDidId = new Map();
+
+  if (needBilledToIds.length) {
+    const uniq = Array.from(new Set(needBilledToIds));
+    const chunkSize = 50;
+    for (let i = 0; i < uniq.length; i += chunkSize) {
+      const chunk = uniq.slice(i, i + chunkSize);
+      try {
+        const data = await didwwApiCall({ method: 'GET', path: `/dids?filter[id]=${chunk.join(',')}` });
+        for (const d of (data?.data || [])) {
+          const didId = d && d.id ? String(d.id).trim() : '';
+          if (!didId) continue;
+          const billing = d.attributes?.billing || {};
+          const billedToStr = billing.billed_to || billing.next_billing || d.attributes?.expires_at || null;
+          if (!billedToStr) continue;
+          const dt = new Date(billedToStr);
+          if (!Number.isFinite(dt.getTime())) continue;
+          billedToByDidId.set(didId, dt);
+          try {
+            await pool.execute(
+              'UPDATE user_dids SET cancel_billed_to = COALESCE(cancel_billed_to, ?) WHERE user_id = ? AND didww_did_id = ? AND cancel_pending = 1 LIMIT 1',
+              [toMysqlDatetime(dt), localUserId, didId]
+            );
+          } catch {}
+        }
+      } catch (e) {
+        if (DEBUG) console.warn('[didww.nonpayment] Failed to backfill cancel_billed_to from DIDWW:', e?.message || e);
+      }
+    }
+  }
+
+  // Send initial notice (once)
+  try {
+    const initialRows = rows.filter(r => !r.cancel_notice_initial_sent_at);
+    if (toEmail && initialRows.length) {
+      let earliestCancelAfter = null;
+      const nums = [];
+      const ids = [];
+      for (const r of initialRows) {
+        const didId = String(r?.didww_did_id || '').trim();
+        if (!didId) continue;
+        ids.push(didId);
+        nums.push(String(r?.did_number || didId));
+        const ca = r.cancel_after instanceof Date ? r.cancel_after : (r.cancel_after ? new Date(r.cancel_after) : null);
+        if (ca && Number.isFinite(ca.getTime())) {
+          if (!earliestCancelAfter || ca.getTime() < earliestCancelAfter.getTime()) earliestCancelAfter = ca;
+        }
+      }
+
+      const sendRes = await sendNonpaymentGraceInitialEmail({
+        toEmail,
+        displayName,
+        numbers: nums,
+        graceDays: DIDWW_MONTHLY_GRACE_DAYS,
+        cancelAfter: earliestCancelAfter,
+        portalUrl: process.env.PUBLIC_BASE_URL,
+        productLabel: 'phone number'
+      });
+
+      if (sendRes && sendRes.ok && ids.length) {
+        const ph = ids.map(() => '?').join(',');
+        await pool.execute(
+          `UPDATE user_dids SET cancel_notice_initial_sent_at = NOW()
+           WHERE user_id = ? AND cancel_pending = 1 AND didww_did_id IN (${ph})`,
+          [localUserId, ...ids]
+        );
+      }
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[didww.nonpayment] Failed to send initial notice:', e?.message || e);
+  }
+
+  // Send reminder when <24h remaining (once)
+  try {
+    const remindRows = rows.filter(r => {
+      if (r.cancel_notice_reminder_sent_at) return false;
+      const ca = r.cancel_after instanceof Date ? r.cancel_after : (r.cancel_after ? new Date(r.cancel_after) : null);
+      if (!ca || !Number.isFinite(ca.getTime())) return false;
+      const msLeft = ca.getTime() - now.getTime();
+      return msLeft > 0 && msLeft <= (24 * 60 * 60 * 1000);
+    });
+
+    if (toEmail && remindRows.length) {
+      let earliestCancelAfter = null;
+      const nums = [];
+      const ids = [];
+      for (const r of remindRows) {
+        const didId = String(r?.didww_did_id || '').trim();
+        if (!didId) continue;
+        ids.push(didId);
+        nums.push(String(r?.did_number || didId));
+        const ca = r.cancel_after instanceof Date ? r.cancel_after : (r.cancel_after ? new Date(r.cancel_after) : null);
+        if (ca && Number.isFinite(ca.getTime())) {
+          if (!earliestCancelAfter || ca.getTime() < earliestCancelAfter.getTime()) earliestCancelAfter = ca;
+        }
+      }
+
+      const sendRes = await sendNonpaymentGraceReminderEmail({
+        toEmail,
+        displayName,
+        numbers: nums,
+        graceDays: DIDWW_MONTHLY_GRACE_DAYS,
+        cancelAfter: earliestCancelAfter,
+        portalUrl: process.env.PUBLIC_BASE_URL,
+        productLabel: 'phone number'
+      });
+
+      if (sendRes && sendRes.ok && ids.length) {
+        const ph = ids.map(() => '?').join(',');
+        await pool.execute(
+          `UPDATE user_dids SET cancel_notice_reminder_sent_at = NOW()
+           WHERE user_id = ? AND cancel_pending = 1 AND didww_did_id IN (${ph})`,
+          [localUserId, ...ids]
+        );
+      }
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[didww.nonpayment] Failed to send reminder notice:', e?.message || e);
+  }
+
+  // Fetch current credit once and track it locally to avoid spamming failed billing rows.
+  let creditRemaining = null;
+  try {
+    if (magnusUserId) {
+      const info = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+      if (info && Number.isFinite(info.credit)) creditRemaining = Number(info.credit);
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[didww.nonpayment] Credit fetch failed during cancel_pending processing:', e?.message || e);
+    creditRemaining = null;
+  }
+
+  const localMarkup = parseFloat(process.env.DID_LOCAL_MONTHLY_MARKUP || '10.20') || 0;
+  const tollfreeMarkup = parseFloat(process.env.DID_TOLLFREE_MONTHLY_MARKUP || '25.20') || 0;
+
+  let charged = 0;
+  let cancelled = 0;
+  let failed = 0;
+  let deferred = 0;
+
+  for (const r of rows || []) {
+    const didId = String(r?.didww_did_id || '').trim();
+    if (!didId) continue;
+
+    const ca = r.cancel_after instanceof Date ? r.cancel_after : (r.cancel_after ? new Date(r.cancel_after) : null);
+    const cancelAfter = (ca && Number.isFinite(ca.getTime())) ? ca : null;
+
+    const billedToRaw = r.cancel_billed_to || billedToByDidId.get(didId) || null;
+    const billedTo = billedToRaw instanceof Date ? billedToRaw : (billedToRaw ? new Date(billedToRaw) : null);
+    const billedToOk = billedTo && Number.isFinite(billedTo.getTime());
+
+    const didNumber = String(r?.did_number || '').trim() || didId;
+    const didType = String(r?.did_type || '').toLowerCase();
+    let isTollfree = didType.includes('toll');
+    if (!isTollfree) isTollfree = detectTollfreeUsCaByNpa(didNumber);
+
+    const amt = isTollfree ? tollfreeMarkup : localMarkup;
+    if (!amt || amt <= 0) continue;
+
+    const expired = cancelAfter && now.getTime() >= cancelAfter.getTime();
+
+    // Attempt to recover (charge) if we can safely determine billed_to and the credit is sufficient.
+    if (creditRemaining != null && billedToOk && creditRemaining >= amt) {
+      const billedToDb = toMysqlDatetime(billedTo);
+
+      // If this cycle is already marked billed, clear cancel_pending.
+      try {
+        const [insRes] = await pool.execute(
+          'INSERT IGNORE INTO user_did_markup_cycles (user_id, didww_did_id, billed_to) VALUES (?, ?, ?)',
+          [localUserId, didId, billedToDb]
+        );
+
+        if (insRes && insRes.affectedRows === 0) {
+          // Already billed elsewhere; align reporting and clear pending.
+          try {
+            await pool.execute(
+              'INSERT INTO user_did_markups (user_id, didww_did_id, last_billed_to) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE last_billed_to = VALUES(last_billed_to)',
+              [localUserId, didId, billedToDb]
+            );
+          } catch {}
+          try {
+            await pool.execute(
+              'UPDATE user_dids SET cancel_pending = 0, cancel_pending_since = NULL, cancel_after = NULL, cancel_billed_to = NULL, cancel_notice_initial_sent_at = NULL, cancel_notice_reminder_sent_at = NULL WHERE user_id = ? AND didww_did_id = ? LIMIT 1',
+              [localUserId, didId]
+            );
+          } catch {}
+          continue;
+        }
+
+        const chargeRes = await chargeDidMarkup({
+          userId: localUserId,
+          magnusUserId,
+          didId,
+          didNumber,
+          markupAmount: amt,
+          isTollfree,
+          billedTo,
+          httpsAgent,
+          hostHeader
+        });
+
+        if (chargeRes && chargeRes.ok) {
+          charged += 1;
+          // Update reporting marker
+          try {
+            await pool.execute(
+              'INSERT INTO user_did_markups (user_id, didww_did_id, last_billed_to) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE last_billed_to = VALUES(last_billed_to)',
+              [localUserId, didId, billedToDb]
+            );
+          } catch {}
+          // Clear pending
+          try {
+            await pool.execute(
+              'UPDATE user_dids SET cancel_pending = 0, cancel_pending_since = NULL, cancel_after = NULL, cancel_billed_to = NULL, cancel_notice_initial_sent_at = NULL, cancel_notice_reminder_sent_at = NULL WHERE user_id = ? AND didww_did_id = ? LIMIT 1',
+              [localUserId, didId]
+            );
+          } catch {}
+
+          // Track remaining credit as best-effort
+          if (chargeRes.creditAfter != null && Number.isFinite(Number(chargeRes.creditAfter))) {
+            creditRemaining = Number(chargeRes.creditAfter);
+          } else {
+            creditRemaining = Number(creditRemaining) - amt;
+          }
+
+          continue;
+        }
+
+        // Roll back the cycle marker so we can retry later.
+        try {
+          await pool.execute(
+            'DELETE FROM user_did_markup_cycles WHERE user_id = ? AND didww_did_id = ? AND billed_to = ?',
+            [localUserId, didId, billedToDb]
+          );
+        } catch {}
+      } catch (e) {
+        if (DEBUG) console.warn('[didww.nonpayment] Retry charge failed:', e?.message || e);
+      }
+    }
+
+    // Only cancel after the grace window expires.
+    if (expired) {
+      if (creditRemaining == null) {
+        // Fail-safe: don't cancel if we can't verify credit / attempt recovery.
+        deferred += 1;
+        continue;
+      }
+      try {
+        const res = await cancelDidwwDidForNonpayment({ localUserId, didId });
+        if (res && res.ok) cancelled += 1;
+        else failed += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+  }
+
+  return { processed: (rows || []).length, cancelled, charged, failed, deferred };
+}
+
+async function processAiCancelPendingForUser({ localUserId, magnusUserId, httpsAgent, hostHeader, limit = 100 }) {
+  if (!pool || !localUserId) return { processed: 0, cancelled: 0, charged: 0, failed: 0, deferred: 0 };
+  const safeLimit = Math.max(1, Math.min(500, parseInt(String(limit || '100'), 10) || 100));
+
+  const now = new Date();
+
+  // Load user contact info (best-effort)
+  let toEmail = null;
+  let displayName = null;
+  try {
+    const [[u]] = await pool.execute(
+      'SELECT email, username, firstname, lastname FROM signup_users WHERE id = ? LIMIT 1',
+      [localUserId]
+    );
+    if (u) {
+      toEmail = u.email || null;
+      const name = `${u.firstname || ''} ${u.lastname || ''}`.trim();
+      displayName = name || u.username || null;
+    }
+  } catch {}
+
+  const [rows] = await pool.query(
+    `SELECT n.id, n.daily_number_id, n.dialin_config_id, n.phone_number, n.created_at,
+            n.cancel_pending_since, n.cancel_after, n.cancel_billed_to,
+            n.cancel_notice_initial_sent_at, n.cancel_notice_reminder_sent_at,
+            m.last_billed_to
+     FROM ai_numbers n
+     LEFT JOIN ai_number_markups m ON m.user_id = n.user_id AND m.ai_number_id = n.id
+     WHERE n.user_id = ? AND n.cancel_pending = 1
+     ORDER BY n.id ASC
+     LIMIT ${safeLimit}`,
+    [localUserId]
+  );
+
+  if (!rows || rows.length === 0) {
+    return { processed: 0, cancelled: 0, charged: 0, failed: 0, deferred: 0 };
+  }
+
+  // Ensure cancel_pending_since and cancel_after are set for older rows.
+  for (const r of rows) {
+    const aiNumberId = r?.id != null ? String(r.id) : '';
+    if (!aiNumberId) continue;
+
+    const hasPendingSince = !!r.cancel_pending_since;
+    const ca = r.cancel_after instanceof Date ? r.cancel_after : (r.cancel_after ? new Date(r.cancel_after) : null);
+    const hasCancelAfter = ca && Number.isFinite(ca.getTime());
+
+    if (!hasPendingSince || !hasCancelAfter) {
+      const cancelAfter = addDays(now, AI_MONTHLY_GRACE_DAYS) || now;
+      try {
+        await pool.execute(
+          'UPDATE ai_numbers SET cancel_pending_since = COALESCE(cancel_pending_since, NOW()), cancel_after = COALESCE(cancel_after, ?) WHERE id = ? AND user_id = ? AND cancel_pending = 1 LIMIT 1',
+          [toMysqlDatetime(cancelAfter), aiNumberId, localUserId]
+        );
+      } catch {}
+    }
+  }
+
+  // Send initial notice (once)
+  try {
+    const initialRows = rows.filter(r => !r.cancel_notice_initial_sent_at);
+    if (toEmail && initialRows.length) {
+      let earliestCancelAfter = null;
+      const nums = [];
+      const ids = [];
+      for (const r of initialRows) {
+        const aiNumberId = r?.id != null ? String(r.id) : '';
+        if (!aiNumberId) continue;
+        ids.push(aiNumberId);
+        nums.push(String(r?.phone_number || aiNumberId));
+        const ca = r.cancel_after instanceof Date ? r.cancel_after : (r.cancel_after ? new Date(r.cancel_after) : null);
+        if (ca && Number.isFinite(ca.getTime())) {
+          if (!earliestCancelAfter || ca.getTime() < earliestCancelAfter.getTime()) earliestCancelAfter = ca;
+        }
+      }
+
+      const sendRes = await sendNonpaymentGraceInitialEmail({
+        toEmail,
+        displayName,
+        numbers: nums,
+        graceDays: AI_MONTHLY_GRACE_DAYS,
+        cancelAfter: earliestCancelAfter,
+        portalUrl: process.env.PUBLIC_BASE_URL,
+        productLabel: 'AI phone number'
+      });
+
+      if (sendRes && sendRes.ok && ids.length) {
+        const ph = ids.map(() => '?').join(',');
+        await pool.execute(
+          `UPDATE ai_numbers SET cancel_notice_initial_sent_at = NOW()
+           WHERE user_id = ? AND cancel_pending = 1 AND id IN (${ph})`,
+          [localUserId, ...ids]
+        );
+      }
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.nonpayment] Failed to send initial notice:', e?.message || e);
+  }
+
+  // Send reminder when <24h remaining (once)
+  try {
+    const remindRows = rows.filter(r => {
+      if (r.cancel_notice_reminder_sent_at) return false;
+      const ca = r.cancel_after instanceof Date ? r.cancel_after : (r.cancel_after ? new Date(r.cancel_after) : null);
+      if (!ca || !Number.isFinite(ca.getTime())) return false;
+      const msLeft = ca.getTime() - now.getTime();
+      return msLeft > 0 && msLeft <= (24 * 60 * 60 * 1000);
+    });
+
+    if (toEmail && remindRows.length) {
+      let earliestCancelAfter = null;
+      const nums = [];
+      const ids = [];
+      for (const r of remindRows) {
+        const aiNumberId = r?.id != null ? String(r.id) : '';
+        if (!aiNumberId) continue;
+        ids.push(aiNumberId);
+        nums.push(String(r?.phone_number || aiNumberId));
+        const ca = r.cancel_after instanceof Date ? r.cancel_after : (r.cancel_after ? new Date(r.cancel_after) : null);
+        if (ca && Number.isFinite(ca.getTime())) {
+          if (!earliestCancelAfter || ca.getTime() < earliestCancelAfter.getTime()) earliestCancelAfter = ca;
+        }
+      }
+
+      const sendRes = await sendNonpaymentGraceReminderEmail({
+        toEmail,
+        displayName,
+        numbers: nums,
+        graceDays: AI_MONTHLY_GRACE_DAYS,
+        cancelAfter: earliestCancelAfter,
+        portalUrl: process.env.PUBLIC_BASE_URL,
+        productLabel: 'AI phone number'
+      });
+
+      if (sendRes && sendRes.ok && ids.length) {
+        const ph = ids.map(() => '?').join(',');
+        await pool.execute(
+          `UPDATE ai_numbers SET cancel_notice_reminder_sent_at = NOW()
+           WHERE user_id = ? AND cancel_pending = 1 AND id IN (${ph})`,
+          [localUserId, ...ids]
+        );
+      }
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.nonpayment] Failed to send reminder notice:', e?.message || e);
+  }
+
+  // Fetch current credit once and track it locally to avoid spamming failed billing rows.
+  let creditRemaining = null;
+  try {
+    if (magnusUserId) {
+      const info = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+      if (info && Number.isFinite(info.credit)) creditRemaining = Number(info.credit);
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.nonpayment] Credit fetch failed during cancel_pending processing:', e?.message || e);
+    creditRemaining = null;
+  }
+
+  const localFee = parseFloat(process.env.AI_DID_LOCAL_MONTHLY_FEE || process.env.DID_LOCAL_MONTHLY_MARKUP || '0') || 0;
+  const tollfreeFee = parseFloat(process.env.AI_DID_TOLLFREE_MONTHLY_FEE || process.env.DID_TOLLFREE_MONTHLY_MARKUP || '0') || 0;
+
+  let charged = 0;
+  let cancelled = 0;
+  let failed = 0;
+  let deferred = 0;
+
+  for (const r of rows || []) {
+    const aiNumberId = r?.id != null ? String(r.id) : '';
+    const dailyNumberId = r?.daily_number_id != null ? String(r.daily_number_id) : '';
+    const dialinConfigId = r?.dialin_config_id != null ? String(r.dialin_config_id) : null;
+    const phoneNumber = String(r?.phone_number || '').trim();
+    if (!aiNumberId) continue;
+
+    const ca = r.cancel_after instanceof Date ? r.cancel_after : (r.cancel_after ? new Date(r.cancel_after) : null);
+    const cancelAfter = (ca && Number.isFinite(ca.getTime())) ? ca : null;
+    const expired = cancelAfter && now.getTime() >= cancelAfter.getTime();
+
+    let billedTo = r.cancel_billed_to instanceof Date ? r.cancel_billed_to : (r.cancel_billed_to ? new Date(r.cancel_billed_to) : null);
+    if (!billedTo || !Number.isFinite(billedTo.getTime())) {
+      // Derive a best-effort billed_to for older pending rows.
+      const last = r.last_billed_to instanceof Date ? r.last_billed_to : (r.last_billed_to ? new Date(r.last_billed_to) : null);
+      const base = (last && Number.isFinite(last.getTime()))
+        ? last
+        : (r.created_at instanceof Date ? r.created_at : (r.created_at ? new Date(r.created_at) : null));
+      if (base && Number.isFinite(base.getTime())) {
+        billedTo = addMonthsClamped(base, 1);
+      }
+      if (billedTo && Number.isFinite(billedTo.getTime())) {
+        try {
+          await pool.execute(
+            'UPDATE ai_numbers SET cancel_billed_to = COALESCE(cancel_billed_to, ?) WHERE id = ? AND user_id = ? AND cancel_pending = 1 LIMIT 1',
+            [toMysqlDatetime(billedTo), aiNumberId, localUserId]
+          );
+        } catch {}
+      }
+    }
+
+    const isTollfree = detectTollfreeUsCaByNpa(phoneNumber);
+    let monthlyAmount = isTollfree ? tollfreeFee : localFee;
+    if (!monthlyAmount || monthlyAmount <= 0) {
+      monthlyAmount = isTollfree ? localFee : tollfreeFee;
+    }
+    if (!monthlyAmount || monthlyAmount <= 0) continue;
+
+    // Attempt to recover (charge) if we can safely determine billed_to and the credit is sufficient.
+    if (creditRemaining != null && billedTo && Number.isFinite(billedTo.getTime()) && creditRemaining >= monthlyAmount) {
+      const billedToDb = toMysqlDatetime(billedTo);
+
+      try {
+        const [insRes] = await pool.execute(
+          'INSERT IGNORE INTO ai_number_markup_cycles (user_id, ai_number_id, billed_to) VALUES (?, ?, ?)',
+          [localUserId, aiNumberId, billedToDb]
+        );
+
+        if (insRes && insRes.affectedRows === 0) {
+          // Already billed elsewhere; align reporting and clear pending.
+          try {
+            await pool.execute(
+              'INSERT INTO ai_number_markups (user_id, ai_number_id, last_billed_to) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE last_billed_to = GREATEST(COALESCE(last_billed_to, VALUES(last_billed_to)), VALUES(last_billed_to))',
+              [localUserId, aiNumberId, billedToDb]
+            );
+          } catch {}
+          try {
+            await pool.execute(
+              'UPDATE ai_numbers SET cancel_pending = 0, cancel_pending_since = NULL, cancel_after = NULL, cancel_billed_to = NULL, cancel_notice_initial_sent_at = NULL, cancel_notice_reminder_sent_at = NULL WHERE id = ? AND user_id = ? LIMIT 1',
+              [aiNumberId, localUserId]
+            );
+          } catch {}
+          continue;
+        }
+
+        const chargeRes = await chargeAiNumberMonthlyFee({
+          userId: localUserId,
+          magnusUserId,
+          aiNumberId,
+          phoneNumber,
+          monthlyAmount,
+          isTollfree,
+          billedTo,
+          httpsAgent,
+          hostHeader
+        });
+
+        if (chargeRes && chargeRes.ok) {
+          charged += 1;
+          // Update reporting marker
+          try {
+            await pool.execute(
+              'INSERT INTO ai_number_markups (user_id, ai_number_id, last_billed_to) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE last_billed_to = VALUES(last_billed_to)',
+              [localUserId, aiNumberId, billedToDb]
+            );
+          } catch {}
+          // Clear pending
+          try {
+            await pool.execute(
+              'UPDATE ai_numbers SET cancel_pending = 0, cancel_pending_since = NULL, cancel_after = NULL, cancel_billed_to = NULL, cancel_notice_initial_sent_at = NULL, cancel_notice_reminder_sent_at = NULL WHERE id = ? AND user_id = ? LIMIT 1',
+              [aiNumberId, localUserId]
+            );
+          } catch {}
+
+          creditRemaining = Number(creditRemaining) - monthlyAmount;
+          continue;
+        }
+
+        // Roll back the cycle marker so we can retry later.
+        try {
+          await pool.execute(
+            'DELETE FROM ai_number_markup_cycles WHERE user_id = ? AND ai_number_id = ? AND billed_to = ?',
+            [localUserId, aiNumberId, billedToDb]
+          );
+        } catch {}
+      } catch (e) {
+        if (DEBUG) console.warn('[ai.nonpayment] Retry charge failed:', e?.message || e);
+      }
+    }
+
+    // Only cancel after the grace window expires.
+    if (expired) {
+      if (creditRemaining == null) {
+        deferred += 1;
+        continue;
+      }
+      if (!aiNumberId || !dailyNumberId) {
+        failed += 1;
+        continue;
+      }
+      try {
+        const res = await cancelAiNumberForNonpayment({ localUserId, aiNumberId, dailyNumberId, dialinConfigId });
+        if (res && res.ok) cancelled += 1;
+        else failed += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+  }
+
+  return { processed: (rows || []).length, cancelled, charged, failed, deferred };
+}
+
+function didwwGetVoiceInTrunkId(didObj) {
+  try {
+    const t = didObj?.relationships?.voice_in_trunk?.data;
+    const id = t && t.id ? String(t.id).trim() : '';
+    return id || null;
+  } catch {
+    return null;
+  }
+}
+
+async function didwwFetchDidMapWithVoiceInTrunk(didIds) {
+  const ids = Array.from(new Set((didIds || []).map(v => String(v || '').trim()).filter(Boolean)));
+  const out = new Map();
+  if (!ids.length) return out;
+
+  // DIDWW supports filter[id]=id1,id2,...
+  const chunkSize = 50;
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    const filter = chunk.join(',');
+    const data = await didwwApiCall({
+      method: 'GET',
+      path: `/dids?filter[id]=${filter}&include=voice_in_trunk`
+    });
+    for (const d of (data?.data || [])) {
+      if (d && d.id) out.set(String(d.id), d);
+    }
+  }
+
+  return out;
+}
+
+async function disableDidwwInboundRoutingForUser({ localUserId, didById }) {
+  if (!pool || !localUserId) return { disabledCount: 0 };
+
+  const [rows] = await pool.execute(
+    'SELECT didww_did_id, trunk_id FROM user_dids WHERE user_id = ?',
+    [localUserId]
+  );
+
+  const didIds = (rows || []).map(r => String(r?.didww_did_id || '').trim()).filter(Boolean);
+  if (!didIds.length) return { disabledCount: 0 };
+
+  let didMap = didById instanceof Map ? didById : null;
+  if (!didMap || didMap.size === 0) {
+    try {
+      didMap = await didwwFetchDidMapWithVoiceInTrunk(didIds);
+    } catch (e) {
+      if (DEBUG) console.warn('[didww.inbound.disable] Failed to fetch DIDWW DID state:', e?.message || e);
+      didMap = new Map();
+    }
+  }
+
+  let disabledCount = 0;
+
+  for (const r of rows || []) {
+    const didId = String(r?.didww_did_id || '').trim();
+    if (!didId) continue;
+
+    const storedTrunkId = r?.trunk_id ? String(r.trunk_id).trim() : '';
+    const didObj = didMap.get(didId);
+    const currentTrunkId = didObj ? (didwwGetVoiceInTrunkId(didObj) || '') : '';
+
+    // If we don't have a stored trunk id (older installs), capture the current one once
+    // so we can restore when balance is positive again.
+    if (!storedTrunkId && currentTrunkId) {
+      try {
+        await pool.execute(
+          'UPDATE user_dids SET trunk_id = ? WHERE user_id = ? AND didww_did_id = ? AND (trunk_id IS NULL OR trunk_id = \'\')',
+          [currentTrunkId, localUserId, didId]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[didww.inbound.disable] Failed to persist trunk_id before disabling:', e?.message || e);
+      }
+    }
+
+    // Unassign the trunk in DIDWW to block inbound calls.
+    if (currentTrunkId) {
+      try {
+        const body = {
+          data: {
+            type: 'dids',
+            id: didId,
+            relationships: {
+              voice_in_trunk: { data: null }
+            }
+          }
+        };
+        await didwwApiCall({ method: 'PATCH', path: `/dids/${didId}`, body });
+        disabledCount += 1;
+      } catch (e) {
+        if (DEBUG) console.warn('[didww.inbound.disable] Failed to unassign voice_in_trunk:', {
+          localUserId,
+          didId,
+          message: e?.response?.data || e?.message || e
+        });
+      }
+    }
+  }
+
+  return { disabledCount };
+}
+
+async function enableDidwwInboundRoutingForUser({ localUserId, didById }) {
+  if (!pool || !localUserId) return { enabledCount: 0 };
+
+  const [rows] = await pool.execute(
+    'SELECT didww_did_id, trunk_id FROM user_dids WHERE user_id = ? AND cancel_pending = 0 AND trunk_id IS NOT NULL AND trunk_id <> \'\'',
+    [localUserId]
+  );
+
+  const didIds = (rows || []).map(r => String(r?.didww_did_id || '').trim()).filter(Boolean);
+  if (!didIds.length) return { enabledCount: 0 };
+
+  let didMap = didById instanceof Map ? didById : null;
+  if (!didMap || didMap.size === 0) {
+    try {
+      didMap = await didwwFetchDidMapWithVoiceInTrunk(didIds);
+    } catch (e) {
+      if (DEBUG) console.warn('[didww.inbound.enable] Failed to fetch DIDWW DID state:', e?.message || e);
+      didMap = new Map();
+    }
+  }
+
+  let enabledCount = 0;
+
+  for (const r of rows || []) {
+    const didId = String(r?.didww_did_id || '').trim();
+    const trunkId = String(r?.trunk_id || '').trim();
+    if (!didId || !trunkId) continue;
+
+    const didObj = didMap.get(didId);
+    const currentTrunkId = didObj ? (didwwGetVoiceInTrunkId(didObj) || '') : '';
+    if (currentTrunkId === trunkId) continue;
+
+    try {
+      const body = {
+        data: {
+          type: 'dids',
+          id: didId,
+          relationships: {
+            voice_in_trunk: { data: { type: 'voice_in_trunks', id: trunkId } }
+          }
+        }
+      };
+      await didwwApiCall({ method: 'PATCH', path: `/dids/${didId}`, body });
+      enabledCount += 1;
+    } catch (e) {
+      if (DEBUG) console.warn('[didww.inbound.enable] Failed to assign voice_in_trunk:', {
+        localUserId,
+        didId,
+        trunkId,
+        message: e?.response?.data || e?.message || e
+      });
+    }
+  }
+
+  return { enabledCount };
+}
+
+async function syncDidwwInboundRoutingForUser({ localUserId, magnusUserId, httpsAgent, hostHeader, didById }) {
+  if (!pool || !localUserId || !magnusUserId) return { ok: false, reason: 'missing_params' };
+
+  let credit = null;
+  try {
+    const info = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+    credit = info && Number.isFinite(info.credit) ? Number(info.credit) : null;
+  } catch (e) {
+    if (DEBUG) console.warn('[didww.inbound.sync] Failed to fetch Magnus credit:', e?.message || e);
+    credit = null;
+  }
+
+  if (credit == null) {
+    if (!DIDWW_INBOUND_BALANCE_FAIL_CLOSED) {
+      return { ok: false, reason: 'credit_missing' };
+    }
+    // Fail closed: treat as blocked
+    const { disabledCount } = await disableDidwwInboundRoutingForUser({ localUserId, didById });
+    return { ok: true, credit: null, shouldBlock: true, disabledCount, enabledCount: 0, reason: 'credit_missing_fail_closed' };
+  }
+
+  const shouldBlock = credit < DIDWW_INBOUND_MIN_CREDIT;
+
+  if (!DIDWW_INBOUND_DISABLE_TRUNKS_WHEN_BALANCE_LOW) {
+    return { ok: true, skipped: true, credit, shouldBlock };
+  }
+
+  if (shouldBlock) {
+    const { disabledCount } = await disableDidwwInboundRoutingForUser({ localUserId, didById });
+    return { ok: true, credit, shouldBlock, disabledCount, enabledCount: 0 };
+  }
+
+  const { enabledCount } = await enableDidwwInboundRoutingForUser({ localUserId, didById });
+  return { ok: true, credit, shouldBlock, enabledCount, disabledCount: 0 };
 }
 
 // List Cartesia voices (used by the dashboard voice picker)
@@ -4023,6 +5388,9 @@ app.post('/api/me/ai/numbers/:id/assign', requireAuth, async (req, res) => {
     const [nrows] = await pool.execute('SELECT * FROM ai_numbers WHERE id = ? AND user_id = ? LIMIT 1', [numberId, userId]);
     const num = nrows && nrows[0];
     if (!num) return res.status(404).json({ success: false, message: 'Number not found' });
+    if (num.cancel_pending) {
+      return res.status(409).json({ success: false, message: 'This AI number is being cancelled due to nonpayment and cannot be assigned.' });
+    }
 
     const [arows] = await pool.execute('SELECT * FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1', [agentId, userId]);
     const agent = arows && arows[0];
@@ -5329,6 +6697,18 @@ async function applyMagnusRefill({ userId, magnusUserId, amountNum, desc, displa
         if (DEBUG) console.warn('[refill] Failed to send refill receipt email:', emailErr.message || emailErr);
       }
 
+      // Best-effort: if AI number routing was disabled due to low balance, re-enable when funds are added.
+      if (AI_INBOUND_DISABLE_NUMBERS_WHEN_BALANCE_LOW) {
+        syncAiDialinRoutingForUser({ localUserId: userId, magnusUserId, httpsAgent, hostHeader })
+          .catch(() => {});
+      }
+
+      // Best-effort: if DIDWW inbound routing was disabled due to low balance, re-enable when funds are added.
+      if (DIDWW_INBOUND_DISABLE_TRUNKS_WHEN_BALANCE_LOW) {
+        syncDidwwInboundRoutingForUser({ localUserId: userId, magnusUserId, httpsAgent, hostHeader })
+          .catch(() => {});
+      }
+
       return { success: true, magnusResponse };
     } else {
       await pool.execute(
@@ -6527,6 +7907,11 @@ app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
     // Best-effort lookup so we can attribute calls to the correct user.
     let agentRow = null;
     let aiNumberRow = null;
+    let shouldBlock = false;
+    let blockReason = null;
+    let credit = null;
+    let magnusUserId = null;
+
     if (pool) {
       try {
         const [rows] = await pool.execute(
@@ -6548,10 +7933,47 @@ app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
         } catch (e) {
           if (DEBUG) console.warn('[daily.dialin] Failed to lookup ai_number:', e.message || e);
         }
+
+        // Balance gate: block inbound AI calls when user's MagnusBilling credit is below threshold.
+        try {
+          const [uRows] = await pool.execute(
+            'SELECT magnus_user_id FROM signup_users WHERE id = ? LIMIT 1',
+            [agentRow.user_id]
+          );
+          magnusUserId = uRows && uRows[0] ? String(uRows[0].magnus_user_id || '').trim() : null;
+        } catch (e) {
+          if (DEBUG) console.warn('[daily.dialin] Failed to lookup magnus_user_id:', e.message || e);
+          magnusUserId = null;
+        }
+
+        if (magnusUserId) {
+          try {
+            const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+            const info = await fetchMagnusUserCredit({ magnusUserId, httpsAgent: magnusBillingAgent, hostHeader });
+            credit = info && Number.isFinite(info.credit) ? Number(info.credit) : null;
+          } catch (e) {
+            if (DEBUG) console.warn('[daily.dialin] Failed to fetch Magnus credit:', e.message || e);
+            credit = null;
+          }
+        }
+
+        if (credit != null) {
+          if (credit < AI_INBOUND_MIN_CREDIT) {
+            shouldBlock = true;
+            blockReason = 'insufficient_funds';
+          }
+        } else if (AI_INBOUND_BALANCE_FAIL_CLOSED) {
+          shouldBlock = true;
+          blockReason = magnusUserId ? 'credit_unavailable' : 'missing_magnus_user_id';
+        }
       }
 
       // Insert/update call log (idempotent via UNIQUE(call_domain, call_id)).
       if (agentRow) {
+        const initialStatus = shouldBlock
+          ? (blockReason === 'insufficient_funds' ? 'blocked_insufficient_funds' : 'blocked_balance_check_failed')
+          : 'webhook_received';
+
         try {
           await pool.execute(
             `INSERT INTO ai_call_logs (call_id, call_domain, user_id, agent_id, ai_number_id, direction, from_number, to_number, time_start, status, raw_payload)
@@ -6568,7 +7990,7 @@ app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
               aiNumberRow ? aiNumberRow.id : null,
               fromNumber || null,
               toNumber || (aiNumberRow ? aiNumberRow.phone_number : null),
-              'webhook_received',
+              initialStatus,
               JSON.stringify(body)
             ]
           );
@@ -6576,6 +7998,30 @@ app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
           if (DEBUG) console.warn('[daily.dialin] Failed to insert ai_call_logs row:', e.message || e);
         }
       }
+    }
+
+    if (shouldBlock && agentRow) {
+      if (DEBUG) {
+        console.warn('[daily.dialin] Blocking inbound AI call due to balance gate:', {
+          userId: agentRow.user_id,
+          agentName,
+          callId,
+          callDomain,
+          credit,
+          minCredit: AI_INBOUND_MIN_CREDIT,
+          blockReason
+        });
+      }
+
+      // Best-effort: disable AI number routing while the user is blocked.
+      // Only do this when we *confirmed* the balance is below threshold.
+      if (AI_INBOUND_DISABLE_NUMBERS_WHEN_BALANCE_LOW && blockReason === 'insufficient_funds') {
+        disableAiDialinRoutingForUser({ localUserId: agentRow.user_id })
+          .catch(() => {});
+      }
+
+      // Return non-2xx so Daily rejects the call.
+      return res.status(402).json({ success: false, message: 'Insufficient balance' });
     }
 
     // Trigger Pipecat Cloud to start the dial-in session for this agent.
@@ -6953,7 +8399,7 @@ app.post('/webhooks/daily/events', async (req, res) => {
           // 1) Preferred: match by event_call_id/event_call_domain (once mapped).
           let result = await tryUpdateAiCallLog({
             sqlByDomain: `UPDATE ai_call_logs
-             SET status = CASE WHEN status = 'error' THEN 'error' ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
+             SET status = CASE WHEN status = 'error' THEN 'error' WHEN status LIKE 'blocked%' THEN status ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
                  time_end = COALESCE(time_end, ?),
                  duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
                  billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
@@ -6962,7 +8408,7 @@ app.post('/webhooks/daily/events', async (req, res) => {
              LIMIT 1`,
             buildParamsByDomain: (cid, dom) => [ts, ts, ts, ts, ts, cid, dom],
             sqlById: `UPDATE ai_call_logs
-               SET status = CASE WHEN status = 'error' THEN 'error' ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
+               SET status = CASE WHEN status = 'error' THEN 'error' WHEN status LIKE 'blocked%' THEN status ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
                    time_end = COALESCE(time_end, ?),
                    duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
                    billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
@@ -6976,7 +8422,7 @@ app.post('/webhooks/daily/events', async (req, res) => {
           if (!result.updated) {
             result = await tryUpdateAiCallLog({
               sqlByDomain: `UPDATE ai_call_logs
-               SET status = CASE WHEN status = 'error' THEN 'error' ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
+               SET status = CASE WHEN status = 'error' THEN 'error' WHEN status LIKE 'blocked%' THEN status ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
                    time_end = COALESCE(time_end, ?),
                    duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
                    billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
@@ -6987,7 +8433,7 @@ app.post('/webhooks/daily/events', async (req, res) => {
                LIMIT 1`,
               buildParamsByDomain: (cid, dom) => [ts, ts, ts, ts, ts, callId || null, callDomain || null, cid, dom],
               sqlById: `UPDATE ai_call_logs
-                 SET status = CASE WHEN status = 'error' THEN 'error' ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
+                 SET status = CASE WHEN status = 'error' THEN 'error' WHEN status LIKE 'blocked%' THEN status ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
                      time_end = COALESCE(time_end, ?),
                      duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
                      billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
@@ -7004,7 +8450,7 @@ app.post('/webhooks/daily/events', async (req, res) => {
           if (!result.updated) {
             const numResult = await tryUpdateAiCallLogByNumbers({
               sqlToFrom: `UPDATE ai_call_logs
-                SET status = CASE WHEN status = 'error' THEN 'error' ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
+                SET status = CASE WHEN status = 'error' THEN 'error' WHEN status LIKE 'blocked%' THEN status ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
                     time_end = COALESCE(time_end, ?),
                     duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
                     billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
@@ -7019,7 +8465,7 @@ app.post('/webhooks/daily/events', async (req, res) => {
                 LIMIT 1`,
               paramsToFrom: [ts, ts, ts, ts, ts, callId || null, callDomain || null, toDigits, fromDigits, ts],
               sqlToOnly: `UPDATE ai_call_logs
-                SET status = CASE WHEN status = 'error' THEN 'error' ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
+                SET status = CASE WHEN status = 'error' THEN 'error' WHEN status LIKE 'blocked%' THEN status ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
                     time_end = COALESCE(time_end, ?),
                     duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
                     billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
@@ -7040,7 +8486,7 @@ app.post('/webhooks/daily/events', async (req, res) => {
           if (!result.updated) {
             const timeResult = await tryUpdateAiCallLogByTimeWindow({
               sqlById: `UPDATE ai_call_logs
-                SET status = CASE WHEN status = 'error' THEN 'error' ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
+                SET status = CASE WHEN status = 'error' THEN 'error' WHEN status LIKE 'blocked%' THEN status ELSE CASE WHEN time_connect IS NULL THEN 'missed' ELSE 'completed' END END,
                     time_end = COALESCE(time_end, ?),
                     duration = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
                     billsec = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(time_connect, time_start, ?), COALESCE(time_end, ?))),
@@ -8449,6 +9895,15 @@ app.delete('/api/me/didww/trunks/:id', requireAuth, async (req, res) => {
               }
             };
             await didwwApiCall({ method: 'PATCH', path: `/dids/${did.id}`, body: unassignBody });
+
+            // Keep local DB in sync so we don't attempt to restore a deleted trunk later.
+            try {
+              await pool.execute(
+                'UPDATE user_dids SET trunk_id = NULL WHERE user_id = ? AND didww_did_id = ? AND trunk_id = ? LIMIT 1',
+                [userId, did.id, trunkId]
+              );
+            } catch {}
+
             if (DEBUG) console.log('[didww.trunk.delete] Unassigned trunk from DID:', { trunkId, didId: did.id });
           } catch (unassignErr) {
             console.warn('[didww.trunk.delete] Failed to unassign trunk from DID:', did.id, unassignErr.message);
@@ -8481,9 +9936,9 @@ app.delete('/api/me/didww/trunks/:id', requireAuth, async (req, res) => {
 
 // Charge monthly markup for a single DID (deducts from MagnusBilling and records billing history)
 async function chargeDidMarkup({ userId, magnusUserId, didId, didNumber, markupAmount, isTollfree, billedTo, httpsAgent, hostHeader }) {
-  if (!pool) return false;
+  if (!pool) return { ok: false, reason: 'no_db' };
   const amt = Number(markupAmount || 0);
-  if (!amt || amt <= 0) return false;
+  if (!amt || amt <= 0) return { ok: false, reason: 'invalid_amount' };
 
   const periodLabel = billedTo ? `period ending ${new Date(billedTo).toISOString().slice(0, 10)}` : 'monthly period';
   const descRaw = `Number monthly service fee - ${isTollfree ? 'Toll-Free' : 'Local'} ${didNumber || didId} (${periodLabel})`;
@@ -8505,10 +9960,41 @@ async function chargeDidMarkup({ userId, magnusUserId, didId, didNumber, markupA
         markupAmount: amt,
         billedTo
       });
-      return true;
+      return { ok: true, skipped: true, reason: 'duplicate' };
     }
   } catch (dupErr) {
     if (DEBUG) console.warn('[didww.markup] Duplicate-check query failed; continuing with charge:', dupErr.message || dupErr);
+  }
+
+  // Optional: enforce sufficient funds (no negative balance) for monthly DID fees.
+  if (DIDWW_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE) {
+    let creditInfo = null;
+    try {
+      creditInfo = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+    } catch (e) {
+      if (DEBUG) console.warn('[didww.markup] Credit check failed; skipping charge:', e?.message || e);
+      return { ok: false, reason: 'credit_check_failed' };
+    }
+
+    const currentCredit = (creditInfo && Number.isFinite(creditInfo.credit)) ? Number(creditInfo.credit) : null;
+    if (currentCredit == null) {
+      if (DEBUG) console.warn('[didww.markup] Credit missing; skipping charge', { magnusUserId });
+      return { ok: false, reason: 'credit_missing' };
+    }
+
+    if (currentCredit < amt) {
+      // Record unpaid billing row so the customer can see what happened.
+      let billingId = null;
+      try {
+        const [ins] = await pool.execute(
+          'INSERT INTO billing_history (user_id, amount, description, status, magnus_response) VALUES (?, ?, ?, ?, ?)',
+          [userId, -amt, description, 'failed', `Insufficient balance: ${currentCredit}`]
+        );
+        billingId = ins.insertId;
+      } catch {}
+
+      return { ok: false, reason: 'insufficient_funds', credit: currentCredit, billingId };
+    }
   }
 
   // Insert pending billing record
@@ -8519,51 +10005,59 @@ async function chargeDidMarkup({ userId, magnusUserId, didId, didNumber, markupA
   const billingId = insertResult.insertId;
 
   try {
-    // Read current credit
-    const readParams = new URLSearchParams();
-    readParams.append('module', 'user');
-    readParams.append('action', 'read');
-    readParams.append('start', '0');
-    readParams.append('limit', '100');
-    const readResp = await mbSignedCall({ relPath: '/index.php/user/read', params: readParams, httpsAgent, hostHeader });
-    const allUsers = readResp?.data?.rows || readResp?.data?.data || [];
-    const userRow = allUsers.find(u => String(u.id || u.user_id || u.uid || u.id_user || '') === String(magnusUserId));
-    let magnusResponse = JSON.stringify(readResp?.data || readResp || {});
+    const creditInfo = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+    const currentCredit = (creditInfo && Number.isFinite(creditInfo.credit)) ? Number(creditInfo.credit) : null;
 
-    if (userRow) {
-      const currentCredit = Number(userRow.credit || 0);
-      const newCredit = currentCredit - amt; // allow negative balance
-      const updateParams = new URLSearchParams();
-      updateParams.append('module', 'user');
-      updateParams.append('action', 'save');
-      updateParams.append('id', String(magnusUserId));
-      updateParams.append('credit', String(newCredit));
-      const updateResp = await mbSignedCall({ relPath: '/index.php/user/save', params: updateParams, httpsAgent, hostHeader });
-      magnusResponse = JSON.stringify(updateResp?.data || updateResp || {});
-      if (DEBUG) console.log('[didww.markup] Deducted markup from MagnusBilling credit:', {
-        magnusUserId,
-        didId,
-        didNumber,
-        amount: amt,
-        currentCredit,
-        newCredit
-      });
-    } else if (DEBUG) {
-      console.warn('[didww.markup] Magnus user not found when charging markup', { magnusUserId });
+    if (currentCredit == null) {
+      await pool.execute(
+        'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+        ['failed', 'Unable to read MagnusBilling credit', billingId]
+      );
+      return { ok: false, reason: 'credit_missing', billingId };
     }
 
+    if (DIDWW_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE && currentCredit < amt) {
+      await pool.execute(
+        'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+        ['failed', `Insufficient balance: ${currentCredit}`, billingId]
+      );
+      return { ok: false, reason: 'insufficient_funds', credit: currentCredit, billingId };
+    }
+
+    const newCredit = currentCredit - amt;
+    const updateResp = await updateMagnusUserCredit({ magnusUserId, newCredit, httpsAgent, hostHeader });
+    const magnusResponse = JSON.stringify(updateResp?.data || updateResp || {});
+
+    const success = updateResp?.status >= 200 && updateResp?.status < 300;
+
     await pool.execute(
       'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
-      ['completed', magnusResponse, billingId]
+      [success ? 'completed' : 'failed', magnusResponse, billingId]
     );
-    return true;
+
+    if (!success) {
+      return { ok: false, reason: 'magnus_update_failed', billingId, magnusResponse };
+    }
+
+    if (DEBUG) console.log('[didww.markup] Deducted markup from MagnusBilling credit:', {
+      magnusUserId,
+      didId,
+      didNumber,
+      amount: amt,
+      currentCredit,
+      newCredit
+    });
+
+    return { ok: true, billingId, creditBefore: currentCredit, creditAfter: newCredit };
   } catch (e) {
     if (DEBUG) console.warn('[didww.markup] MagnusBilling error while charging markup:', e.message || e);
-    await pool.execute(
-      'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
-      ['failed', String(e.message || e), billingId]
-    );
-    return false;
+    try {
+      await pool.execute(
+        'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+        ['failed', String(e.message || e), billingId]
+      );
+    } catch {}
+    return { ok: false, reason: 'error', billingId, error: e?.message || e };
   }
 }
 
@@ -8636,7 +10130,7 @@ async function billDidMarkupsForUser({ localUserId, magnusUserId, userDids, incl
       }
 
       const didNumber = attrs.number || '';
-      const ok = await chargeDidMarkup({
+      const chargeRes = await chargeDidMarkup({
         userId: localUserId,
         magnusUserId,
         didId,
@@ -8648,7 +10142,7 @@ async function billDidMarkupsForUser({ localUserId, magnusUserId, userDids, incl
         hostHeader
       });
 
-      if (!ok) {
+      if (!chargeRes || !chargeRes.ok) {
         // Roll back the cycle marker so we can retry on the next run
         try {
           await pool.execute(
@@ -8658,6 +10152,16 @@ async function billDidMarkupsForUser({ localUserId, magnusUserId, userDids, incl
         } catch (delErr) {
           if (DEBUG) console.warn('[didww.markup] Failed to rollback markup cycle row after failure:', delErr.message || delErr);
         }
+
+        // If enabled, schedule cancellation (grace period) on nonpayment.
+        if (
+          DIDWW_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE &&
+          chargeRes &&
+          chargeRes.reason === 'insufficient_funds'
+        ) {
+          try { await markDidwwDidCancelPending({ localUserId, didId, billedTo }); } catch {}
+        }
+
         continue;
       }
 
@@ -9071,9 +10575,9 @@ async function billInboundAiCallsForUser({ localUserId, magnusUserId, httpsAgent
 
 // Charge monthly service fee for a single AI phone number (Daily Telephony)
 async function chargeAiNumberMonthlyFee({ userId, magnusUserId, aiNumberId, phoneNumber, monthlyAmount, isTollfree, billedTo, httpsAgent, hostHeader }) {
-  if (!pool) return false;
+  if (!pool) return { ok: false, reason: 'no_db' };
   const amt = Number(monthlyAmount || 0);
-  if (!amt || amt <= 0) return false;
+  if (!amt || amt <= 0) return { ok: false, reason: 'invalid_amount' };
 
   const periodLabel = billedTo ? `period ending ${new Date(billedTo).toISOString().slice(0, 10)}` : 'monthly period';
   const descRaw = `AI number monthly service fee - ${isTollfree ? 'Toll-Free' : 'Local'} ${phoneNumber || aiNumberId} (${periodLabel})`;
@@ -9085,9 +10589,43 @@ async function chargeAiNumberMonthlyFee({ userId, magnusUserId, aiNumberId, phon
       'SELECT id FROM billing_history WHERE user_id = ? AND amount = ? AND description = ? AND status != ? LIMIT 1',
       [userId, -amt, description, 'failed']
     );
-    if (existingRows && existingRows.length) return true;
+    if (existingRows && existingRows.length) return { ok: true, skipped: true, reason: 'duplicate' };
   } catch (dupErr) {
     if (DEBUG) console.warn('[ai.number.billing] Duplicate-check query failed; continuing:', dupErr.message || dupErr);
+  }
+
+  // Optional: enforce sufficient funds (no negative balance) for monthly AI number fees.
+  let creditBefore = null;
+  if (AI_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE) {
+    let creditInfo = null;
+    try {
+      creditInfo = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+    } catch (e) {
+      if (DEBUG) console.warn('[ai.number.billing] Credit check failed; skipping charge:', e?.message || e);
+      return { ok: false, reason: 'credit_check_failed' };
+    }
+
+    const currentCredit = (creditInfo && Number.isFinite(creditInfo.credit)) ? Number(creditInfo.credit) : null;
+    if (currentCredit == null) {
+      if (DEBUG) console.warn('[ai.number.billing] Credit missing; skipping charge', { magnusUserId });
+      return { ok: false, reason: 'credit_missing' };
+    }
+
+    creditBefore = currentCredit;
+
+    if (currentCredit < amt) {
+      // Record unpaid billing row so the customer can see what happened.
+      let billingId = null;
+      try {
+        const [ins] = await pool.execute(
+          'INSERT INTO billing_history (user_id, amount, description, status, magnus_response) VALUES (?, ?, ?, ?, ?)',
+          [userId, -amt, description, 'failed', `Insufficient balance: ${currentCredit}`]
+        );
+        billingId = ins.insertId;
+      } catch {}
+
+      return { ok: false, reason: 'insufficient_funds', credit: currentCredit, billingId };
+    }
   }
 
   const [insertResult] = await pool.execute(
@@ -9099,14 +10637,17 @@ async function chargeAiNumberMonthlyFee({ userId, magnusUserId, aiNumberId, phon
   try {
     let magnusResponse = null;
     let success = false;
-    let creditBefore = null;
+    let insufficient = false;
 
-    // Read credit before charging so we can verify whether the refill actually affected user.credit
-    try {
-      const beforeInfo = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
-      if (beforeInfo && Number.isFinite(beforeInfo.credit)) creditBefore = Number(beforeInfo.credit);
-    } catch (e) {
-      if (DEBUG) console.warn('[ai.number.billing] Failed to read MagnusBilling credit before charge:', e.message || e);
+    // Read credit before charging so we can verify whether the refill actually affected user.credit.
+    // If we already read it for the nonpayment gate, reuse that value.
+    if (creditBefore == null) {
+      try {
+        const beforeInfo = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+        if (beforeInfo && Number.isFinite(beforeInfo.credit)) creditBefore = Number(beforeInfo.credit);
+      } catch (e) {
+        if (DEBUG) console.warn('[ai.number.billing] Failed to read MagnusBilling credit before charge:', e.message || e);
+      }
     }
 
     // Primary: create a negative refill entry
@@ -9181,24 +10722,30 @@ async function chargeAiNumberMonthlyFee({ userId, magnusUserId, aiNumberId, phon
 
       if (userRow) {
         const currentCredit = Number(userRow.credit || 0);
-        const newCredit = currentCredit - amt;
-        const updateParams = new URLSearchParams();
-        updateParams.append('module', 'user');
-        updateParams.append('action', 'save');
-        updateParams.append('id', String(magnusUserId));
-        updateParams.append('credit', String(newCredit));
-        const updateResp = await mbSignedCall({ relPath: '/index.php/user/save', params: updateParams, httpsAgent, hostHeader });
-        magnusResponse = JSON.stringify(updateResp?.data || updateResp || {});
-        success = true;
-        if (DEBUG) console.log('[ai.number.billing] Deducted AI number monthly fee via direct credit update:', {
-          magnusUserId,
-          userId,
-          aiNumberId,
-          phoneNumber,
-          amount: amt,
-          currentCredit,
-          newCredit
-        });
+        if (AI_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE && currentCredit < amt) {
+          insufficient = true;
+          success = false;
+          magnusResponse = `Insufficient balance: ${currentCredit}`;
+        } else {
+          const newCredit = currentCredit - amt;
+          const updateParams = new URLSearchParams();
+          updateParams.append('module', 'user');
+          updateParams.append('action', 'save');
+          updateParams.append('id', String(magnusUserId));
+          updateParams.append('credit', String(newCredit));
+          const updateResp = await mbSignedCall({ relPath: '/index.php/user/save', params: updateParams, httpsAgent, hostHeader });
+          magnusResponse = JSON.stringify(updateResp?.data || updateResp || {});
+          success = true;
+          if (DEBUG) console.log('[ai.number.billing] Deducted AI number monthly fee via direct credit update:', {
+            magnusUserId,
+            userId,
+            aiNumberId,
+            phoneNumber,
+            amount: amt,
+            currentCredit,
+            newCredit
+          });
+        }
       }
     }
 
@@ -9207,14 +10754,20 @@ async function chargeAiNumberMonthlyFee({ userId, magnusUserId, aiNumberId, phon
       [success ? 'completed' : 'failed', magnusResponse || 'No MagnusBilling response', billingId]
     );
 
-    return success;
+    if (!success) {
+      return { ok: false, reason: insufficient ? 'insufficient_funds' : 'failed', billingId, magnusResponse };
+    }
+
+    return { ok: true, billingId, magnusResponse };
   } catch (e) {
     if (DEBUG) console.warn('[ai.number.billing] MagnusBilling error while charging AI number monthly fee:', e.message || e);
-    await pool.execute(
-      'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
-      ['failed', String(e.message || e), billingId]
-    );
-    return false;
+    try {
+      await pool.execute(
+        'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+        ['failed', String(e.message || e), billingId]
+      );
+    } catch {}
+    return { ok: false, reason: 'error', billingId, error: e?.message || e };
   }
 }
 
@@ -9337,7 +10890,7 @@ async function billAiNumberMonthlyFeesForUser({ localUserId, magnusUserId, aiNum
           continue;
         }
 
-        const ok = await chargeAiNumberMonthlyFee({
+        const chargeRes = await chargeAiNumberMonthlyFee({
           userId: localUserId,
           magnusUserId,
           aiNumberId,
@@ -9349,7 +10902,7 @@ async function billAiNumberMonthlyFeesForUser({ localUserId, magnusUserId, aiNum
           hostHeader
         });
 
-        if (!ok) {
+        if (!chargeRes || !chargeRes.ok) {
           // Roll back cycle marker so we can retry
           try {
             await pool.execute(
@@ -9357,6 +10910,16 @@ async function billAiNumberMonthlyFeesForUser({ localUserId, magnusUserId, aiNum
               [localUserId, aiNumberId, billedToDb]
             );
           } catch {}
+
+          // If enabled, schedule cancellation (grace period) on nonpayment.
+          if (
+            AI_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE &&
+            chargeRes &&
+            chargeRes.reason === 'insufficient_funds'
+          ) {
+            try { await markAiNumberCancelPending({ localUserId, aiNumberId, billedTo: nextBilledTo }); } catch {}
+          }
+
           break;
         }
 
@@ -10153,33 +11716,98 @@ app.get('/api/me/didww/dids', requireAuth, async (req, res) => {
 // Assign a trunk to a DID
 app.patch('/api/me/didww/dids/:id/trunk', requireAuth, async (req, res) => {
   try {
-    const didId = req.params.id;
-    const { trunk_id } = req.body || {};
-    
-    if (DEBUG) console.log('[didww.did.trunk] Request:', { didId, trunk_id, body: req.body });
-    
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = req.session.userId;
+    const didId = String(req.params.id || '').trim();
+    const trunkId = (req.body && req.body.trunk_id != null && String(req.body.trunk_id).trim() !== '')
+      ? String(req.body.trunk_id).trim()
+      : null;
+
+    if (!didId) return res.status(400).json({ success: false, message: 'Missing DID id' });
+
+    if (DEBUG) console.log('[didww.did.trunk] Request:', { userId, didId, trunkId });
+
     // Verify user owns this DID
-    if (pool && req.session.userId) {
-      const [rows] = await pool.execute('SELECT 1 FROM user_dids WHERE user_id = ? AND didww_did_id = ?', [req.session.userId, didId]);
-      if (rows.length === 0) {
+    {
+      const [rows] = await pool.execute(
+        'SELECT cancel_pending FROM user_dids WHERE user_id = ? AND didww_did_id = ? LIMIT 1',
+        [userId, didId]
+      );
+      const row = rows && rows[0] ? rows[0] : null;
+      if (!row) {
         return res.status(403).json({ success: false, message: 'You do not own this DID' });
       }
+      if (row.cancel_pending) {
+        return res.status(409).json({ success: false, message: 'This DID is being cancelled due to nonpayment and cannot be updated.' });
+      }
     }
-    
+
+    // If assigning a trunk, verify the trunk is owned by the user
+    if (trunkId) {
+      const [tRows] = await pool.execute(
+        'SELECT 1 FROM user_trunks WHERE user_id = ? AND didww_trunk_id = ? LIMIT 1',
+        [userId, trunkId]
+      );
+      if (!tRows || tRows.length === 0) {
+        return res.status(403).json({ success: false, message: 'You do not own this trunk' });
+      }
+
+      // Balance gate: prevent enabling inbound call forwarding when credit is below threshold
+      let credit = null;
+      try {
+        const httpsAgent = magnusBillingAgent;
+        const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+        const magnusUserId = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
+        if (magnusUserId) {
+          const info = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+          credit = info && Number.isFinite(info.credit) ? Number(info.credit) : null;
+        }
+      } catch (e) {
+        if (DEBUG) console.warn('[didww.did.trunk] Balance check failed:', e?.message || e);
+        credit = null;
+      }
+
+      if (credit != null) {
+        if (credit < DIDWW_INBOUND_MIN_CREDIT) {
+          return res.status(402).json({
+            success: false,
+            message: 'Insufficient balance to enable inbound call forwarding. Please add funds and try again.'
+          });
+        }
+      } else if (DIDWW_INBOUND_BALANCE_FAIL_CLOSED) {
+        return res.status(402).json({
+          success: false,
+          message: 'Unable to verify balance to enable inbound call forwarding. Please try again later.'
+        });
+      }
+    }
+
     // Update DID in DIDWW to assign or unassign trunk
     const body = {
       data: {
         type: 'dids',
         id: didId,
         relationships: {
-          voice_in_trunk: trunk_id ? { data: { type: 'voice_in_trunks', id: trunk_id } } : { data: null }
+          voice_in_trunk: trunkId ? { data: { type: 'voice_in_trunks', id: trunkId } } : { data: null }
         }
       }
     };
-    
+
     if (DEBUG) console.log('[didww.did.trunk] PATCH body:', JSON.stringify(body));
     await didwwApiCall({ method: 'PATCH', path: `/dids/${didId}`, body });
-    if (DEBUG) console.log('[didww.did.trunk] Success:', { didId, trunk_id: trunk_id || '(unassigned)' });
+
+    // Persist trunk assignment locally so we can restore it after disabling due to low balance.
+    try {
+      await pool.execute(
+        'UPDATE user_dids SET trunk_id = ? WHERE user_id = ? AND didww_did_id = ? LIMIT 1',
+        [trunkId, userId, didId]
+      );
+    } catch (e) {
+      if (DEBUG) console.warn('[didww.did.trunk] Failed to update local user_dids.trunk_id:', e?.message || e);
+    }
+
+    if (DEBUG) console.log('[didww.did.trunk] Success:', { didId, trunkId: trunkId || '(unassigned)' });
     return res.json({ success: true });
   } catch (e) {
     if (DEBUG) console.error('[didww.did.trunk] error:', e.response?.data || e.message || e);
@@ -10622,9 +12250,10 @@ async function runMarkupBillingTick() {
     const userIdSet = new Set(users.map(u => String(u.id)));
 
     // DIDWW: build lookup of DID ids per user (may be empty)
+    // Skip cancel_pending numbers so we don't keep billing a number that is being cancelled.
     const didsByUser = new Map(); // localUserId -> [didww_did_id]
     try {
-      const [userDidRows] = await pool.execute('SELECT user_id, didww_did_id FROM user_dids');
+      const [userDidRows] = await pool.execute('SELECT user_id, didww_did_id FROM user_dids WHERE cancel_pending = 0');
       for (const row of userDidRows || []) {
         const uid = String(row.user_id);
         if (!userIdSet.has(uid)) continue;
@@ -10636,9 +12265,12 @@ async function runMarkupBillingTick() {
     }
 
     // AI numbers: build lookup per user
-    const aiNumbersByUser = new Map(); // localUserId -> [{id, phone_number, created_at}]
+    // Skip cancel_pending numbers so we don't keep billing a number that is being cancelled.
+    const aiNumbersByUser = new Map(); // localUserId -> [{id, daily_number_id, phone_number, dialin_config_id, created_at}]
     try {
-      const [aiRows] = await pool.execute('SELECT id, user_id, phone_number, created_at FROM ai_numbers');
+      const [aiRows] = await pool.execute(
+        'SELECT id, user_id, daily_number_id, phone_number, dialin_config_id, created_at FROM ai_numbers WHERE cancel_pending = 0'
+      );
       for (const r of aiRows || []) {
         const uid = String(r.user_id);
         if (!userIdSet.has(uid)) continue;
@@ -10678,6 +12310,22 @@ async function runMarkupBillingTick() {
       const magnusUserId = String(u.magnus_user_id || '').trim();
       if (!magnusUserId) continue;
 
+      // Process any pending cancellations first.
+      if (DIDWW_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE) {
+        try {
+          await processDidwwCancelPendingForUser({ localUserId, magnusUserId, httpsAgent, hostHeader });
+        } catch (e) {
+          if (DEBUG) console.warn('[didww.nonpayment] cancel_pending tick failed:', e?.message || e);
+        }
+      }
+      if (AI_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE) {
+        try {
+          await processAiCancelPendingForUser({ localUserId, magnusUserId, httpsAgent, hostHeader });
+        } catch (e) {
+          if (DEBUG) console.warn('[ai.nonpayment] cancel_pending tick failed:', e?.message || e);
+        }
+      }
+
       // DIDWW monthly fees + inbound DIDWW usage
       const userDidIds = didsByUser.get(localUserId) || [];
       if (userDidIds.length && didById.size) {
@@ -10695,6 +12343,15 @@ async function runMarkupBillingTick() {
       }
       await billInboundCdrsForUser({ localUserId, magnusUserId, httpsAgent, hostHeader });
 
+      // If enabled, keep DIDWW inbound routing synced with balance (disable forwarding when credit < threshold, re-enable when sufficient)
+      if (userDidIds.length) {
+        try {
+          await syncDidwwInboundRoutingForUser({ localUserId, magnusUserId, httpsAgent, hostHeader, didById });
+        } catch (e) {
+          if (DEBUG) console.warn('[didww.inbound.sync] Failed during billing tick:', e?.message || e);
+        }
+      }
+
       // AI monthly number fees
       const userAiNumbers = aiNumbersByUser.get(localUserId) || [];
       if (userAiNumbers.length) {
@@ -10703,6 +12360,15 @@ async function runMarkupBillingTick() {
 
       // AI inbound call usage
       await billInboundAiCallsForUser({ localUserId, magnusUserId, httpsAgent, hostHeader });
+
+      // If enabled, keep AI number routing synced with balance (disable when credit < threshold, re-enable when sufficient)
+      if (userAiNumbers.length) {
+        try {
+          await syncAiDialinRoutingForUser({ localUserId, magnusUserId, httpsAgent, hostHeader });
+        } catch (e) {
+          if (DEBUG) console.warn('[ai.dialin.sync] Failed during billing tick:', e?.message || e);
+        }
+      }
     }
   } catch (e) {
     if (DEBUG) console.warn('[billing.markup] Error during scheduler tick:', e.message || e);
