@@ -939,12 +939,37 @@ async def bot(session_args: Any):
                 if dialin_settings:
                     try:
                         participants = transport.participants() or {}
+
+                        # Daily uses a special local key (often "local") plus UUID-like ids for remotes.
+                        # The CallClient.update_remote_participants API expects remote participant IDs to be UUIDs.
                         my_id = str(getattr(transport, "participant_id", "") or "").strip()
-                        remote_ids = [pid for pid in participants.keys() if pid and pid != my_id]
+                        local_ids = {"local"}
+                        if my_id:
+                            local_ids.add(my_id)
+
+                        for pid, info in participants.items():
+                            if not isinstance(info, dict):
+                                continue
+                            if info.get("local") or info.get("isLocal") or info.get("is_local"):
+                                if pid:
+                                    local_ids.add(str(pid))
+
+                        def _is_uuid_like(value: Any) -> bool:
+                            try:
+                                uuid.UUID(str(value))
+                                return True
+                            except Exception:
+                                return False
+
+                        remote_ids = [
+                            pid
+                            for pid in participants.keys()
+                            if pid and str(pid) not in local_ids and _is_uuid_like(pid)
+                        ]
 
                         if remote_ids:
                             eject_attempted = True
-                            remote_participants = {pid: {"eject": True} for pid in remote_ids}
+                            remote_participants = {str(pid): {"eject": True} for pid in remote_ids}
                             err = await transport.update_remote_participants(remote_participants)
                             if err:
                                 eject_error = str(err)
