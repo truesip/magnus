@@ -6030,6 +6030,186 @@ function parseDailyRoomPresenceCount(presence) {
   return null;
 }
 
+// Manually send a new AI video meeting link to an email address from the dashboard UI.
+app.post('/api/me/ai/meetings/send', requireAuth, async (req, res) => {
+  let sendRowId = null;
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const agentIdRaw = (req.body?.agent_id !== undefined) ? req.body.agent_id : req.body?.agentId;
+    const agentId = parseInt(String(agentIdRaw || '').trim(), 10);
+    if (!Number.isFinite(agentId) || agentId <= 0) {
+      return res.status(400).json({ success: false, message: 'agent_id is required' });
+    }
+
+    const [arows] = await pool.execute(
+      'SELECT id, user_id, pipecat_agent_name FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1',
+      [agentId, userId]
+    );
+    const agent = arows && arows[0];
+    if (!agent) return res.status(404).json({ success: false, message: 'Agent not found' });
+
+    const agentName = String(agent.pipecat_agent_name || '').trim();
+    if (!agentName) return res.status(500).json({ success: false, message: 'Agent not configured' });
+
+    const toEmail = String(req.body?.to_email || req.body?.toEmail || '').trim();
+    if (!toEmail || !isValidEmail(toEmail)) {
+      return res.status(400).json({ success: false, message: 'Valid to_email is required' });
+    }
+
+    const subjectRaw = String(req.body?.subject || '').trim();
+    const subject = (subjectRaw ? subjectRaw.slice(0, 255) : 'Your video meeting link');
+
+    const callId = String(req.body?.call_id || req.body?.callId || '').trim() || null;
+    const callDomain = String(req.body?.call_domain || req.body?.callDomain || '').trim() || null;
+    if (callId && callId.length > 64) {
+      return res.status(400).json({ success: false, message: 'call_id is too long' });
+    }
+    if (callDomain && callDomain.length > 64) {
+      return res.status(400).json({ success: false, message: 'call_domain is too long' });
+    }
+
+    let clientRequestId = String(req.body?.client_request_id || req.body?.clientRequestId || '').trim();
+    if (!clientRequestId) {
+      clientRequestId = crypto.randomBytes(16).toString('hex');
+    }
+    if (clientRequestId.length > 128) {
+      return res.status(400).json({ success: false, message: 'client_request_id is too long' });
+    }
+
+    const dedupeKey = sha256(
+      `manual-video-meeting-link|user:${userId}|agent:${agentId}|req:${clientRequestId}`
+    );
+
+    // Idempotency + audit row (reuses ai_email_sends with template_id NULL)
+    try {
+      const [ins] = await pool.execute(
+        `INSERT INTO ai_email_sends (user_id, agent_id, template_id, dedupe_key, call_id, call_domain, to_email, subject, status, attempt_count)
+         VALUES (?,?,?,?,?,?,?,?, 'pending', 1)`,
+        [userId, agentId, null, dedupeKey, callId, callDomain, toEmail, subject]
+      );
+      sendRowId = ins.insertId;
+    } catch (e) {
+      if (e?.code !== 'ER_DUP_ENTRY') throw e;
+      const [erows] = await pool.execute(
+        'SELECT id, status, meeting_room_url, meeting_join_url FROM ai_email_sends WHERE dedupe_key = ? LIMIT 1',
+        [dedupeKey]
+      );
+      const existing = erows && erows[0];
+      if (existing && existing.status === 'completed') {
+        return res.json({
+          success: true,
+          already_sent: true,
+          dedupe_key: dedupeKey,
+          room_url: existing.meeting_room_url || null,
+          join_url: existing.meeting_join_url || null
+        });
+      }
+      if (existing && existing.status === 'pending') {
+        return res.status(202).json({ success: true, in_progress: true, dedupe_key: dedupeKey });
+      }
+      if (existing && existing.status === 'failed') {
+        sendRowId = existing.id;
+        try {
+          await pool.execute(
+            'UPDATE ai_email_sends SET status = \'pending\', attempt_count = attempt_count + 1, error = NULL, to_email = ?, subject = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+            [toEmail, subject, sendRowId]
+          );
+        } catch {}
+      } else {
+        return res.status(202).json({ success: true, in_progress: true, dedupe_key: dedupeKey });
+      }
+    }
+
+    // Start a new Pipecat session (web video meeting). Pipecat creates a Daily room.
+    const startBody = {
+      createDailyRoom: true,
+      body: { mode: 'video_meeting' }
+    };
+
+    const startResp = await pipecatApiCall({
+      method: 'POST',
+      path: `/public/${encodeURIComponent(agentName)}/start`,
+      body: startBody
+    });
+
+    const roomUrl = extractDailyRoomUrlFromPipecatStartResponse(startResp);
+    if (!roomUrl) {
+      throw new Error('Pipecat start response did not include a Daily room URL');
+    }
+
+    // Rooms created by Pipecat/Daily are typically private; Daily Prebuilt requires a meeting
+    // token to join private rooms. Provide a join URL with ?t=<token> when available.
+    const roomToken = extractDailyRoomTokenFromPipecatStartResponse(startResp);
+
+    let joinUrl = roomUrl;
+    if (roomToken) {
+      try {
+        const u = new URL(roomUrl);
+        u.searchParams.set('t', roomToken);
+        joinUrl = u.toString();
+      } catch {}
+    }
+
+    // Store meeting link metadata for the dashboard UI
+    const roomName = extractDailyRoomNameFromRoomUrl(roomUrl);
+    if (sendRowId) {
+      try {
+        await pool.execute(
+          'UPDATE ai_email_sends SET meeting_provider = ?, meeting_room_name = ?, meeting_room_url = ?, meeting_join_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          ['daily', roomName || null, roomUrl, joinUrl, sendRowId]
+        );
+      } catch {}
+    }
+
+    const text = `Here is your video meeting link:\n\n${joinUrl}\n\nOpen it in your browser to join.`;
+    const html = `
+      <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+        <p>Here is your video meeting link:</p>
+        <p><a href="${joinUrl}">${joinUrl}</a></p>
+        <p>Open it in your browser to join.</p>
+      </div>`;
+
+    await sendEmailViaUserSmtp({
+      userId,
+      toEmail,
+      subject,
+      text,
+      html
+    });
+
+    if (sendRowId) {
+      try {
+        await pool.execute(
+          'UPDATE ai_email_sends SET status = \'completed\', error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [sendRowId]
+        );
+      } catch {}
+    }
+
+    return res.json({
+      success: true,
+      already_sent: false,
+      dedupe_key: dedupeKey,
+      room_url: roomUrl,
+      join_url: joinUrl
+    });
+  } catch (e) {
+    const msg = e?.message || 'Failed to send video meeting link';
+    if (DEBUG) console.warn('[ai.meetings.send] error:', e?.data || msg);
+    if (sendRowId && pool) {
+      try {
+        await pool.execute(
+          'UPDATE ai_email_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [msg, sendRowId]
+        );
+      } catch {}
+    }
+    return res.status(502).json({ success: false, message: msg });
+  }
+});
+
 // List AI meeting-link sends (video meeting links) for the logged-in user.
 app.get('/api/me/ai/meetings', requireAuth, async (req, res) => {
   try {

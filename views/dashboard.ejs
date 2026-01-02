@@ -463,6 +463,17 @@
               </select>
               <button id="aiMeetingsRefreshBtn" type="button" style="background:#6b7280">Refresh</button>
             </div>
+
+            <div class="toolbar" style="flex-wrap:wrap">
+              <select id="aiMeetingsSendAgentId" style="width:170px">
+                <option value="">Select agent…</option>
+              </select>
+              <input id="aiMeetingsSendEmail" type="email" placeholder="Caller email" style="width:240px">
+              <input id="aiMeetingsSendSubject" type="text" placeholder="Subject (optional)" style="flex:1;min-width:220px">
+              <button id="aiMeetingsSendBtn" type="button" style="background:#4f46e5">Send Link</button>
+              <span id="aiMeetingsSendStatus" class="muted" style="margin-left:auto"></span>
+            </div>
+
             <table id="ai-meetings-table" style="display:none">
               <thead><tr><th>Sent</th><th>To</th><th>Agent</th><th>Link</th><th>Status</th></tr></thead>
               <tbody></tbody>
@@ -938,6 +949,103 @@
       sel.value = still ? current : '';
     }
 
+    function renderAiMeetingsSendAgentSelect(){
+      const sel = $('#aiMeetingsSendAgentId');
+      if (!sel) return;
+      const current = String(sel.value || '');
+      sel.innerHTML = '';
+      sel.appendChild(new Option('Select agent…', ''));
+      for (const a of (aiAgentsData || [])) {
+        const id = a && a.id != null ? String(a.id) : '';
+        if (!id) continue;
+        const name = String(a.display_name || '').trim();
+        sel.appendChild(new Option(name || `Agent ${id}`, id));
+      }
+      const still = Array.from(sel.options || []).some(o => String(o.value) === current);
+      sel.value = still ? current : '';
+
+      // Default the send-agent to the current filter selection (if any)
+      // only when a send-agent isn't already selected.
+      if (!sel.value) {
+        const filterSel = $('#aiMeetingsAgentFilter');
+        const filterVal = filterSel ? String(filterSel.value || '').trim() : '';
+        if (filterVal && Array.from(sel.options || []).some(o => String(o.value) === filterVal)) {
+          sel.value = filterVal;
+        }
+      }
+    }
+
+    function setAiMeetingsSendStatus(msg, isError){
+      const el = $('#aiMeetingsSendStatus');
+      if (!el) return;
+      el.textContent = msg || '';
+      el.style.color = isError ? '#b91c1c' : '#6b7280';
+    }
+
+    async function sendAiMeetingLink(){
+      const btn = $('#aiMeetingsSendBtn');
+      const agentSel = $('#aiMeetingsSendAgentId');
+      const emailEl = $('#aiMeetingsSendEmail');
+      const subjectEl = $('#aiMeetingsSendSubject');
+
+      const agentId = agentSel ? String(agentSel.value || '').trim() : '';
+      const toEmail = emailEl ? String(emailEl.value || '').trim() : '';
+      const subject = subjectEl ? String(subjectEl.value || '').trim() : '';
+
+      if (!agentId) {
+        setAiMeetingsSendStatus('Select an agent.', true);
+        return;
+      }
+      if (!toEmail) {
+        setAiMeetingsSendStatus('Enter a caller email.', true);
+        return;
+      }
+
+      if (btn) btn.disabled = true;
+      setAiMeetingsSendStatus('Sending…', false);
+
+      let clientRequestId = '';
+      try {
+        clientRequestId = (crypto && crypto.randomUUID) ? crypto.randomUUID() : '';
+      } catch {}
+      if (!clientRequestId) {
+        clientRequestId = `req_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      }
+
+      try {
+        const payload = {
+          agent_id: agentId,
+          to_email: toEmail,
+          subject: subject || undefined,
+          client_request_id: clientRequestId
+        };
+
+        const r = await fetch('/api/me/ai/meetings/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const j = await r.json().catch(() => null);
+        if (!r.ok || !j || j.success === false) {
+          setAiMeetingsSendStatus(j?.message || 'Failed to send meeting link', true);
+          return;
+        }
+
+        setAiMeetingsSendStatus(j.already_sent ? 'Already sent.' : 'Sent.', false);
+        if (j.join_url || j.room_url) {
+          const url = String(j.join_url || j.room_url);
+          showLinkToast('Meeting link ready.', 'Open meeting', url, 'success');
+        }
+        aiMeetingsPage = 0;
+        loadAiMeetings();
+      } catch (e) {
+        setAiMeetingsSendStatus('Failed to send meeting link', true);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
     function initAiMeetingsUI(){
       if (aiMeetingsUiInit) return;
       aiMeetingsUiInit = true;
@@ -948,7 +1056,19 @@
       const agentSel = $('#aiMeetingsAgentFilter');
       if (agentSel) agentSel.addEventListener('change', () => {
         aiMeetingsPage = 0;
+        renderAiMeetingsSendAgentSelect();
         loadAiMeetings();
+      });
+
+      const sendBtn = $('#aiMeetingsSendBtn');
+      if (sendBtn) sendBtn.addEventListener('click', (e) => { e.preventDefault(); sendAiMeetingLink(); });
+
+      const sendEmail = $('#aiMeetingsSendEmail');
+      if (sendEmail) sendEmail.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          sendAiMeetingLink();
+        }
       });
 
       const prev = $('#aiMeetingsPrev');
@@ -980,6 +1100,7 @@
         }
       } catch {}
       renderAiMeetingsAgentFilter();
+      renderAiMeetingsSendAgentSelect();
 
       loadAiMeetings();
     }
