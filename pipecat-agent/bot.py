@@ -325,6 +325,20 @@ async def bot(session_args: Any):
     has_send_video_meeting_tool = False
     has_send_physical_mail_tool = False
     has_transfer_tool = False
+    has_end_call_tool = False
+
+    # End the call (hang up) when explicitly requested.
+    tools.append(
+        {
+            "type": "function",
+            "function": {
+                "name": "end_call",
+                "description": "End the current phone call (hang up). Only use when the caller explicitly asks or after you have confirmed they want to disconnect.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    )
+    has_end_call_tool = True
 
     # Call transfer (cold transfer) - uses the configured OPERATOR_NUMBER destination.
     if operator_number:
@@ -447,6 +461,11 @@ async def bot(session_args: Any):
             "(street, city, state, ZIP) and any details needed for the template placeholders, then call the "
             "send_physical_mail tool with the address fields and variables. "
             "After the tool returns, confirm the mail was submitted and (if provided) share the tracking number."
+        )
+    if has_end_call_tool:
+        prompt += (
+            "\n\nIf the caller explicitly asks you to end the phone call or hang up, "
+            "confirm they want to disconnect, then call the end_call tool."
         )
     if has_transfer_tool:
         prompt += (
@@ -894,8 +913,66 @@ async def bot(session_args: Any):
         idle_timeout_secs=idle_timeout_secs,
     )
 
-    # Register tool handler (if call transfer is configured)
+    # Register tool handlers
     call_transfer_in_progress = False
+    call_end_in_progress = False
+
+    if has_end_call_tool:
+        async def _end_call(params: FunctionCallParams) -> None:
+            nonlocal call_end_in_progress
+
+            if call_end_in_progress:
+                await params.result_callback({
+                    "success": False,
+                    "message": "Call end already in progress",
+                })
+                return
+
+            call_end_in_progress = True
+
+            # Best-effort: for dial-in calls, eject the caller participant(s) so the PSTN leg disconnects.
+            # For non-telephony sessions (e.g. video meetings), we just leave the room.
+            eject_attempted = False
+            eject_error: str | None = None
+
+            try:
+                if dialin_settings:
+                    try:
+                        participants = transport.participants() or {}
+                        my_id = str(getattr(transport, "participant_id", "") or "").strip()
+                        remote_ids = [pid for pid in participants.keys() if pid and pid != my_id]
+
+                        if remote_ids:
+                            eject_attempted = True
+                            remote_participants = {pid: {"eject": True} for pid in remote_ids}
+                            err = await transport.update_remote_participants(remote_participants)
+                            if err:
+                                eject_error = str(err)
+                    except Exception as e:
+                        eject_error = str(e)
+
+                await params.result_callback({
+                    "success": True,
+                    "eject_attempted": eject_attempted,
+                    "eject_error": eject_error,
+                })
+            except Exception as e:
+                await params.result_callback({
+                    "success": False,
+                    "message": str(e),
+                })
+            finally:
+                # Stop the pipeline and leave the room.
+                try:
+                    await task.queue_frames([EndFrame()])
+                except Exception:
+                    pass
+                try:
+                    await transport.leave()
+                except Exception:
+                    pass
+
+        llm.register_function("end_call", _end_call)
 
     if has_transfer_tool:
         async def _transfer_call(params: FunctionCallParams) -> None:
