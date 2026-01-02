@@ -323,6 +323,7 @@ async def bot(session_args: Any):
     tools = []
     has_send_document_tool = False
     has_send_video_meeting_tool = False
+    has_send_physical_mail_tool = False
     has_transfer_tool = False
 
     # Call transfer (cold transfer) - uses the configured OPERATOR_NUMBER destination.
@@ -394,6 +395,37 @@ async def bot(session_args: Any):
         )
         has_send_video_meeting_tool = True
 
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_physical_mail",
+                    "description": "Send a physical letter via USPS to the caller using the business owner's return address and a template.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "to_name": {"type": "string", "description": "Recipient name"},
+                            "to_organization": {"type": "string", "description": "Recipient organization (optional)"},
+                            "to_address1": {"type": "string", "description": "Street address line 1"},
+                            "to_address2": {"type": "string", "description": "Street address line 2 (optional)"},
+                            "to_address3": {"type": "string", "description": "Street address line 3 (optional)"},
+                            "to_city": {"type": "string", "description": "City"},
+                            "to_state": {"type": "string", "description": "State (2-letter for US)"},
+                            "to_postal_code": {"type": "string", "description": "ZIP / postal code"},
+                            "to_country": {"type": "string", "description": "Country code (default: US)"},
+                            "template_id": {"type": "integer", "description": "Optional template id override"},
+                            "variables": {
+                                "type": "object",
+                                "description": "Template variables mapping. Keys correspond to placeholders inside [[...]] in the DOCX template (e.g. Name, Address).",
+                            },
+                        },
+                        "required": ["to_address1", "to_city", "to_state", "to_postal_code"],
+                    },
+                },
+            }
+        )
+        has_send_physical_mail_tool = True
+
     # Extend the user-provided prompt with minimal tool guidance.
     prompt = base_prompt
     if has_send_document_tool:
@@ -408,6 +440,13 @@ async def bot(session_args: Any):
             "\n\nIf the caller asks to switch to a video meeting, collect their email address "
             "and call the send_video_meeting_link tool with to_email. "
             "After the tool returns, tell them to open the link from their email to join."
+        )
+    if has_send_physical_mail_tool:
+        prompt += (
+            "\n\nIf the caller asks you to mail them a physical letter or document, collect their name and full mailing address "
+            "(street, city, state, ZIP) and any details needed for the template placeholders, then call the "
+            "send_physical_mail tool with the address fields and variables. "
+            "After the tool returns, confirm the mail was submitted and (if provided) share the tracking number."
         )
     if has_transfer_tool:
         prompt += (
@@ -595,6 +634,109 @@ async def bot(session_args: Any):
                 await params.result_callback({"success": False, "message": str(e)})
 
         llm.register_function("send_video_meeting_link", _send_video_meeting_link)
+
+    if has_send_physical_mail_tool:
+        async def _send_physical_mail(params: FunctionCallParams) -> None:
+            args = dict(params.arguments or {})
+
+            # Address fields
+            to_address1 = str(args.get("to_address1") or args.get("toAddress1") or args.get("address1") or "").strip()
+            to_city = str(args.get("to_city") or args.get("toCity") or args.get("city") or "").strip()
+            to_state = str(args.get("to_state") or args.get("toState") or args.get("state") or "").strip()
+            to_postal_code = str(
+                args.get("to_postal_code")
+                or args.get("toPostalCode")
+                or args.get("postal_code")
+                or args.get("postalCode")
+                or args.get("zip")
+                or ""
+            ).strip()
+
+            to_name = str(args.get("to_name") or args.get("toName") or args.get("name") or "").strip()
+            to_organization = str(args.get("to_organization") or args.get("toOrganization") or args.get("organization") or "").strip()
+            to_address2 = str(args.get("to_address2") or args.get("toAddress2") or args.get("address2") or "").strip()
+            to_address3 = str(args.get("to_address3") or args.get("toAddress3") or args.get("address3") or "").strip()
+            to_country = str(args.get("to_country") or args.get("toCountry") or args.get("country") or "US").strip()
+
+            template_id = args.get("template_id")
+            if template_id is None:
+                template_id = args.get("templateId")
+
+            variables = args.get("variables") or {}
+            if not isinstance(variables, dict):
+                variables = {}
+
+            if not to_address1 or not to_city or not to_state or not to_postal_code:
+                await params.result_callback({
+                    "success": False,
+                    "message": "to_address1, to_city, to_state, and to_postal_code are required",
+                })
+                return
+
+            if not portal_base_url or not portal_token:
+                await params.result_callback({
+                    "success": False,
+                    "message": "Portal integration not configured (missing PORTAL_BASE_URL or PORTAL_AGENT_ACTION_TOKEN)",
+                })
+                return
+
+            payload: dict[str, Any] = {
+                "to_address1": to_address1,
+                "to_city": to_city,
+                "to_state": to_state,
+                "to_postal_code": to_postal_code,
+                "to_country": to_country or "US",
+                "variables": variables,
+            }
+
+            if to_name:
+                payload["to_name"] = to_name
+            if to_organization:
+                payload["to_organization"] = to_organization
+            if to_address2:
+                payload["to_address2"] = to_address2
+            if to_address3:
+                payload["to_address3"] = to_address3
+
+            # Optional template override
+            try:
+                if template_id is not None and str(template_id).strip() != "":
+                    payload["template_id"] = int(template_id)
+            except Exception:
+                # Ignore if not parseable; portal will validate
+                pass
+
+            if dialin_settings:
+                payload["call_id"] = str(dialin_settings.call_id)
+                payload["call_domain"] = str(dialin_settings.call_domain)
+
+            url = f"{portal_base_url}/api/ai/agent/send-physical-mail"
+            headers = {
+                "Authorization": f"Bearer {portal_token}",
+                "Accept": "application/json",
+            }
+
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = {"success": False, "message": resp.text}
+
+                if resp.status_code >= 400 or (isinstance(data, dict) and data.get("success") is False):
+                    await params.result_callback({
+                        "success": False,
+                        "status_code": resp.status_code,
+                        "response": data,
+                    })
+                    return
+
+                await params.result_callback({"success": True, "response": data})
+            except Exception as e:
+                await params.result_callback({"success": False, "message": str(e)})
+
+        llm.register_function("send_physical_mail", _send_physical_mail)
 
     voice_id = await _resolve_cartesia_voice_id(api_key=cartesia_key)
     tts = CartesiaTTSService(
