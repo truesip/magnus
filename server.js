@@ -118,7 +118,9 @@ function joinUrl(base, p) {
 const CLICK2MAIL_USERNAME = String(process.env.CLICK2MAIL_USERNAME || '').trim();
 const CLICK2MAIL_PASSWORD = String(process.env.CLICK2MAIL_PASSWORD || '').trim();
 // Defaults are the Click2Mail staging subdomains used in their Postman collections.
-const CLICK2MAIL_REST_BASE_URL = String(process.env.CLICK2MAIL_REST_BASE_URL || 'https://stage.click2mail.com').trim().replace(/\/+$/, '');
+// Staging REST:  https://stage-rest.click2mail.com
+// Staging Batch: https://stage-batch.click2mail.com
+const CLICK2MAIL_REST_BASE_URL = String(process.env.CLICK2MAIL_REST_BASE_URL || 'https://stage-rest.click2mail.com').trim().replace(/\/+$/, '');
 const CLICK2MAIL_BATCH_BASE_URL = String(process.env.CLICK2MAIL_BATCH_BASE_URL || 'https://stage-batch.click2mail.com').trim().replace(/\/+$/, '');
 const CLICK2MAIL_APP_SIGNATURE = String(process.env.CLICK2MAIL_APP_SIGNATURE || 'TalkUSA').trim() || 'TalkUSA';
 
