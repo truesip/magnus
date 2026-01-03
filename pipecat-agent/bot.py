@@ -484,6 +484,13 @@ async def bot(session_args: Any):
     dialin_settings = _extract_dialin_settings(body)
     daily_api_key, daily_api_url = _extract_daily_api(body)
 
+    caller_memory = None
+    try:
+        if isinstance(body, dict):
+            caller_memory = body.get("caller_memory") or body.get("callerMemory")
+    except Exception:
+        caller_memory = None
+
     session_mode = _extract_session_mode(body)
     is_video_meeting = session_mode == "video_meeting"
 
@@ -768,14 +775,46 @@ async def bot(session_args: Any):
     )
 
     # Conversation context (OpenAI-compatible)
+    messages = [{"role": "system", "content": prompt}] if prompt else []
+
+    # If the portal provided caller memory, prepend it as prior conversation history.
+    try:
+        if isinstance(caller_memory, dict):
+            meta = str(caller_memory.get("meta") or "").strip()
+            mem = caller_memory.get("messages")
+            if isinstance(mem, list):
+                mem_msgs = []
+                for m in mem[:50]:
+                    if not isinstance(m, dict):
+                        continue
+                    role = str(m.get("role") or "").strip().lower()
+                    if role not in ("user", "assistant"):
+                        continue
+                    content = str(m.get("content") or "").strip()
+                    if not content:
+                        continue
+                    if len(content) > 2000:
+                        content = content[:2000]
+                    mem_msgs.append({"role": role, "content": content})
+
+                if mem_msgs:
+                    messages.append({
+                        "role": "system",
+                        "content": meta
+                        or "Returning caller: the following messages are from a previous call with this caller. Use them as context.",
+                    })
+                    messages.extend(mem_msgs)
+    except Exception:
+        pass
+
     if tools:
         context = OpenAILLMContext(
-            messages=[{"role": "system", "content": prompt}] if prompt else [],
+            messages=messages,
             tools=tools,
             tool_choice="auto",
         )
     else:
-        context = OpenAILLMContext(messages=[{"role": "system", "content": prompt}] if prompt else [])
+        context = OpenAILLMContext(messages=messages)
 
     # Optional: log conversation turns back to the portal for the dashboard UI.
     portal_log_client: Optional[httpx.AsyncClient] = None

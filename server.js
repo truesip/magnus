@@ -75,6 +75,18 @@ const AI_INBOUND_DISABLE_NUMBERS_WHEN_BALANCE_LOW = String(process.env.AI_INBOUN
 // If enabled, a credit lookup failure will also block inbound calls (fail closed).
 const AI_INBOUND_BALANCE_FAIL_CLOSED = String(process.env.AI_INBOUND_BALANCE_FAIL_CLOSED ?? '0') !== '0';
 
+// AI caller memory (returning caller context)
+// If enabled, the dial-in webhook will fetch recent conversation history for a returning caller
+// (matched by digits-only caller number) and pass it into the agent runtime as context.
+const AI_CALLER_MEMORY_ENABLE = String(process.env.AI_CALLER_MEMORY_ENABLE ?? '1') !== '0';
+const AI_CALLER_MEMORY_MAX_CALLS = Math.max(1, parseInt(process.env.AI_CALLER_MEMORY_MAX_CALLS || '1', 10) || 1);
+const AI_CALLER_MEMORY_MAX_MESSAGES = Math.max(0, parseInt(process.env.AI_CALLER_MEMORY_MAX_MESSAGES || '20', 10) || 20);
+const AI_CALLER_MEMORY_MAX_CHARS_PER_MESSAGE = Math.max(
+  50,
+  parseInt(process.env.AI_CALLER_MEMORY_MAX_CHARS_PER_MESSAGE || '500', 10) || 500
+);
+const AI_CALLER_MEMORY_MAX_DAYS = Math.max(1, parseInt(process.env.AI_CALLER_MEMORY_MAX_DAYS || '30', 10) || 30);
+
 // DIDWW inbound call acceptance gating based on MagnusBilling credit.
 // If a user's credit falls below DIDWW_INBOUND_MIN_CREDIT, inbound calls to DIDWW DIDs are blocked
 // by unassigning voice_in_trunk (call forwarding) until the balance is sufficient again.
@@ -112,6 +124,10 @@ function joinUrl(base, p) {
   if (b.endsWith('/')) b = b.slice(0, -1);
   if (s && !s.startsWith('/')) s = '/' + s;
   return b + s;
+}
+
+function digitsOnly(s) {
+  return String(s || '').replace(/[^0-9]/g, '');
 }
 
 // ========== Click2Mail (Physical Mail) ==========
@@ -9692,6 +9708,115 @@ app.post('/webhooks/stripe', async (req, res) => {
   }
 });
 
+async function buildCallerMemoryForDialin({ userId, agentId, fromDigits, excludeCallId, excludeCallDomain }) {
+  try {
+    if (!pool) return null;
+
+    const u = Number(userId);
+    const a = Number(agentId);
+    const digits = String(fromDigits || '').replace(/[^0-9]/g, '').trim();
+
+    if (!u || !a || !digits || digits.length < 7) return null;
+    if (!AI_CALLER_MEMORY_ENABLE) return null;
+    if (AI_CALLER_MEMORY_MAX_MESSAGES <= 0) return null;
+
+    const maxCalls = Math.min(5, Math.max(1, AI_CALLER_MEMORY_MAX_CALLS));
+    const maxMessages = Math.min(50, Math.max(1, AI_CALLER_MEMORY_MAX_MESSAGES));
+    const maxChars = Math.min(2000, Math.max(50, AI_CALLER_MEMORY_MAX_CHARS_PER_MESSAGE));
+    const maxDays = Math.min(3650, Math.max(1, AI_CALLER_MEMORY_MAX_DAYS));
+
+    const cutoff = new Date(Date.now() - (maxDays * 24 * 60 * 60 * 1000));
+
+    const excludeId = String(excludeCallId || '').trim();
+    const excludeDomain = String(excludeCallDomain || '').trim();
+
+    const [callRows] = await pool.execute(
+      `SELECT call_id, call_domain, time_start, time_end
+       FROM ai_call_logs
+       WHERE user_id = ?
+         AND agent_id = ?
+         AND from_number IS NOT NULL
+         AND from_number <> ''
+         AND REGEXP_REPLACE(from_number, '[^0-9]', '') = ?
+         AND NOT (call_id = ? AND call_domain = ?)
+         AND (status IS NULL OR status NOT LIKE 'blocked%')
+         AND (time_start IS NULL OR time_start >= ?)
+       ORDER BY COALESCE(time_end, time_start) DESC, id DESC
+       LIMIT ${maxCalls}`,
+      [u, a, digits, excludeId, excludeDomain, cutoff]
+    );
+
+    const calls = Array.isArray(callRows) ? callRows : [];
+    if (!calls.length) return null;
+
+    // For MVP, just pull history from the most recent prior call.
+    const lastCall = calls[0];
+    const callId = String(lastCall.call_id || '').trim();
+    const callDomain = String(lastCall.call_domain || '').trim();
+    if (!callId || !callDomain) return null;
+
+    const [msgRows] = await pool.execute(
+      `SELECT role, content
+       FROM ai_call_messages
+       WHERE user_id = ? AND agent_id = ? AND call_id = ? AND call_domain = ?
+       ORDER BY id DESC
+       LIMIT ${maxMessages}`,
+      [u, a, callId, callDomain]
+    );
+
+    const rows = Array.isArray(msgRows) ? msgRows : [];
+    if (!rows.length) return null;
+
+    const messages = rows
+      .slice()
+      .reverse()
+      .map(r => {
+        const roleRaw = String(r.role || '').trim().toLowerCase();
+        const role = (roleRaw === 'assistant') ? 'assistant' : (roleRaw === 'user' ? 'user' : '');
+        let content = String(r.content || '').trim();
+        if (!role || !content) return null;
+        if (content.length > maxChars) content = content.slice(0, maxChars);
+        return { role, content };
+      })
+      .filter(Boolean);
+
+    if (!messages.length) return null;
+
+    let lastCallStartedAt = null;
+    let lastCallEndedAt = null;
+
+    try {
+      if (lastCall.time_start) {
+        const d = (lastCall.time_start instanceof Date) ? lastCall.time_start : new Date(lastCall.time_start);
+        if (!Number.isNaN(d.getTime())) lastCallStartedAt = d.toISOString();
+      }
+    } catch {}
+
+    try {
+      if (lastCall.time_end) {
+        const d = (lastCall.time_end instanceof Date) ? lastCall.time_end : new Date(lastCall.time_end);
+        if (!Number.isNaN(d.getTime())) lastCallEndedAt = d.toISOString();
+      }
+    } catch {}
+
+    const metaParts = [
+      'Returning caller detected. The following messages are from a previous phone call with this same caller.',
+      'Use them as background context. Do not mention storing transcripts; just be helpful.'
+    ];
+
+    if (lastCallStartedAt) metaParts.push(`Previous call started: ${lastCallStartedAt}.`);
+    if (lastCallEndedAt) metaParts.push(`Previous call ended: ${lastCallEndedAt}.`);
+
+    return {
+      meta: metaParts.join(' '),
+      messages
+    };
+  } catch (e) {
+    if (DEBUG) console.warn('[callerMemory] buildCallerMemoryForDialin failed:', e?.message || e);
+    return null;
+  }
+}
+
 // Daily pinless dial-in webhook (room_creation_api) -> start Pipecat Cloud session.
 // This lets us log inbound AI calls into the user's Call History.
 app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
@@ -9844,6 +9969,25 @@ app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
     // Trigger Pipecat Cloud to start the dial-in session for this agent.
     // Pipecat Cloud handles creating the Daily room and connecting the PSTN call.
     try {
+      let callerMemory = null;
+      try {
+        if (pool && agentRow && fromNumber) {
+          const fromDigits = digitsOnly(fromNumber);
+          if (fromDigits) {
+            callerMemory = await buildCallerMemoryForDialin({
+              userId: agentRow.user_id,
+              agentId: agentRow.id,
+              fromDigits,
+              excludeCallId: callId,
+              excludeCallDomain: callDomain
+            });
+          }
+        }
+      } catch (e) {
+        if (DEBUG) console.warn('[daily.dialin] Caller memory lookup failed:', e?.message || e);
+        callerMemory = null;
+      }
+
       const startBody = {
         createDailyRoom: true,
         dailyRoomProperties: {
@@ -9859,7 +10003,8 @@ app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
             to: toNumber,
             call_id: callId,
             call_domain: callDomain
-          }
+          },
+          ...(callerMemory ? { caller_memory: callerMemory } : {})
         }
       };
 
