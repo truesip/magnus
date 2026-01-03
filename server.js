@@ -8059,14 +8059,33 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
     }
 
     let aiEmailSentCount = 0;
+    let aiMeetingLinkSentCount = 0;
     try {
       const [[row]] = await pool.execute(
-        "SELECT COUNT(*) AS total FROM ai_email_sends WHERE user_id = ? AND status = 'completed'",
+        `SELECT
+           SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS total_completed,
+           SUM(CASE WHEN status = 'completed'
+                     AND (meeting_provider IS NOT NULL OR meeting_room_url IS NOT NULL OR meeting_join_url IS NOT NULL)
+                    THEN 1 ELSE 0 END) AS meeting_completed
+         FROM ai_email_sends
+         WHERE user_id = ?`,
         [userId]
       );
-      aiEmailSentCount = Number(row?.total || 0);
+      aiEmailSentCount = Number(row?.total_completed || 0);
+      aiMeetingLinkSentCount = Number(row?.meeting_completed || 0);
     } catch (e) {
       if (DEBUG) console.warn('[me.stats.ai.emails] failed:', e.message || e);
+    }
+
+    let aiPhysicalMailSentCount = 0;
+    try {
+      const [[row]] = await pool.execute(
+        "SELECT COUNT(*) AS total FROM ai_mail_sends WHERE user_id = ? AND status IN ('submitted','completed')",
+        [userId]
+      );
+      aiPhysicalMailSentCount = Number(row?.total || 0);
+    } catch (e) {
+      if (DEBUG) console.warn('[me.stats.ai.mail] failed:', e.message || e);
     }
 
     // Inbound calls grouped by day from user_did_cdrs (DIDWW) + ai_call_logs (Daily/Pipecat)
@@ -8188,7 +8207,9 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
         totalSip,
         onlineSip,
         aiAgentCount,
-        aiEmailSentCount
+        aiEmailSentCount,
+        aiMeetingLinkSentCount,
+        aiPhysicalMailSentCount
       },
       series: {
         callsByDay

@@ -215,6 +215,11 @@
               <div class="kpi-sub"><span id="kpiAiEmailsSent">–</span> emails sent</div>
               <div class="kpi-value" id="kpiAiAgents">–</div>
             </div>
+            <div class="kpi-card">
+              <div class="kpi-label">Meeting + Mail</div>
+              <div class="kpi-sub"><span id="kpiAiMeetingLinksSent">–</span> meeting links • <span id="kpiAiPhysicalMailSent">–</span> physical mail</div>
+              <div class="kpi-value" id="kpiAiMeetingMailTotal">–</div>
+            </div>
           </div>
           <div id="callsChartContainer">
             <div class="muted" id="statsRangeText" style="margin-bottom:4px;"></div>
@@ -2524,6 +2529,9 @@
         const elSipOnline = document.getElementById('kpiSipOnline');
         const elAiAgents = document.getElementById('kpiAiAgents');
         const elAiEmailsSent = document.getElementById('kpiAiEmailsSent');
+        const elAiMeetingLinksSent = document.getElementById('kpiAiMeetingLinksSent');
+        const elAiPhysicalMailSent = document.getElementById('kpiAiPhysicalMailSent');
+        const elAiMeetingMailTotal = document.getElementById('kpiAiMeetingMailTotal');
         const elRange = document.getElementById('statsRangeText');
         if (elTotalDids) elTotalDids.textContent = (k.totalDids != null ? String(k.totalDids) : '–');
         if (elTotalDidsSub) {
@@ -2537,6 +2545,20 @@
         if (elOutbound) elOutbound.textContent = (k.outboundCount != null ? String(k.outboundCount) : '–');
         if (elAiAgents) elAiAgents.textContent = (k.aiAgentCount != null ? String(k.aiAgentCount) : '–');
         if (elAiEmailsSent) elAiEmailsSent.textContent = (k.aiEmailSentCount != null ? String(k.aiEmailSentCount) : '–');
+
+        if (elAiMeetingLinksSent) elAiMeetingLinksSent.textContent = (k.aiMeetingLinkSentCount != null ? String(k.aiMeetingLinkSentCount) : '–');
+        if (elAiPhysicalMailSent) elAiPhysicalMailSent.textContent = (k.aiPhysicalMailSentCount != null ? String(k.aiPhysicalMailSentCount) : '–');
+        if (elAiMeetingMailTotal) {
+          const m = (k.aiMeetingLinkSentCount != null ? Number(k.aiMeetingLinkSentCount) : null);
+          const p = (k.aiPhysicalMailSentCount != null ? Number(k.aiPhysicalMailSentCount) : null);
+          const hasM = Number.isFinite(m);
+          const hasP = Number.isFinite(p);
+          if (!hasM && !hasP) {
+            elAiMeetingMailTotal.textContent = '–';
+          } else {
+            elAiMeetingMailTotal.textContent = String((hasM ? m : 0) + (hasP ? p : 0));
+          }
+        }
         if (elInboundToday) {
           if (k.inboundToday != null) elInboundToday.textContent = `Today: ${k.inboundToday}`;
           else elInboundToday.textContent = '';
