@@ -7673,6 +7673,156 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
   }
 });
 
+// Debug: CDR health snapshot for the logged-in user (helps diagnose "history not updating")
+app.get('/api/me/cdrs/health', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    if (!userId) return res.status(401).json({ success: false, message: 'Not authenticated' });
+
+    const [[u]] = await pool.execute(
+      'SELECT id, username, email, magnus_user_id FROM signup_users WHERE id=? LIMIT 1',
+      [userId]
+    );
+
+    const username = u?.username || req.session.username || '';
+    const email = u?.email || req.session.email || '';
+
+    // Prefer DB mapping; fall back to session mapping if needed.
+    const magnusUserId = String((u?.magnus_user_id ?? req.session.magnusUserId) || '').trim();
+
+    const [[outAgg]] = await pool.execute(
+      'SELECT COUNT(*) AS total, SUM(CASE WHEN time_start IS NULL THEN 1 ELSE 0 END) AS null_time_start, MAX(time_start) AS last_time_start, MAX(created_at) AS last_created_at FROM user_mb_cdrs WHERE user_id=?',
+      [userId]
+    );
+
+    const [recent] = await pool.query(
+      `SELECT cdr_id, time_start, src_number, dst_number, did_number, price
+       FROM user_mb_cdrs
+       WHERE user_id = ?
+       ORDER BY time_start DESC, id DESC
+       LIMIT 5`,
+      [userId]
+    );
+
+    let cursor = null;
+    let magnusUserIdMappings = null;
+    if (magnusUserId) {
+      const [cRows] = await pool.execute(
+        'SELECT magnus_user_id, last_time_start_ms, updated_at FROM cdr_import_cursors WHERE magnus_user_id=? LIMIT 1',
+        [magnusUserId]
+      );
+      const c = cRows && cRows[0] ? cRows[0] : null;
+      cursor = c ? {
+        magnusUserId: String(c.magnus_user_id || magnusUserId),
+        lastTimeStartMs: c.last_time_start_ms != null ? Number(c.last_time_start_ms) : null,
+        lastTimeStartIso: c.last_time_start_ms != null ? new Date(Number(c.last_time_start_ms)).toISOString() : null,
+        updatedAt: c.updated_at ? c.updated_at.toISOString() : null
+      } : {
+        magnusUserId,
+        lastTimeStartMs: null,
+        lastTimeStartIso: null,
+        updatedAt: null
+      };
+
+      const [mRows] = await pool.execute(
+        'SELECT id FROM signup_users WHERE magnus_user_id = ? ORDER BY id ASC',
+        [magnusUserId]
+      );
+      const ids = (mRows || []).map(r => String(r.id));
+      magnusUserIdMappings = {
+        magnusUserId,
+        localUserIds: ids,
+        count: ids.length,
+        hasDuplicates: ids.length > 1
+      };
+    }
+
+    const outbound = {
+      total: Number(outAgg?.total || 0),
+      nullTimeStart: Number(outAgg?.null_time_start || 0),
+      lastTimeStart: outAgg?.last_time_start ? outAgg.last_time_start.toISOString() : null,
+      lastCreatedAt: outAgg?.last_created_at ? outAgg.last_created_at.toISOString() : null,
+      recent: (recent || []).map(r => ({
+        cdrId: r.cdr_id != null ? String(r.cdr_id) : null,
+        timeStart: r.time_start ? r.time_start.toISOString() : null,
+        srcNumber: r.src_number || '',
+        dstNumber: r.dst_number || '',
+        didNumber: r.did_number || null,
+        price: r.price != null ? Number(r.price) : null
+      }))
+    };
+
+    return res.json({
+      success: true,
+      data: {
+        localUserId: String(userId),
+        username,
+        email,
+        magnusUserId,
+        cursor,
+        magnusUserIdMappings,
+        outbound
+      }
+    });
+  } catch (e) {
+    if (DEBUG) console.error('[me.cdrs.health] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to compute CDR health' });
+  }
+});
+
+// Debug: manually trigger an outbound CDR import for the logged-in user.
+// Useful when background batch import is lagging or when diagnosing mapping issues.
+app.post('/api/me/cdrs/import-now', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    if (!userId) return res.status(401).json({ success: false, message: 'Not authenticated' });
+
+    const [[u]] = await pool.execute(
+      'SELECT id, username, email, magnus_user_id FROM signup_users WHERE id=? LIMIT 1',
+      [userId]
+    );
+
+    const username = u?.username || req.session.username || '';
+    const email = u?.email || req.session.email || '';
+    const magnusUserId = String((u?.magnus_user_id ?? req.session.magnusUserId) || '').trim();
+    if (!magnusUserId) {
+      return res.status(400).json({ success: false, message: 'Magnus user id not configured for this account' });
+    }
+
+    const httpsAgent = magnusBillingAgent;
+    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+
+    const result = await importMagnusCdrsForUser({
+      localUserId: String(userId),
+      magnusUserId: magnusUserId,
+      username,
+      email,
+      httpsAgent,
+      hostHeader
+    });
+
+    const [[outAgg]] = await pool.execute(
+      'SELECT COUNT(*) AS total, MAX(time_start) AS last_time_start, MAX(created_at) AS last_created_at FROM user_mb_cdrs WHERE user_id=?',
+      [userId]
+    );
+
+    return res.json({
+      success: true,
+      import: result || null,
+      outbound: {
+        total: Number(outAgg?.total || 0),
+        lastTimeStart: outAgg?.last_time_start ? outAgg.last_time_start.toISOString() : null,
+        lastCreatedAt: outAgg?.last_created_at ? outAgg.last_created_at.toISOString() : null
+      }
+    });
+  } catch (e) {
+    if (DEBUG) console.error('[me.cdrs.importNow] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to run CDR import' });
+  }
+});
+
 // Persist normalized MagnusBilling CDRs into local DB for history
 async function saveMagnusCdrsToDb({ localUserId, magnusUserId, rows, rawRows }) {
   if (!pool || !localUserId || !magnusUserId || !Array.isArray(rows) || !rows.length) return;
@@ -7848,7 +7998,9 @@ function normalizeMagnusCdrRow(r) {
 
 // Incrementally import MagnusBilling CDRs for a single user into user_mb_cdrs
 async function importMagnusCdrsForUser({ localUserId, magnusUserId, username, email, httpsAgent, hostHeader }) {
-  if (!pool || !localUserId || !magnusUserId) return;
+  if (!pool || !localUserId || !magnusUserId) {
+    return { imported: 0, reason: 'missing-pool-or-ids' };
+  }
   const magnusIdStr = String(magnusUserId);
 
   const now = new Date();
@@ -7987,6 +8139,15 @@ async function importMagnusCdrsForUser({ localUserId, magnusUserId, username, em
       to: toStr
     });
   }
+
+  return {
+    imported,
+    magnusUserId: magnusIdStr,
+    from: fromStr,
+    to: toStr,
+    sinceMs,
+    maxSeenMs
+  };
 }
 
 // Batch import MagnusBilling CDRs once per tick and distribute to local users.
@@ -8015,12 +8176,29 @@ async function importMagnusCdrsForUsersBatch({ users, httpsAgent, hostHeader }) 
   }
 
   const userByMagnus = new Map();
+  const magnusByUsernameLower = new Map(); // username (lower) -> magnusUserId
   let globalSinceMs = nowMs;
 
   for (const u of users) {
     const magnusUserId = String(u.magnus_user_id || '').trim();
     if (!magnusUserId) continue;
     const localUserId = String(u.id);
+
+    // If multiple portal users point at the same Magnus account, importing becomes ambiguous.
+    // We warn and keep the first mapping we saw to avoid silent reassignment.
+    if (userByMagnus.has(magnusUserId)) {
+      const existing = userByMagnus.get(magnusUserId);
+      if (DEBUG) {
+        console.warn('[cdr.import.batch.duplicateMagnusUserId]', {
+          magnusUserId,
+          existingLocalUserId: existing?.localUserId,
+          existingUsername: existing?.username,
+          duplicateLocalUserId: localUserId,
+          duplicateUsername: u.username || ''
+        });
+      }
+      continue;
+    }
 
     const lastMs = cursorByMagnus.get(magnusUserId) || 0;
     const sinceMs = lastMs > 0
@@ -8036,6 +8214,9 @@ async function importMagnusCdrsForUsersBatch({ users, httpsAgent, hostHeader }) 
       email: u.email || '',
       sinceMs
     });
+
+    const unameLower = String(u.username || '').trim().toLowerCase();
+    if (unameLower) magnusByUsernameLower.set(unameLower, magnusUserId);
   }
 
   if (!userByMagnus.size) return;
@@ -8085,9 +8266,31 @@ async function importMagnusCdrsForUsersBatch({ users, httpsAgent, hostHeader }) 
 
     // Group by magnus_user_id to reduce DB roundtrips.
     const buckets = new Map(); // magnusUserId -> { localUserId, magnusUserId, rows, rawRows }
+    let fallbackMatched = 0;
 
     for (const r of rawRows) {
-      const mid = extractMagnusUserIdFromCdrRow(r);
+      let mid = extractMagnusUserIdFromCdrRow(r);
+      mid = String(mid || '').trim();
+
+      // Some MagnusBilling CDR payloads omit id_user. In that case, try to infer
+      // ownership by matching the CDR's username/accountcode fields back to a
+      // known portal user (exact match only).
+      if (!mid) {
+        const cand = String(
+          r?.idUserusername ||
+          r?.username ||
+          r?.user ||
+          r?.accountcode ||
+          r?.sipuser ||
+          ''
+        ).trim().toLowerCase();
+        const mid2 = cand ? magnusByUsernameLower.get(cand) : '';
+        if (mid2) {
+          mid = String(mid2);
+          fallbackMatched++;
+        }
+      }
+
       if (!mid) continue;
 
       const user = userByMagnus.get(mid);
@@ -8123,6 +8326,10 @@ async function importMagnusCdrsForUsersBatch({ users, httpsAgent, hostHeader }) 
       }
       b.rows.push(n);
       b.rawRows.push(r);
+    }
+
+    if (DEBUG && fallbackMatched) {
+      console.log('[cdr.import.batch.fallbackUserMatch]', { page, start, count: fallbackMatched });
     }
 
     for (const [mid, b] of buckets.entries()) {
