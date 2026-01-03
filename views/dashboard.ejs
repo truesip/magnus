@@ -1338,7 +1338,14 @@
         const agentName = String(m.agent_name || '-');
         const tracking = String(m.tracking_number || '-');
         const statusRaw = String(m.status || '').toLowerCase();
-        const statusText = statusRaw ? (statusRaw.charAt(0).toUpperCase() + statusRaw.slice(1)) : 'Unknown';
+
+        const refundStatus = String(m.refund_status || '').toLowerCase();
+        const refunded = (refundStatus === 'completed') || !!m.refunded_at || (Number(m.refund_billing_history_id) > 0);
+
+        let statusText = statusRaw ? (statusRaw.charAt(0).toUpperCase() + statusRaw.slice(1)) : 'Unknown';
+        if (statusRaw === 'failed' && refunded) statusText = 'Failed (Refunded)';
+        if (statusRaw === 'failed' && refundStatus === 'failed') statusText = 'Failed (Refund failed)';
+
         const baseCostNum = (m.cost_estimate != null ? Number(m.cost_estimate) : null);
         const markupNum = (m.markup_amount != null ? Number(m.markup_amount) : null);
         const totalCostNum = (m.total_cost != null ? Number(m.total_cost) : null);
@@ -1373,7 +1380,17 @@
         tdStatus.textContent = statusText;
         tdStatus.style.fontWeight = '600';
         tdStatus.style.color = (statusRaw === 'completed') ? '#16a34a' : (statusRaw === 'failed' ? '#ef4444' : '#6b7280');
-        if (m.error) tdStatus.title = String(m.error);
+
+        const statusHints = [];
+        if (m.error) statusHints.push(String(m.error));
+        if (refunded) {
+          const amt = (m.refund_amount != null && Number.isFinite(Number(m.refund_amount))) ? Number(m.refund_amount) : null;
+          statusHints.push(`Refunded${amt != null ? `: $${amt.toFixed(2)}` : ''}`);
+        } else if (refundStatus === 'failed' && m.refund_error) {
+          statusHints.push(`Refund failed: ${String(m.refund_error)}`);
+        }
+        if (statusHints.length) tdStatus.title = statusHints.join(' | ');
+
         tr.appendChild(tdStatus);
 
         const tdCost = document.createElement('td');
@@ -1381,13 +1398,12 @@
         const hasBase = (baseCostNum != null && Number.isFinite(baseCostNum));
         const hasMarkup = (markupNum != null && Number.isFinite(markupNum) && markupNum > 0);
         const hasTotal = (totalCostNum != null && Number.isFinite(totalCostNum) && totalCostNum > 0);
-        if (hasBase && (hasMarkup || hasTotal)) {
-          const parts = [];
-          parts.push(`Base: $${baseCostNum.toFixed(2)}`);
-          if (hasMarkup) parts.push(`Markup: $${markupNum.toFixed(2)}`);
-          if (hasTotal) parts.push(`Total: $${totalCostNum.toFixed(2)}`);
-          tdCost.title = parts.join(' | ');
-        }
+        const parts = [];
+        if (hasBase) parts.push(`Base: $${baseCostNum.toFixed(2)}`);
+        if (hasMarkup) parts.push(`Markup: $${markupNum.toFixed(2)}`);
+        if (hasTotal) parts.push(`Total: $${totalCostNum.toFixed(2)}`);
+        if (refunded) parts.push('Refunded');
+        if (parts.length) tdCost.title = parts.join(' | ');
         tr.appendChild(tdCost);
 
         tbody.appendChild(tr);

@@ -1554,6 +1554,11 @@ async function initDb() {
     markup_amount DECIMAL(18,8) NULL,
     total_cost DECIMAL(18,8) NULL,
     billing_history_id BIGINT NULL,
+    refund_status ENUM('none','pending','completed','failed') NOT NULL DEFAULT 'none',
+    refund_amount DECIMAL(18,8) NULL,
+    refund_billing_history_id BIGINT NULL,
+    refund_error TEXT NULL,
+    refunded_at DATETIME NULL,
     attempt_count INT NOT NULL DEFAULT 0,
     error TEXT NULL,
     raw_payload JSON NULL,
@@ -1572,10 +1577,15 @@ async function initDb() {
     CONSTRAINT fk_ai_mail_billing FOREIGN KEY (billing_history_id) REFERENCES billing_history(id) ON DELETE SET NULL
   )`);
 
-  // Ensure ai_mail_sends cost columns exist (best-effort migrations)
+  // Ensure ai_mail_sends cost/refund columns exist (best-effort migrations)
   for (const col of [
     { name: 'markup_amount', ddl: "ALTER TABLE ai_mail_sends ADD COLUMN markup_amount DECIMAL(18,8) NULL AFTER cost_estimate" },
     { name: 'total_cost', ddl: "ALTER TABLE ai_mail_sends ADD COLUMN total_cost DECIMAL(18,8) NULL AFTER markup_amount" },
+    { name: 'refund_status', ddl: "ALTER TABLE ai_mail_sends ADD COLUMN refund_status ENUM('none','pending','completed','failed') NOT NULL DEFAULT 'none' AFTER billing_history_id" },
+    { name: 'refund_amount', ddl: "ALTER TABLE ai_mail_sends ADD COLUMN refund_amount DECIMAL(18,8) NULL AFTER refund_status" },
+    { name: 'refund_billing_history_id', ddl: "ALTER TABLE ai_mail_sends ADD COLUMN refund_billing_history_id BIGINT NULL AFTER refund_amount" },
+    { name: 'refund_error', ddl: "ALTER TABLE ai_mail_sends ADD COLUMN refund_error TEXT NULL AFTER refund_billing_history_id" },
+    { name: 'refunded_at', ddl: "ALTER TABLE ai_mail_sends ADD COLUMN refunded_at DATETIME NULL AFTER refund_error" },
   ]) {
     try {
       const [rows] = await pool.query(
@@ -3707,6 +3717,9 @@ app.post('/api/ai/agent/send-physical-mail', async (req, res) => {
 
     // Charge the user (skip if already charged on a retry)
     let billingId = null;
+    let amountToCharge = (totalCost != null && Number.isFinite(Number(totalCost))) ? Number(totalCost) : Number(costAmount || 0);
+    if (!Number.isFinite(amountToCharge) || amountToCharge <= 0) amountToCharge = 0;
+
     try {
       const [rows] = await pool.execute('SELECT billing_history_id FROM ai_mail_sends WHERE id = ? LIMIT 1', [sendRowId]);
       billingId = rows && rows[0] && rows[0].billing_history_id ? Number(rows[0].billing_history_id) : null;
@@ -3728,8 +3741,6 @@ app.post('/api/ai/agent/send-physical-mail', async (req, res) => {
       const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
       const descRaw = `AI physical mail - ${documentClass || 'Mail'} - ${corrected.city || ''} ${corrected.state || ''} ${corrected.postalCode || ''}`.trim();
       const description = descRaw.substring(0, 255);
-
-      const amountToCharge = (totalCost != null && Number.isFinite(Number(totalCost))) ? Number(totalCost) : Number(costAmount || 0);
 
       const charge = await applyMagnusCreditDelta({
         localUserId: userId,
@@ -3757,7 +3768,15 @@ app.post('/api/ai/agent/send-physical-mail', async (req, res) => {
 
       try {
         await pool.execute(
-          'UPDATE ai_mail_sends SET billing_history_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          `UPDATE ai_mail_sends
+           SET billing_history_id = ?,
+               refund_status = 'none',
+               refund_amount = NULL,
+               refund_billing_history_id = NULL,
+               refund_error = NULL,
+               refunded_at = NULL,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? LIMIT 1`,
           [billingId, sendRowId]
         );
       } catch {}
@@ -3778,7 +3797,9 @@ app.post('/api/ai/agent/send-physical-mail', async (req, res) => {
       pageCount,
       cost_estimate: costAmount,
       markup_amount: markupAmount,
-      total_cost: totalCost
+      total_cost: totalCost,
+      billing_history_id: billingId,
+      amount_charged: amountToCharge
     };
 
     try {
@@ -3894,17 +3915,173 @@ app.post('/api/ai/agent/send-physical-mail', async (req, res) => {
         total_cost: totalCost
       });
     } catch (e) {
-      const msg = e?.message || 'Click2Mail send failed';
-      if (DEBUG) console.warn('[ai.agent.send-physical-mail] error:', e?.data || msg);
+      // Build a more helpful error message from Click2Mail (often returns XML details).
+      const httpStatus = e?.response?.status;
+      const respText = (typeof e?.response?.data === 'string') ? String(e.response.data) : '';
+
+      let detail = '';
+      try {
+        const parsedErr = click2mailParseXml(respText);
+        const d = String(pickFirst(parsedErr, [
+          'error.description',
+          'errors.error.description',
+          'description',
+          'message',
+          'faultstring',
+          'faultString'
+        ]) || '').trim();
+        if (d) detail = d;
+      } catch {}
+
+      let msg = detail || (e?.message || 'Click2Mail send failed');
+      if (httpStatus && !/\(HTTP\s*\d+\)/i.test(msg) && !/status code\s*\d+/i.test(msg)) {
+        msg = `${msg} (HTTP ${httpStatus})`;
+      }
+
+      const responseSnippet = respText ? respText.slice(0, 2000) : '';
+      if (responseSnippet) {
+        payloadLog.click2mail_error = { status: httpStatus || null, body: responseSnippet };
+      } else if (httpStatus) {
+        payloadLog.click2mail_error = { status: httpStatus };
+      }
+
+      // If we already charged the user, attempt an automatic refund.
+      let refundAttempted = false;
+      let refundOk = false;
+      let refundBillingId = null;
+      let refundError = null;
+
+      try {
+        if (billingId && amountToCharge && Number.isFinite(Number(amountToCharge)) && Number(amountToCharge) > 0) {
+          refundAttempted = true;
+
+          // Best-effort claim to avoid double refunds (uses refund_status state).
+          let canRefund = true;
+          try {
+            const [r] = await pool.execute(
+              `UPDATE ai_mail_sends
+               SET refund_status = 'pending',
+                   refund_amount = ?,
+                   refund_error = NULL,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?
+                 AND (refund_status = 'none' OR refund_status = 'failed')
+                 AND billing_history_id IS NOT NULL
+               LIMIT 1`,
+              [Math.abs(Number(amountToCharge)), sendRowId]
+            );
+            canRefund = !!(r && r.affectedRows);
+          } catch {
+            canRefund = true;
+          }
+
+          if (canRefund) {
+            const magnusUserId = await loadMagnusUserIdByLocalUserId(userId);
+            if (!magnusUserId) {
+              refundError = 'Refund failed: MagnusBilling user id not configured';
+            } else {
+              const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+              const refundDescRaw = `Refund: AI mail send failed (mail_id ${sendRowId})`;
+              const refundDescription = refundDescRaw.substring(0, 255);
+
+              const refund = await applyMagnusCreditDelta({
+                localUserId: userId,
+                magnusUserId,
+                amountDelta: Math.abs(Number(amountToCharge)),
+                description: refundDescription,
+                httpsAgent: magnusBillingAgent,
+                hostHeader,
+                label: 'ai.mail.refund'
+              });
+
+              if (refund && refund.ok === true) {
+                refundOk = true;
+                refundBillingId = refund.billingId;
+              } else {
+                refundOk = false;
+                refundError = refund?.reason || 'Refund failed';
+              }
+            }
+
+            // Persist refund state (best-effort)
+            try {
+              if (refundOk) {
+                await pool.execute(
+                  `UPDATE ai_mail_sends
+                   SET refund_status = 'completed',
+                       refund_billing_history_id = ?,
+                       refunded_at = NOW(),
+                       billing_history_id = NULL,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? LIMIT 1`,
+                  [refundBillingId, sendRowId]
+                );
+              } else {
+                await pool.execute(
+                  `UPDATE ai_mail_sends
+                   SET refund_status = 'failed',
+                       refund_error = ?,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? LIMIT 1`,
+                  [String(refundError || 'Refund failed').slice(0, 2000), sendRowId]
+                );
+              }
+            } catch {}
+          } else {
+            refundAttempted = false;
+          }
+        }
+      } catch (refundErr) {
+        refundAttempted = true;
+        refundOk = false;
+        refundError = String(refundErr?.message || refundErr);
+        try {
+          await pool.execute(
+            `UPDATE ai_mail_sends
+             SET refund_status = 'failed',
+                 refund_error = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? LIMIT 1`,
+            [String(refundError || 'Refund failed').slice(0, 2000), sendRowId]
+          );
+        } catch {}
+      }
+
+      if (refundAttempted) {
+        payloadLog.refund = {
+          attempted: true,
+          ok: refundOk,
+          amount: Math.abs(Number(amountToCharge || 0)) || 0,
+          refund_billing_history_id: refundBillingId || null,
+          error: refundOk ? null : (refundError || null)
+        };
+      }
+
+      const msgForRow = refundOk ? `${msg} (refunded)` : msg;
+
+      if (DEBUG) console.warn('[ai.agent.send-physical-mail] error:', msgForRow);
+
       try {
         await pool.execute(
           `UPDATE ai_mail_sends
-           SET status = 'failed', error = ?, batch_id = COALESCE(batch_id, ?), raw_payload = COALESCE(raw_payload, ?), updated_at = CURRENT_TIMESTAMP
+           SET status = 'failed',
+               error = ?,
+               batch_id = COALESCE(batch_id, ?),
+               raw_payload = ?,
+               updated_at = CURRENT_TIMESTAMP
            WHERE id = ? LIMIT 1`,
-          [msg, batchId, JSON.stringify(payloadLog), sendRowId]
+          [String(msgForRow).slice(0, 2000), batchId, JSON.stringify(payloadLog), sendRowId]
         );
       } catch {}
-      return res.status(502).json({ success: false, message: msg });
+
+      return res.status(502).json({
+        success: false,
+        message: msgForRow,
+        charged: !!billingId,
+        charge_billing_history_id: billingId || null,
+        refunded: refundOk,
+        refund_billing_history_id: refundBillingId || null
+      });
     }
   } catch (e) {
     const msg = e?.message || 'Failed to send physical mail';
@@ -6362,7 +6539,10 @@ app.get('/api/me/ai/mail', requireAuth, async (req, res) => {
               m.product, m.mail_class,
               m.batch_id, m.tracking_type, m.tracking_number,
               m.tracking_status, m.tracking_status_date, m.tracking_status_location,
-              m.status, m.cost_estimate, m.markup_amount, m.total_cost, m.error
+              m.status, m.cost_estimate, m.markup_amount, m.total_cost,
+              m.billing_history_id,
+              m.refund_status, m.refund_amount, m.refund_billing_history_id, m.refund_error, m.refunded_at,
+              m.error
        FROM ai_mail_sends m
        LEFT JOIN ai_agents a ON a.id = m.agent_id
        ${whereSql}

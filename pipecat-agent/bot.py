@@ -460,7 +460,10 @@ async def bot(session_args: Any):
             "\n\nIf the caller asks you to mail them a physical letter or document, collect their name and full mailing address "
             "(street, city, state, ZIP) and any details needed for the template placeholders, then call the "
             "send_physical_mail tool with the address fields and variables. "
-            "After the tool returns, confirm the mail was submitted and (if provided) share the tracking number."
+            "After the tool returns, check the tool result: if success is true, confirm the mail was submitted and "
+            "share the tracking number if present. If success is false, clearly say the mail was NOT sent/submitted "
+            "and do not claim it was sent. If the tool response indicates the charge was refunded, tell the caller they "
+            "were not charged (or were refunded) and offer to retry."
         )
     if has_end_call_tool:
         prompt += (
