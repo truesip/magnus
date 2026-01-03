@@ -9751,7 +9751,12 @@ async function buildCallerMemoryForDialin({ userId, agentId, fromDigits, exclude
     const excludeId = String(excludeCallId || '').trim();
     const excludeDomain = String(excludeCallDomain || '').trim();
 
-    const [callRows] = await pool.execute(
+    const digitsLast10 = (digits.length >= 10) ? digits.slice(-10) : '';
+
+    // First attempt: exact digits-only match.
+    let calls = [];
+
+    const [callRowsExact] = await pool.execute(
       `SELECT call_id, call_domain, time_start, time_end
        FROM ai_call_logs
        WHERE user_id = ?
@@ -9767,71 +9772,95 @@ async function buildCallerMemoryForDialin({ userId, agentId, fromDigits, exclude
       [u, a, digits, excludeId, excludeDomain, cutoff]
     );
 
-    const calls = Array.isArray(callRows) ? callRows : [];
+    calls = Array.isArray(callRowsExact) ? callRowsExact : [];
+
+    // Fallback: match by last 10 digits (helps when the caller ID flips between +1XXXXXXXXXX and XXXXXXXXXX).
+    if (!calls.length && digitsLast10 && digitsLast10.length === 10) {
+      const [callRowsLast10] = await pool.execute(
+        `SELECT call_id, call_domain, time_start, time_end
+         FROM ai_call_logs
+         WHERE user_id = ?
+           AND agent_id = ?
+           AND from_number IS NOT NULL
+           AND from_number <> ''
+           AND RIGHT(REGEXP_REPLACE(from_number, '[^0-9]', ''), 10) = ?
+           AND NOT (call_id = ? AND call_domain = ?)
+           AND (status IS NULL OR status NOT LIKE 'blocked%')
+           AND (time_start IS NULL OR time_start >= ?)
+         ORDER BY COALESCE(time_end, time_start) DESC, id DESC
+         LIMIT ${maxCalls}`,
+        [u, a, digitsLast10, excludeId, excludeDomain, cutoff]
+      );
+      calls = Array.isArray(callRowsLast10) ? callRowsLast10 : [];
+    }
+
     if (!calls.length) return null;
 
-    // For MVP, just pull history from the most recent prior call.
-    const lastCall = calls[0];
-    const callId = String(lastCall.call_id || '').trim();
-    const callDomain = String(lastCall.call_domain || '').trim();
-    if (!callId || !callDomain) return null;
+    // Pull memory from the newest prior call that actually has logged transcript messages.
+    for (const c of calls) {
+      const callId = String(c?.call_id || '').trim();
+      const callDomain = String(c?.call_domain || '').trim();
+      if (!callId || !callDomain) continue;
 
-    const [msgRows] = await pool.execute(
-      `SELECT role, content
-       FROM ai_call_messages
-       WHERE user_id = ? AND agent_id = ? AND call_id = ? AND call_domain = ?
-       ORDER BY id DESC
-       LIMIT ${maxMessages}`,
-      [u, a, callId, callDomain]
-    );
+      const [msgRows] = await pool.execute(
+        `SELECT role, content
+         FROM ai_call_messages
+         WHERE user_id = ? AND agent_id = ? AND call_id = ? AND call_domain = ?
+         ORDER BY id DESC
+         LIMIT ${maxMessages}`,
+        [u, a, callId, callDomain]
+      );
 
-    const rows = Array.isArray(msgRows) ? msgRows : [];
-    if (!rows.length) return null;
+      const rows = Array.isArray(msgRows) ? msgRows : [];
+      if (!rows.length) continue;
 
-    const messages = rows
-      .slice()
-      .reverse()
-      .map(r => {
-        const roleRaw = String(r.role || '').trim().toLowerCase();
-        const role = (roleRaw === 'assistant') ? 'assistant' : (roleRaw === 'user' ? 'user' : '');
-        let content = String(r.content || '').trim();
-        if (!role || !content) return null;
-        if (content.length > maxChars) content = content.slice(0, maxChars);
-        return { role, content };
-      })
-      .filter(Boolean);
+      const messages = rows
+        .slice()
+        .reverse()
+        .map(r => {
+          const roleRaw = String(r.role || '').trim().toLowerCase();
+          const role = (roleRaw === 'assistant') ? 'assistant' : (roleRaw === 'user' ? 'user' : '');
+          let content = String(r.content || '').trim();
+          if (!role || !content) return null;
+          if (content.length > maxChars) content = content.slice(0, maxChars);
+          return { role, content };
+        })
+        .filter(Boolean);
 
-    if (!messages.length) return null;
+      if (!messages.length) continue;
 
-    let lastCallStartedAt = null;
-    let lastCallEndedAt = null;
+      let lastCallStartedAt = null;
+      let lastCallEndedAt = null;
 
-    try {
-      if (lastCall.time_start) {
-        const d = (lastCall.time_start instanceof Date) ? lastCall.time_start : new Date(lastCall.time_start);
-        if (!Number.isNaN(d.getTime())) lastCallStartedAt = d.toISOString();
-      }
-    } catch {}
+      try {
+        if (c.time_start) {
+          const d = (c.time_start instanceof Date) ? c.time_start : new Date(c.time_start);
+          if (!Number.isNaN(d.getTime())) lastCallStartedAt = d.toISOString();
+        }
+      } catch {}
 
-    try {
-      if (lastCall.time_end) {
-        const d = (lastCall.time_end instanceof Date) ? lastCall.time_end : new Date(lastCall.time_end);
-        if (!Number.isNaN(d.getTime())) lastCallEndedAt = d.toISOString();
-      }
-    } catch {}
+      try {
+        if (c.time_end) {
+          const d = (c.time_end instanceof Date) ? c.time_end : new Date(c.time_end);
+          if (!Number.isNaN(d.getTime())) lastCallEndedAt = d.toISOString();
+        }
+      } catch {}
 
-    const metaParts = [
-      'Returning caller detected. The following messages are from a previous phone call with this same caller.',
-      'Use them as background context. Do not mention storing transcripts; just be helpful.'
-    ];
+      const metaParts = [
+        'Returning caller detected. The following messages are from a previous phone call with this same caller.',
+        'Use them as background context. Do not mention storing transcripts; just be helpful.'
+      ];
 
-    if (lastCallStartedAt) metaParts.push(`Previous call started: ${lastCallStartedAt}.`);
-    if (lastCallEndedAt) metaParts.push(`Previous call ended: ${lastCallEndedAt}.`);
+      if (lastCallStartedAt) metaParts.push(`Previous call started: ${lastCallStartedAt}.`);
+      if (lastCallEndedAt) metaParts.push(`Previous call ended: ${lastCallEndedAt}.`);
 
-    return {
-      meta: metaParts.join(' '),
-      messages
-    };
+      return {
+        meta: metaParts.join(' '),
+        messages
+      };
+    }
+
+    return null;
   } catch (e) {
     if (DEBUG) console.warn('[callerMemory] buildCallerMemoryForDialin failed:', e?.message || e);
     return null;
@@ -9991,9 +10020,10 @@ app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
     // Pipecat Cloud handles creating the Daily room and connecting the PSTN call.
     try {
       let callerMemory = null;
+      let fromDigits = '';
       try {
         if (pool && agentRow && fromNumber) {
-          const fromDigits = digitsOnly(fromNumber);
+          fromDigits = digitsOnly(fromNumber);
           if (fromDigits) {
             callerMemory = await buildCallerMemoryForDialin({
               userId: agentRow.user_id,
@@ -10007,6 +10037,19 @@ app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
       } catch (e) {
         if (DEBUG) console.warn('[daily.dialin] Caller memory lookup failed:', e?.message || e);
         callerMemory = null;
+      }
+
+      if (DEBUG && fromDigits) {
+        const last4 = fromDigits.length >= 4 ? fromDigits.slice(-4) : fromDigits;
+        const msgCount = Array.isArray(callerMemory?.messages) ? callerMemory.messages.length : 0;
+        console.log('[daily.dialin] callerMemory', {
+          agentName,
+          callId,
+          callDomain,
+          fromLast4: last4,
+          hasMemory: !!callerMemory,
+          messages: msgCount
+        });
       }
 
       const startBody = {
