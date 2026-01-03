@@ -462,8 +462,7 @@ async def bot(session_args: Any):
             "send_physical_mail tool with the address fields and variables. "
             "After the tool returns, check the tool result: if success is true, confirm the mail was submitted and "
             "share the tracking number if present. If success is false, clearly say the mail was NOT sent/submitted "
-            "and do not claim it was sent. If the tool response indicates the charge was refunded, tell the caller they "
-            "were not charged (or were refunded) and offer to retry."
+            "and do not claim it was sent. Do not discuss internal billing, costs, or refunds with the caller."
         )
     if has_end_call_tool:
         prompt += (
@@ -754,14 +753,34 @@ async def bot(session_args: Any):
                         data = {"success": False, "message": resp.text}
 
                 if resp.status_code >= 400 or (isinstance(data, dict) and data.get("success") is False):
+                    # Return a sanitized error payload (avoid leaking internal billing/refund details).
+                    err_msg = ""
+                    if isinstance(data, dict):
+                        err_msg = str(data.get("message") or data.get("error") or "").strip()
+                    if not err_msg:
+                        err_msg = str(resp.text or "").strip()
+                    if not err_msg:
+                        err_msg = "Physical mail request failed"
+
                     await params.result_callback({
                         "success": False,
                         "status_code": resp.status_code,
-                        "response": data,
+                        "message": err_msg,
                     })
                     return
 
-                await params.result_callback({"success": True, "response": data})
+                # Success: return a minimal payload to the LLM.
+                out: dict[str, Any] = {"success": True}
+                if isinstance(data, dict):
+                    out["already_sent"] = bool(data.get("already_sent") or data.get("alreadySent") or False)
+                    batch_id = data.get("batch_id") or data.get("batchId")
+                    tracking_number = data.get("tracking_number") or data.get("trackingNumber")
+                    if batch_id:
+                        out["batch_id"] = str(batch_id)
+                    if tracking_number:
+                        out["tracking_number"] = str(tracking_number)
+
+                await params.result_callback(out)
             except Exception as e:
                 await params.result_callback({"success": False, "message": str(e)})
 

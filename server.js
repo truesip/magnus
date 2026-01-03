@@ -4057,7 +4057,7 @@ app.post('/api/ai/agent/send-physical-mail', async (req, res) => {
         };
       }
 
-      const msgForRow = refundOk ? `${msg} (refunded)` : msg;
+      const msgForRow = msg;
 
       if (DEBUG) console.warn('[ai.agent.send-physical-mail] error:', msgForRow);
 
