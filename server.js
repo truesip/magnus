@@ -130,6 +130,88 @@ function digitsOnly(s) {
   return String(s || '').replace(/[^0-9]/g, '');
 }
 
+// ========== Log sanitization ==========
+// Prevent secrets (tokens/passwords/etc.) from leaking into application logs.
+const LOG_REDACT_VALUE = '***REDACTED***';
+
+function shouldRedactLogKey(key) {
+  const k = String(key || '').toLowerCase();
+  if (!k) return false;
+
+  // Credentials / secrets
+  if (k === 'password' || k === 'pass' || k === 'passwd' || k === 'pwd') return true;
+  if (k.includes('password') || k.includes('passwd')) return true;
+
+  if (k === 'code') return true; // OTP / verification codes
+
+  // Tokens / auth
+  if (k.includes('token')) return true; // access_token, refresh_token, id_token, etc.
+  if (k.includes('secret')) return true;
+  if (k.includes('api_key') || k === 'apikey' || k.includes('apikey') || k.includes('api-key')) return true;
+  if (k.includes('client_secret') || k.includes('clientsecret')) return true;
+  if (k.includes('private_key') || k.includes('privatekey')) return true;
+  if (k === 'authorization' || k.endsWith('authorization')) return true;
+  if (k === 'cookie' || k === 'set-cookie') return true;
+
+  return false;
+}
+
+function sanitizeForLog(value, opts) {
+  const options = Object.assign({
+    maxDepth: 5,
+    maxKeys: 100,
+    maxArrayLength: 50,
+    maxStringLength: 300
+  }, opts || {});
+
+  const seen = new WeakSet();
+
+  function inner(v, depth) {
+    if (v == null) return v;
+
+    const t = typeof v;
+    if (t === 'string') {
+      if (v.length > options.maxStringLength) return v.slice(0, options.maxStringLength) + '…';
+      return v;
+    }
+    if (t === 'number' || t === 'boolean') return v;
+    if (t === 'bigint') return String(v);
+    if (t !== 'object') return String(v);
+
+    if (Buffer.isBuffer(v)) return `[Buffer ${v.length} bytes]`;
+    if (v instanceof Date) return v.toISOString();
+
+    if (seen.has(v)) return '[Circular]';
+    if (depth >= options.maxDepth) return '[Object]';
+
+    seen.add(v);
+
+    if (Array.isArray(v)) {
+      const out = [];
+      const n = Math.min(v.length, options.maxArrayLength);
+      for (let i = 0; i < n; i++) out.push(inner(v[i], depth + 1));
+      if (v.length > n) out.push(`[+${v.length - n} more]`);
+      return out;
+    }
+
+    const out = {};
+    const keys = Object.keys(v);
+    const n = Math.min(keys.length, options.maxKeys);
+    for (let i = 0; i < n; i++) {
+      const k = keys[i];
+      out[k] = shouldRedactLogKey(k) ? LOG_REDACT_VALUE : inner(v[k], depth + 1);
+    }
+    if (keys.length > n) out._truncatedKeys = keys.length - n;
+    return out;
+  }
+
+  try {
+    return inner(value, 0);
+  } catch {
+    return '[Unserializable]';
+  }
+}
+
 // ========== Click2Mail (Physical Mail) ==========
 const CLICK2MAIL_USERNAME = String(process.env.CLICK2MAIL_USERNAME || '').trim();
 const CLICK2MAIL_PASSWORD = String(process.env.CLICK2MAIL_PASSWORD || '').trim();
@@ -567,9 +649,6 @@ async function fetchUserRow({ idUser, username, email, httpsAgent, hostHeader })
     
     if (DEBUG) {
       console.log('[fetchUserRow] Got users:', { total: allUsers.length, userIds: allUsers.map(u => u.id_user || u.id).slice(0, 10) });
-      if (allUsers.length > 0) {
-        console.log('[fetchUserRow] Sample user:', JSON.stringify(allUsers[0]).substring(0, 500));
-      }
     }
     
     // Find the user that matches our criteria
@@ -783,32 +862,21 @@ app.use((req, res, next) => {
 });
 app.use(bodyParser.urlencoded({ extended: true }));
 // Lightweight request logging (always on). Logs when the response finishes.
+// IMPORTANT: always sanitize query/body to avoid leaking secrets in logs.
 app.use((req, res, next) => {
   const t0 = process.hrtime.bigint();
   const wantsLog = req.path.startsWith('/api/') || req.path === '/login' || req.path === '/dashboard';
-  const redact = (obj)=>{
-    try {
-      const c = Object.assign({}, obj||{});
-      if ('password' in c) c.password='***';
-      if ('secret' in c) c.secret='***';
-      if ('api_key' in c) c.api_key='***';
-      if ('code' in c) c.code='***';
-      if ('token' in c) c.token='***';
-      return c;
-    } catch {
-      return {};
-    }
-  };
   res.on('finish', () => {
     if (!wantsLog) return;
-    const ms = Number(process.hrtime.bigint() - t0)/1e6;
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    const isWrite = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH';
     const line = {
       at: new Date().toISOString(),
       status: res.statusCode,
       method: req.method,
       path: req.path,
-      query: req.query || {},
-      body: (req.method==='POST'||req.method==='PUT'||req.method==='PATCH') ? redact(req.body) : undefined,
+      query: sanitizeForLog(req.query || {}),
+      body: isWrite ? sanitizeForLog(req.body) : undefined,
       ms: Number(ms.toFixed(1))
     };
     try { console.log('[req]', JSON.stringify(line)); } catch {}
@@ -2623,9 +2691,12 @@ app.get('/api/me/profile', requireAuth, async (req, res) => {
         const resp = await mbSignedCall({ relPath: '/index.php/user/read', params, httpsAgent, hostHeader });
         const allUsers = resp?.data?.rows || resp?.data?.data || [];
         
-        if (DEBUG && allUsers.length > 0) {
-          console.log('[profile] Sample user data:', JSON.stringify(allUsers[0]).substring(0, 500));
-          console.log('[profile] All user IDs:', allUsers.map(u => ({ id: u.id, id_user: u.id_user, username: u.username })));
+        if (DEBUG) {
+          // Never log full MagnusBilling user objects (they may contain plaintext passwords).
+          console.log('[profile] Magnus users fetched:', {
+            totalUsersChecked: allUsers.length,
+            sampleUserIds: (allUsers || []).slice(0, 10).map(u => u.id_user || u.id || u.user_id || u.uid).filter(v => v != null)
+          });
         }
         
         // Find the user that matches our idUser (check id FIRST, not id_user)
