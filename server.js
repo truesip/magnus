@@ -30,6 +30,11 @@ const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 const { XMLParser } = require('fast-xml-parser');
 
+// Optional dependency used to generate PDFs for AI physical mail without DOCX templates.
+// Loaded lazily to avoid crashing older deployments that haven't installed it yet.
+let PDFDocument = null;
+try { PDFDocument = require('pdfkit'); } catch {}
+
 const app = express();
 const PORT = process.env.PORT || 8080;
 const DEBUG = process.env.DEBUG === '1' || process.env.LOG_LEVEL === 'debug';
@@ -3137,6 +3142,50 @@ async function convertDocxToPdfBuffer(docxBuffer, { baseName = 'document' } = {}
   }
 }
 
+async function generateSimpleLetterPdfBuffer({ subject, body, includeBlankAddressPage }) {
+  const subj = String(subject || '').trim();
+  const text = String(body || '').trim();
+
+  if (!text) throw new Error('Letter body is required');
+  if (!PDFDocument) throw new Error('PDF generator not installed (missing pdfkit dependency)');
+
+  const doc = new PDFDocument({
+    size: 'LETTER',
+    margin: 72 // 1 inch
+  });
+
+  const chunks = [];
+  doc.on('data', (d) => chunks.push(d));
+
+  const done = new Promise((resolve, reject) => {
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+  });
+
+  // Click2Mail "Address on Separate Page" layout works best with a blank first page.
+  if (includeBlankAddressPage) {
+    // Ensure the first page exists but remains blank.
+    doc.font('Helvetica').fontSize(1).fillColor('white').text(' ', 0, 0);
+    doc.fillColor('black');
+    doc.addPage();
+  }
+
+  // Header (optional)
+  if (subj) {
+    doc.font('Helvetica-Bold').fontSize(14).text(subj, { align: 'left' });
+    doc.moveDown(0.75);
+  }
+
+  // Body
+  doc.font('Helvetica').fontSize(11).text(text, {
+    align: 'left',
+    lineGap: 4
+  });
+
+  doc.end();
+  return done;
+}
+
 function parseBearerToken(authHeader) {
   const s = String(authHeader || '').trim();
   if (!s) return '';
@@ -3331,6 +3380,141 @@ app.post('/api/ai/agent/send-document', async (req, res) => {
   }
 });
 
+// Agent-auth endpoint called by the Pipecat agent runtime.
+// Sends a custom email (text/html) via the owning user's SMTP settings (no template required).
+app.post('/api/ai/agent/send-email', async (req, res) => {
+  let sendRowId = null;
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const token = parseBearerToken(req.headers.authorization);
+    if (!token) return res.status(401).json({ success: false, message: 'Missing Authorization bearer token' });
+
+    const tokenHash = sha256(token);
+    const [arows] = await pool.execute(
+      'SELECT id, user_id FROM ai_agents WHERE agent_action_token_hash = ? LIMIT 1',
+      [tokenHash]
+    );
+    const agent = arows && arows[0];
+    if (!agent) return res.status(401).json({ success: false, message: 'Invalid token' });
+
+    const userId = Number(agent.user_id);
+    const agentId = Number(agent.id);
+
+    const toEmail = String(req.body?.to_email || req.body?.toEmail || '').trim();
+    if (!toEmail || !isValidEmail(toEmail)) {
+      return res.status(400).json({ success: false, message: 'Valid to_email is required' });
+    }
+
+    const callId = String(req.body?.call_id || req.body?.callId || '').trim() || null;
+    const callDomain = String(req.body?.call_domain || req.body?.callDomain || '').trim() || null;
+
+    const subjectRaw = String(req.body?.subject || '').trim();
+    const subject = (subjectRaw ? subjectRaw.slice(0, 255) : 'Message from TalkUSA');
+
+    const textRaw = (req.body?.text != null) ? String(req.body.text) : String(req.body?.body || req.body?.message || '');
+    const htmlRaw = (req.body?.html != null) ? String(req.body.html) : '';
+
+    const text = String(textRaw || '').trim();
+    const html = String(htmlRaw || '').trim();
+
+    if (!text && !html) {
+      return res.status(400).json({ success: false, message: 'text/body or html is required' });
+    }
+
+    let dedupeKey = String(req.body?.dedupe_key || req.body?.dedupeKey || '').trim();
+    if (dedupeKey) {
+      if (!/^[a-f0-9]{64}$/i.test(dedupeKey)) {
+        return res.status(400).json({ success: false, message: 'dedupe_key must be a 64-char hex sha256' });
+      }
+      dedupeKey = dedupeKey.toLowerCase();
+    } else {
+      const contentHash = sha256(`subject:${subject}|text:${text}|html:${html}`);
+      dedupeKey = sha256(
+        `send-email|agent:${agentId}|call:${callDomain || ''}|${callId || ''}|to:${toEmail.toLowerCase()}|content:${contentHash}`
+      );
+    }
+
+    // Idempotency + audit row (reuse ai_email_sends with template_id NULL)
+    try {
+      const [ins] = await pool.execute(
+        `INSERT INTO ai_email_sends (user_id, agent_id, template_id, dedupe_key, call_id, call_domain, to_email, subject, status, attempt_count)
+         VALUES (?,?,?,?,?,?,?,?, 'pending', 1)`,
+        [userId, agentId, null, dedupeKey, callId, callDomain, toEmail, subject]
+      );
+      sendRowId = ins.insertId;
+    } catch (e) {
+      if (e?.code !== 'ER_DUP_ENTRY') throw e;
+      const [erows] = await pool.execute(
+        'SELECT id, status FROM ai_email_sends WHERE dedupe_key = ? LIMIT 1',
+        [dedupeKey]
+      );
+      const existing = erows && erows[0];
+      if (existing && existing.status === 'completed') {
+        return res.json({ success: true, already_sent: true, dedupe_key: dedupeKey });
+      }
+      if (existing && existing.status === 'pending') {
+        return res.status(202).json({ success: true, in_progress: true, dedupe_key: dedupeKey });
+      }
+      if (existing && existing.status === 'failed') {
+        sendRowId = existing.id;
+        try {
+          await pool.execute(
+            'UPDATE ai_email_sends SET status = \'pending\', attempt_count = attempt_count + 1, error = NULL, to_email = ?, subject = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+            [toEmail, subject, sendRowId]
+          );
+        } catch {}
+      } else {
+        return res.status(202).json({ success: true, in_progress: true, dedupe_key: dedupeKey });
+      }
+    }
+
+    try {
+      await sendEmailViaUserSmtp({
+        userId,
+        toEmail,
+        subject,
+        ...(text ? { text } : {}),
+        ...(html ? { html } : {})
+      });
+
+      if (sendRowId) {
+        try {
+          await pool.execute(
+            'UPDATE ai_email_sends SET status = \'completed\', error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+            [sendRowId]
+          );
+        } catch {}
+      }
+
+      return res.json({ success: true, dedupe_key: dedupeKey, already_sent: false });
+    } catch (e) {
+      const msg = e?.message || 'Email send failed';
+      if (sendRowId) {
+        try {
+          await pool.execute(
+            'UPDATE ai_email_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+            [msg, sendRowId]
+          );
+        } catch {}
+      }
+      return res.status(502).json({ success: false, message: msg });
+    }
+  } catch (e) {
+    const msg = e?.message || 'Failed to send email';
+    if (DEBUG) console.warn('[ai.agent.send-email] error:', msg);
+    if (sendRowId && pool) {
+      try {
+        await pool.execute(
+          'UPDATE ai_email_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [msg, sendRowId]
+        );
+      } catch {}
+    }
+    return res.status(500).json({ success: false, message: msg });
+  }
+});
+
 function parseClick2MailDateTimeToMysql(dtStr) {
   const s = String(dtStr || '').trim();
   if (!s) return null;
@@ -3378,6 +3562,721 @@ async function loadMagnusUserIdByLocalUserId(localUserId) {
     return '';
   }
 }
+
+// Agent-auth endpoint called by the Pipecat agent runtime.
+// Sends a custom physical letter via Click2Mail (batch API) without DOCX templates.
+app.post('/api/ai/agent/send-custom-physical-mail', async (req, res) => {
+  let sendRowId = null;
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const token = parseBearerToken(req.headers.authorization);
+    if (!token) return res.status(401).json({ success: false, message: 'Missing Authorization bearer token' });
+
+    const tokenHash = sha256(token);
+    const [arows] = await pool.execute(
+      'SELECT id, user_id FROM ai_agents WHERE agent_action_token_hash = ? LIMIT 1',
+      [tokenHash]
+    );
+    const agent = arows && arows[0];
+    if (!agent) return res.status(401).json({ success: false, message: 'Invalid token' });
+
+    const userId = Number(agent.user_id);
+    const agentId = Number(agent.id);
+
+    // Recipient address
+    const toName = String(req.body?.to_name || req.body?.toName || req.body?.name || '').trim() || null;
+    const toOrg = String(req.body?.to_organization || req.body?.toOrganization || req.body?.organization || '').trim() || null;
+    const toAddress1 = String(req.body?.to_address1 || req.body?.toAddress1 || req.body?.address1 || '').trim();
+    const toAddress2 = String(req.body?.to_address2 || req.body?.toAddress2 || req.body?.address2 || '').trim() || null;
+    const toAddress3 = String(req.body?.to_address3 || req.body?.toAddress3 || req.body?.address3 || '').trim() || null;
+    const toCity = String(req.body?.to_city || req.body?.toCity || req.body?.city || '').trim();
+    const toStateRaw = String(req.body?.to_state || req.body?.toState || req.body?.state || '').trim();
+    const toPostalRaw = (req.body?.to_postal_code ?? req.body?.toPostalCode ?? req.body?.postal_code ?? req.body?.postalCode ?? req.body?.zip ?? '');
+    const toCountryRaw = String(req.body?.to_country || req.body?.toCountry || req.body?.country || 'US').trim();
+
+    const toCountry = normalizeClick2MailCountry(toCountryRaw || 'US');
+    const toState = (toCountry === 'US') ? normalizeUsState2(toStateRaw) : toStateRaw;
+    const toPostalCode = normalizePostalCode(toPostalRaw);
+
+    if (!toAddress1) return res.status(400).json({ success: false, message: 'to_address1 is required' });
+    if (!toCity) return res.status(400).json({ success: false, message: 'to_city is required' });
+    if (!toState) return res.status(400).json({ success: false, message: 'to_state is required' });
+    if (!toPostalCode) return res.status(400).json({ success: false, message: 'to_postal_code is required' });
+
+    const bodyRaw = String(req.body?.body ?? req.body?.text ?? req.body?.message ?? '').trim();
+    if (!bodyRaw) {
+      return res.status(400).json({ success: false, message: 'body is required' });
+    }
+
+    const subjectRaw = String(req.body?.subject || '').trim();
+    const subject = subjectRaw ? subjectRaw.slice(0, 255) : '';
+
+    const callId = String(req.body?.call_id || req.body?.callId || '').trim() || null;
+    const callDomain = String(req.body?.call_domain || req.body?.callDomain || '').trim() || null;
+
+    // Default product options (can be overridden per-call if needed)
+    const documentClass = String(req.body?.document_class || req.body?.documentClass || CLICK2MAIL_DEFAULT_DOCUMENT_CLASS).trim();
+    const layout = String(req.body?.layout || CLICK2MAIL_DEFAULT_LAYOUT).trim();
+    const productionTime = String(req.body?.production_time || req.body?.productionTime || CLICK2MAIL_DEFAULT_PRODUCTION_TIME).trim();
+    const envelope = String(req.body?.envelope || CLICK2MAIL_DEFAULT_ENVELOPE).trim();
+    const color = String(req.body?.color || CLICK2MAIL_DEFAULT_COLOR).trim();
+    const paperType = String(req.body?.paper_type || req.body?.paperType || CLICK2MAIL_DEFAULT_PAPER_TYPE).trim();
+    const printOption = String(req.body?.print_option || req.body?.printOption || CLICK2MAIL_DEFAULT_PRINT_OPTION).trim();
+    const mailClass = String(req.body?.mail_class || req.body?.mailClass || CLICK2MAIL_DEFAULT_MAIL_CLASS).trim();
+    const trackingType = String(req.body?.tracking_type || req.body?.trackingType || CLICK2MAIL_DEFAULT_TRACKING_TYPE).trim();
+
+    let dedupeKey = String(req.body?.dedupe_key || req.body?.dedupeKey || '').trim();
+    if (dedupeKey) {
+      if (!/^[a-f0-9]{64}$/i.test(dedupeKey)) {
+        return res.status(400).json({ success: false, message: 'dedupe_key must be a 64-char hex sha256' });
+      }
+      dedupeKey = dedupeKey.toLowerCase();
+    } else {
+      const addrKey = `${toAddress1}|${toCity}|${toState}|${toPostalCode}|${toCountry}`.toLowerCase();
+      const contentHash = sha256(`subject:${subject}|body:${bodyRaw}`);
+      dedupeKey = sha256(
+        `send-custom-physical-mail|agent:${agentId}|call:${callDomain || ''}|${callId || ''}|to:${addrKey}|content:${contentHash}`
+      );
+    }
+
+    // Idempotency + audit row
+    try {
+      const [ins] = await pool.execute(
+        `INSERT INTO ai_mail_sends (
+          user_id, agent_id, template_id, dedupe_key, call_id, call_domain,
+          to_name, to_organization, to_address1, to_address2, to_address3,
+          to_city, to_state, to_postal_code, to_country,
+          provider, product, mail_class, tracking_type,
+          status, attempt_count
+        ) VALUES (
+          ?,?,?,?,?,?,
+          ?,?,?,?,?,
+          ?,?,?,?,
+          'click2mail', ?, ?, ?,
+          'pending', 1
+        )`,
+        [
+          userId, agentId, null, dedupeKey, callId, callDomain,
+          toName, toOrg, toAddress1, toAddress2, toAddress3,
+          toCity, toState, toPostalCode, toCountry,
+          documentClass || null, mailClass || null, trackingType || null
+        ]
+      );
+      sendRowId = ins.insertId;
+    } catch (e) {
+      if (e?.code !== 'ER_DUP_ENTRY') throw e;
+      const [erows] = await pool.execute(
+        'SELECT id, status, billing_history_id, batch_id FROM ai_mail_sends WHERE dedupe_key = ? LIMIT 1',
+        [dedupeKey]
+      );
+      const existing = erows && erows[0];
+      if (existing && (existing.status === 'completed' || existing.status === 'submitted')) {
+        return res.json({ success: true, already_sent: true, dedupe_key: dedupeKey });
+      }
+      if (existing && existing.status === 'pending') {
+        return res.status(202).json({ success: true, in_progress: true, dedupe_key: dedupeKey });
+      }
+      if (existing && existing.status === 'failed') {
+        sendRowId = existing.id;
+        try {
+          await pool.execute(
+            'UPDATE ai_mail_sends SET status = \'pending\', attempt_count = attempt_count + 1, error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+            [sendRowId]
+          );
+        } catch {}
+      } else {
+        return res.status(202).json({ success: true, in_progress: true, dedupe_key: dedupeKey });
+      }
+    }
+
+    // Ensure return address is configured
+    const returnAddrRow = await loadUserMailSettings(userId);
+    if (!returnAddrRow) {
+      const msg = 'Mail settings not configured (set a return address in AI Agent → Tools → Mail)';
+      try {
+        await pool.execute(
+          'UPDATE ai_mail_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [msg, sendRowId]
+        );
+      } catch {}
+      return res.status(400).json({ success: false, message: msg });
+    }
+
+    // Address correction (recipient)
+    let corrected = {
+      name: toName || '',
+      organization: toOrg || '',
+      address1: toAddress1,
+      address2: toAddress2 || '',
+      address3: toAddress3 || '',
+      city: toCity,
+      state: toState,
+      postalCode: toPostalCode,
+      country: toCountry
+    };
+
+    let acExtracted = null;
+    try {
+      const acResp = await click2mailAddressCorrectionOne({
+        name: corrected.name,
+        organization: corrected.organization,
+        address1: corrected.address1,
+        address2: corrected.address2,
+        address3: corrected.address3,
+        city: corrected.city,
+        state: corrected.state,
+        postalCode: corrected.postalCode,
+        country: corrected.country
+      });
+      acExtracted = extractClick2MailAddressCorrectionFromXml(acResp.parsed);
+
+      if (acExtracted && acExtracted.address) {
+        const a = acExtracted.address;
+        corrected = {
+          name: a.name || corrected.name,
+          organization: a.organization || corrected.organization,
+          address1: a.address1 || corrected.address1,
+          address2: a.address2 || corrected.address2,
+          address3: a.address3 || corrected.address3,
+          city: a.city || corrected.city,
+          state: a.state || corrected.state,
+          postalCode: a.postalCode || corrected.postalCode,
+          country: normalizeClick2MailCountry(a.country || corrected.country)
+        };
+      }
+
+      if (acExtracted && acExtracted.nonmailable === true) {
+        const msg = 'Recipient address is not mailable';
+        try {
+          await pool.execute(
+            'UPDATE ai_mail_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+            [msg, sendRowId]
+          );
+        } catch {}
+        return res.status(400).json({ success: false, message: msg });
+      }
+    } catch (e) {
+      const msg = e?.message || 'Address correction failed';
+      try {
+        await pool.execute(
+          'UPDATE ai_mail_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [msg, sendRowId]
+        );
+      } catch {}
+      return res.status(502).json({ success: false, message: msg });
+    }
+
+    // Persist corrected address
+    try {
+      await pool.execute(
+        `UPDATE ai_mail_sends
+         SET corrected_to_name = ?, corrected_to_organization = ?,
+             corrected_to_address1 = ?, corrected_to_address2 = ?, corrected_to_address3 = ?,
+             corrected_to_city = ?, corrected_to_state = ?, corrected_to_postal_code = ?, corrected_to_country = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? LIMIT 1`,
+        [
+          corrected.name || null,
+          corrected.organization || null,
+          corrected.address1 || null,
+          corrected.address2 || null,
+          corrected.address3 || null,
+          corrected.city || null,
+          corrected.state || null,
+          corrected.postalCode || null,
+          corrected.country || null,
+          sendRowId
+        ]
+      );
+    } catch {}
+
+    // Generate PDF (required for Click2Mail)
+    let pdfOut = null;
+    let pageCount = 0;
+
+    try {
+      const includeBlankAddressPage = /separate\s*page/i.test(layout || '');
+      pdfOut = await generateSimpleLetterPdfBuffer({
+        subject: subject,
+        body: bodyRaw,
+        includeBlankAddressPage
+      });
+    } catch (e) {
+      const msg = e?.message || 'PDF generation failed';
+      try {
+        await pool.execute(
+          'UPDATE ai_mail_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [msg, sendRowId]
+        );
+      } catch {}
+      return res.status(500).json({ success: false, message: msg });
+    }
+
+    if (!pdfOut) {
+      const msg = 'PDF generation failed';
+      try {
+        await pool.execute(
+          'UPDATE ai_mail_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [msg, sendRowId]
+        );
+      } catch {}
+      return res.status(500).json({ success: false, message: msg });
+    }
+
+    pageCount = Math.max(1, estimatePdfPageCount(pdfOut) || 0);
+
+    // Cost estimate
+    let costAmount = null;
+    let markupAmount = null;
+    let totalCost = null;
+    try {
+      const isInternational = String(corrected.country || 'US').toUpperCase() !== 'US';
+      const isNonStandard = (!isInternational && acExtracted && acExtracted.standard === false);
+
+      const qtyStandard = (!isInternational && !isNonStandard) ? 1 : 0;
+      const qtyNonStandard = isNonStandard ? 1 : 0;
+      const qtyInternational = isInternational ? 1 : 0;
+
+      const costParams = {
+        documentClass,
+        layout,
+        productionTime,
+        envelope,
+        color,
+        paperType,
+        printOption,
+        mailClass,
+        quantity: String(qtyStandard),
+        nonStandardQuantity: String(qtyNonStandard),
+        internationalQuantity: String(qtyInternational),
+        numberOfPages: String(pageCount),
+        paymentType: 'User Credit'
+      };
+
+      const costResp = await click2mailCostEstimate(costParams);
+      const extracted = extractClick2MailCostEstimateFromXml(costResp.parsed);
+      if (extracted && Number.isFinite(Number(extracted.amount))) {
+        costAmount = Number(extracted.amount);
+      }
+
+      if (!(costAmount != null && costAmount > 0)) {
+        throw new Error('Unable to calculate cost estimate');
+      }
+
+      // Platform markup
+      const pct = Math.max(0, Number(AI_MAIL_MARKUP_PERCENT || 0));
+      const flat = Math.max(0, Number(AI_MAIL_MARKUP_FLAT || 0));
+      markupAmount = flat + (pct > 0 ? (costAmount * pct / 100.0) : 0);
+      totalCost = costAmount + markupAmount;
+
+      if (!(totalCost != null && Number.isFinite(Number(totalCost)) && totalCost > 0)) {
+        throw new Error('Unable to calculate total cost');
+      }
+
+      try {
+        await pool.execute(
+          'UPDATE ai_mail_sends SET cost_estimate = ?, markup_amount = ?, total_cost = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [costAmount, markupAmount || 0, totalCost, sendRowId]
+        );
+      } catch {}
+    } catch (e) {
+      const msg = e?.message || 'Cost estimate failed';
+      try {
+        await pool.execute(
+          'UPDATE ai_mail_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [msg, sendRowId]
+        );
+      } catch {}
+      return res.status(502).json({ success: false, message: msg });
+    }
+
+    // Charge the user (skip if already charged on a retry)
+    let billingId = null;
+    let amountToCharge = (totalCost != null && Number.isFinite(Number(totalCost))) ? Number(totalCost) : Number(costAmount || 0);
+    if (!Number.isFinite(amountToCharge) || amountToCharge <= 0) amountToCharge = 0;
+
+    try {
+      const [rows] = await pool.execute('SELECT billing_history_id FROM ai_mail_sends WHERE id = ? LIMIT 1', [sendRowId]);
+      billingId = rows && rows[0] && rows[0].billing_history_id ? Number(rows[0].billing_history_id) : null;
+    } catch {}
+
+    if (!billingId) {
+      const magnusUserId = await loadMagnusUserIdByLocalUserId(userId);
+      if (!magnusUserId) {
+        const msg = 'MagnusBilling user id not configured for this account';
+        try {
+          await pool.execute(
+            'UPDATE ai_mail_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+            [msg, sendRowId]
+          );
+        } catch {}
+        return res.status(500).json({ success: false, message: msg });
+      }
+
+      const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+      const descRaw = `AI physical mail - ${documentClass || 'Mail'} - ${corrected.city || ''} ${corrected.state || ''} ${corrected.postalCode || ''}`.trim();
+      const description = descRaw.substring(0, 255);
+
+      const charge = await applyMagnusCreditDelta({
+        localUserId: userId,
+        magnusUserId,
+        amountDelta: -Math.abs(amountToCharge),
+        description,
+        httpsAgent: magnusBillingAgent,
+        hostHeader,
+        label: 'ai.mail'
+      });
+
+      if (!charge || charge.ok !== true) {
+        const reason = charge?.reason === 'insufficient_funds' ? 'Insufficient balance' : (charge?.reason || 'Charge failed');
+        const msg = `Mail charge failed: ${reason}`;
+        try {
+          await pool.execute(
+            'UPDATE ai_mail_sends SET status = \'failed\', error = ?, billing_history_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+            [msg, charge?.billingId || null, sendRowId]
+          );
+        } catch {}
+        return res.status(402).json({ success: false, message: msg });
+      }
+
+      billingId = charge.billingId;
+
+      try {
+        await pool.execute(
+          `UPDATE ai_mail_sends
+           SET billing_history_id = ?,
+               refund_status = 'none',
+               refund_amount = NULL,
+               refund_billing_history_id = NULL,
+               refund_error = NULL,
+               refunded_at = NULL,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? LIMIT 1`,
+          [billingId, sendRowId]
+        );
+      } catch {}
+    }
+
+    // Create + submit Click2Mail batch
+    let batchId = null;
+    let trackingNumber = null;
+    let trackingStatus = null;
+    let trackingStatusDate = null;
+    let trackingStatusLocation = null;
+
+    const pdfFilename = `mail-${sendRowId}.pdf`;
+    const xmlFilename = `mail-${sendRowId}.xml`;
+
+    const payloadLog = {
+      product: { documentClass, layout, productionTime, envelope, color, paperType, printOption, mailClass },
+      pageCount,
+      cost_estimate: costAmount,
+      markup_amount: markupAmount,
+      total_cost: totalCost,
+      billing_history_id: billingId,
+      amount_charged: amountToCharge,
+      content: {
+        subject: subject || null,
+        body_preview: String(bodyRaw || '').slice(0, 2000)
+      }
+    };
+
+    try {
+      const batch = await click2mailBatchCreate();
+      batchId = batch.batchId;
+      if (!batchId) throw new Error('Click2Mail batch id missing');
+
+      await click2mailBatchUploadPdf(batchId, pdfOut, { filename: pdfFilename });
+
+      const returnName = String(returnAddrRow.name || '').trim();
+      const returnOrg = String(returnAddrRow.organization || '').trim();
+      const returnAddress1 = String(returnAddrRow.address1 || '').trim();
+      const returnAddress2 = String(returnAddrRow.address2 || '').trim();
+      const returnCity = String(returnAddrRow.city || '').trim();
+      const returnState = String(returnAddrRow.state || '').trim();
+      const returnPostal = String(returnAddrRow.postal_code || '').trim();
+
+      const batchXml =
+        `<?xml version="1.0" encoding="UTF-8"?>` +
+        `<batch xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">` +
+          `<filename>${xmlEscape(pdfFilename)}</filename>` +
+          `<appSignature>${xmlEscape(CLICK2MAIL_APP_SIGNATURE)}</appSignature>` +
+          `<job>` +
+            `<startingPage>1</startingPage>` +
+            `<endingPage>${xmlEscape(String(pageCount))}</endingPage>` +
+            `<printProductionOptions>` +
+              `<documentClass>${xmlEscape(documentClass)}</documentClass>` +
+              `<layout>${xmlEscape(layout)}</layout>` +
+              `<productionTime>${xmlEscape(productionTime)}</productionTime>` +
+              `<envelope>${xmlEscape(envelope)}</envelope>` +
+              `<color>${xmlEscape(color)}</color>` +
+              `<paperType>${xmlEscape(paperType)}</paperType>` +
+              `<printOption>${xmlEscape(printOption)}</printOption>` +
+              `<mailClass>${xmlEscape(mailClass)}</mailClass>` +
+            `</printProductionOptions>` +
+            `<returnAddress>` +
+              (returnName ? `<name>${xmlEscape(returnName)}</name>` : '') +
+              (returnOrg ? `<organization>${xmlEscape(returnOrg)}</organization>` : '') +
+              `<address1>${xmlEscape(returnAddress1)}</address1>` +
+              (returnAddress2 ? `<address2>${xmlEscape(returnAddress2)}</address2>` : '<address2></address2>') +
+              `<city>${xmlEscape(returnCity)}</city>` +
+              `<state>${xmlEscape(returnState)}</state>` +
+              `<postalCode>${xmlEscape(returnPostal)}</postalCode>` +
+            `</returnAddress>` +
+            `<recipients>` +
+              `<address>` +
+                (corrected.name ? `<name>${xmlEscape(corrected.name)}</name>` : '') +
+                (corrected.organization ? `<organization>${xmlEscape(corrected.organization)}</organization>` : '') +
+                `<address1>${xmlEscape(corrected.address1)}</address1>` +
+                (corrected.address2 ? `<address2>${xmlEscape(corrected.address2)}</address2>` : '<address2></address2>') +
+                (corrected.address3 ? `<address3>${xmlEscape(corrected.address3)}</address3>` : '<address3></address3>') +
+                `<city>${xmlEscape(corrected.city)}</city>` +
+                `<state>${xmlEscape(corrected.state)}</state>` +
+                `<postalCode>${xmlEscape(corrected.postalCode)}</postalCode>` +
+                `<country>${xmlEscape(corrected.country)}</country>` +
+                `<c2m_uniqueid/>` +
+              `</address>` +
+            `</recipients>` +
+          `</job>` +
+        `</batch>`;
+
+      await click2mailBatchUploadXml(batchId, batchXml, { filename: xmlFilename });
+
+      const submit = await click2mailBatchSubmit(batchId);
+
+      // Best-effort: grab tracking (may not be available immediately)
+      let tracking = null;
+      try {
+        const tr = await click2mailBatchTracking(batchId, trackingType || 'impb');
+        tracking = tr?.extracted || null;
+        const latest = tracking ? pickLatestTrackingItem(tracking.items) : null;
+        if (latest && latest.barCode) {
+          trackingNumber = String(latest.barCode).trim() || null;
+          trackingStatus = String(latest.status || '').trim() || null;
+          trackingStatusLocation = String(latest.statusLocation || '').trim() || null;
+          trackingStatusDate = parseClick2MailDateTimeToMysql(latest.dateTime);
+        }
+      } catch {}
+
+      payloadLog.click2mail = {
+        batchCreate: { batchId },
+        submitStatus: submit?.status,
+        tracking
+      };
+
+      try {
+        await pool.execute(
+          `UPDATE ai_mail_sends
+           SET batch_id = ?, status = 'submitted',
+               tracking_number = ?, tracking_status = ?, tracking_status_date = ?, tracking_status_location = ?,
+               raw_payload = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? LIMIT 1`,
+          [
+            batchId,
+            trackingNumber,
+            trackingStatus,
+            trackingStatusDate,
+            trackingStatusLocation,
+            JSON.stringify(payloadLog),
+            sendRowId
+          ]
+        );
+      } catch {}
+
+      return res.json({
+        success: true,
+        dedupe_key: dedupeKey,
+        already_sent: false,
+        batch_id: batchId,
+        tracking_number: trackingNumber,
+        cost_estimate: costAmount,
+        markup_amount: markupAmount,
+        total_cost: totalCost
+      });
+    } catch (e) {
+      // Build a more helpful error message from Click2Mail (often returns XML details).
+      const httpStatus = e?.response?.status;
+      const respText = (typeof e?.response?.data === 'string') ? String(e.response.data) : '';
+
+      let detail = '';
+      try {
+        const parsedErr = click2mailParseXml(respText);
+        const d = String(pickFirst(parsedErr, [
+          'error.description',
+          'errors.error.description',
+          'description',
+          'message',
+          'faultstring',
+          'faultString'
+        ]) || '').trim();
+        if (d) detail = d;
+      } catch {}
+
+      let msg = detail || (e?.message || 'Click2Mail send failed');
+      if (httpStatus && !/\(HTTP\s*\d+\)/i.test(msg) && !/status code\s*\d+/i.test(msg)) {
+        msg = `${msg} (HTTP ${httpStatus})`;
+      }
+
+      const responseSnippet = respText ? respText.slice(0, 2000) : '';
+      if (responseSnippet) {
+        payloadLog.click2mail_error = { status: httpStatus || null, body: responseSnippet };
+      } else if (httpStatus) {
+        payloadLog.click2mail_error = { status: httpStatus };
+      }
+
+      // If we already charged the user, attempt an automatic refund.
+      let refundAttempted = false;
+      let refundOk = false;
+      let refundBillingId = null;
+      let refundError = null;
+
+      try {
+        if (billingId && amountToCharge && Number.isFinite(Number(amountToCharge)) && Number(amountToCharge) > 0) {
+          refundAttempted = true;
+
+          // Best-effort claim to avoid double refunds (uses refund_status state).
+          let canRefund = true;
+          try {
+            const [r] = await pool.execute(
+              `UPDATE ai_mail_sends
+               SET refund_status = 'pending',
+                   refund_amount = ?,
+                   refund_error = NULL,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?
+                 AND (refund_status = 'none' OR refund_status = 'failed')
+                 AND billing_history_id IS NOT NULL
+               LIMIT 1`,
+              [Math.abs(Number(amountToCharge)), sendRowId]
+            );
+            canRefund = !!(r && r.affectedRows);
+          } catch {
+            canRefund = true;
+          }
+
+          if (canRefund) {
+            const magnusUserId = await loadMagnusUserIdByLocalUserId(userId);
+            if (!magnusUserId) {
+              refundError = 'Refund failed: MagnusBilling user id not configured';
+            } else {
+              const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+              const refundDescRaw = `Refund: AI mail send failed (mail_id ${sendRowId})`;
+              const refundDescription = refundDescRaw.substring(0, 255);
+
+              const refund = await applyMagnusCreditDelta({
+                localUserId: userId,
+                magnusUserId,
+                amountDelta: Math.abs(Number(amountToCharge)),
+                description: refundDescription,
+                httpsAgent: magnusBillingAgent,
+                hostHeader,
+                label: 'ai.mail.refund'
+              });
+
+              if (refund && refund.ok === true) {
+                refundOk = true;
+                refundBillingId = refund.billingId;
+              } else {
+                refundOk = false;
+                refundError = refund?.reason || 'Refund failed';
+              }
+            }
+
+            // Persist refund state (best-effort)
+            try {
+              if (refundOk) {
+                await pool.execute(
+                  `UPDATE ai_mail_sends
+                   SET refund_status = 'completed',
+                       refund_billing_history_id = ?,
+                       refunded_at = NOW(),
+                       billing_history_id = NULL,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? LIMIT 1`,
+                  [refundBillingId, sendRowId]
+                );
+              } else {
+                await pool.execute(
+                  `UPDATE ai_mail_sends
+                   SET refund_status = 'failed',
+                       refund_error = ?,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? LIMIT 1`,
+                  [String(refundError || 'Refund failed').slice(0, 2000), sendRowId]
+                );
+              }
+            } catch {}
+          } else {
+            refundAttempted = false;
+          }
+        }
+      } catch (refundErr) {
+        refundAttempted = true;
+        refundOk = false;
+        refundError = String(refundErr?.message || refundErr);
+        try {
+          await pool.execute(
+            `UPDATE ai_mail_sends
+             SET refund_status = 'failed',
+                 refund_error = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? LIMIT 1`,
+            [String(refundError || 'Refund failed').slice(0, 2000), sendRowId]
+          );
+        } catch {}
+      }
+
+      if (refundAttempted) {
+        payloadLog.refund = {
+          attempted: true,
+          ok: refundOk,
+          amount: Math.abs(Number(amountToCharge || 0)) || 0,
+          refund_billing_history_id: refundBillingId || null,
+          error: refundOk ? null : (refundError || null)
+        };
+      }
+
+      const msgForRow = msg;
+
+      if (DEBUG) console.warn('[ai.agent.send-custom-physical-mail] error:', msgForRow);
+
+      try {
+        await pool.execute(
+          `UPDATE ai_mail_sends
+           SET status = 'failed',
+               error = ?,
+               batch_id = COALESCE(batch_id, ?),
+               raw_payload = ?,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? LIMIT 1`,
+          [String(msgForRow).slice(0, 2000), batchId, JSON.stringify(payloadLog), sendRowId]
+        );
+      } catch {}
+
+      return res.status(502).json({
+        success: false,
+        message: msgForRow,
+        charged: !!billingId,
+        charge_billing_history_id: billingId || null,
+        refunded: refundOk,
+        refund_billing_history_id: refundBillingId || null
+      });
+    }
+  } catch (e) {
+    const msg = e?.message || 'Failed to send physical mail';
+    if (DEBUG) console.warn('[ai.agent.send-custom-physical-mail] error:', msg);
+    if (sendRowId && pool) {
+      try {
+        await pool.execute(
+          'UPDATE ai_mail_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [msg, sendRowId]
+        );
+      } catch {}
+    }
+    return res.status(500).json({ success: false, message: msg });
+  }
+});
 
 // Agent-auth endpoint called by the Pipecat agent runtime.
 // Sends a physical letter via Click2Mail (batch API).

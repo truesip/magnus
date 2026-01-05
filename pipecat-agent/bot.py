@@ -4,6 +4,7 @@ import inspect
 import io
 import json
 import os
+import re
 import uuid
 import wave
 from typing import Any, Optional
@@ -285,8 +286,14 @@ async def bot(session_args: Any):
 
     Required env vars (provided via Pipecat secret set):
       - DEEPGRAM_API_KEY
-      - CARTESIA_API_KEY
       - XAI_API_KEY
+
+    Required env vars for audio TTS (phone calls and HeyGen video meetings):
+      - CARTESIA_API_KEY
+
+    Required env vars for Akool video meetings (VIDEO_AVATAR_PROVIDER=akool):
+      - AKOOL_API_KEY
+      - AKOOL_AVATAR_ID
 
     Optional env vars:
       - CARTESIA_VOICE_ID (preferred; per-agent)
@@ -303,7 +310,6 @@ async def bot(session_args: Any):
     """
 
     deepgram_key = _require("DEEPGRAM_API_KEY")
-    cartesia_key = _require("CARTESIA_API_KEY")
     xai_key = _require("XAI_API_KEY")
 
     greeting = _env("AGENT_GREETING", "").strip()
@@ -322,8 +328,10 @@ async def bot(session_args: Any):
 
     tools = []
     has_send_document_tool = False
+    has_send_custom_email_tool = False
     has_send_video_meeting_tool = False
     has_send_physical_mail_tool = False
+    has_send_custom_physical_mail_tool = False
     has_transfer_tool = False
     has_end_call_tool = False
 
@@ -360,7 +368,7 @@ async def bot(session_args: Any):
                 "type": "function",
                 "function": {
                     "name": "send_document",
-                    "description": "Email a templated document to the caller using the business owner's SMTP settings and the agent's default template.",
+                    "description": "Email a templated document (DOCX/PDF attachment) to the caller using the business owner's SMTP settings and the agent's default template.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -383,6 +391,35 @@ async def bot(session_args: Any):
             }
         )
         has_send_document_tool = True
+
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_custom_email",
+                    "description": "Send a custom email to the caller (no template, no attachments). Use this when the caller asks you to email them information.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "to_email": {
+                                "type": "string",
+                                "description": "Recipient email address",
+                            },
+                            "subject": {
+                                "type": "string",
+                                "description": "Email subject (optional)",
+                            },
+                            "body": {
+                                "type": "string",
+                                "description": "Plain-text email body",
+                            },
+                        },
+                        "required": ["to_email", "body"],
+                    },
+                },
+            }
+        )
+        has_send_custom_email_tool = True
 
         tools.append(
             {
@@ -440,13 +477,46 @@ async def bot(session_args: Any):
         )
         has_send_physical_mail_tool = True
 
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_custom_physical_mail",
+                    "description": "Send a custom physical letter via USPS (no template). Use this when the caller asks you to mail them a letter with custom text.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "to_name": {"type": "string", "description": "Recipient name"},
+                            "to_organization": {"type": "string", "description": "Recipient organization (optional)"},
+                            "to_address1": {"type": "string", "description": "Street address line 1"},
+                            "to_address2": {"type": "string", "description": "Street address line 2 (optional)"},
+                            "to_address3": {"type": "string", "description": "Street address line 3 (optional)"},
+                            "to_city": {"type": "string", "description": "City"},
+                            "to_state": {"type": "string", "description": "State (2-letter for US)"},
+                            "to_postal_code": {"type": "string", "description": "ZIP / postal code"},
+                            "to_country": {"type": "string", "description": "Country code (default: US)"},
+                            "subject": {"type": "string", "description": "Letter subject/title (optional)"},
+                            "body": {"type": "string", "description": "Letter body text"},
+                        },
+                        "required": ["to_address1", "to_city", "to_state", "to_postal_code", "body"],
+                    },
+                },
+            }
+        )
+        has_send_custom_physical_mail_tool = True
+
     # Extend the user-provided prompt with minimal tool guidance.
     prompt = base_prompt
+    if has_send_custom_email_tool:
+        prompt += (
+            "\n\nIf the caller asks you to email them information, collect their email address and confirm what they want sent. "
+            "Then call the send_custom_email tool with to_email, an optional subject, and a clear plain-text body. "
+            "After the tool returns, confirm whether the email was sent."
+        )
     if has_send_document_tool:
         prompt += (
-            "\n\nYou can email the caller a document when requested. "
-            "Collect their email and any details needed for the template placeholders, "
-            "then call the send_document tool with to_email and variables. "
+            "\n\nIf the caller asks for a formal document attachment that must be generated from a template, "
+            "collect their email and any details needed for template placeholders, then call the send_document tool. "
             "After the tool returns, confirm whether the email was sent."
         )
     if has_send_video_meeting_tool:
@@ -455,14 +525,21 @@ async def bot(session_args: Any):
             "and call the send_video_meeting_link tool with to_email. "
             "After the tool returns, tell them to open the link from their email to join."
         )
+    if has_send_custom_physical_mail_tool:
+        prompt += (
+            "\n\nIf the caller asks you to mail them a physical letter with custom text, collect their name and full mailing address "
+            "(street, city, state, ZIP) and confirm the letter content you will send. Then call the send_custom_physical_mail tool "
+            "with the address fields and body. After the tool returns, if success is true confirm the mail was submitted and share the "
+            "tracking number if present. If success is false, clearly say the mail was NOT sent/submitted and do not claim it was sent. "
+            "Do not discuss internal billing, costs, or refunds with the caller."
+        )
     if has_send_physical_mail_tool:
         prompt += (
-            "\n\nIf the caller asks you to mail them a physical letter or document, collect their name and full mailing address "
-            "(street, city, state, ZIP) and any details needed for the template placeholders, then call the "
-            "send_physical_mail tool with the address fields and variables. "
-            "After the tool returns, check the tool result: if success is true, confirm the mail was submitted and "
-            "share the tracking number if present. If success is false, clearly say the mail was NOT sent/submitted "
-            "and do not claim it was sent. Do not discuss internal billing, costs, or refunds with the caller."
+            "\n\nIf the caller asks you to mail them a templated physical document/letter, collect their name and full mailing address "
+            "(street, city, state, ZIP) and any details needed for the template placeholders, then call the send_physical_mail tool. "
+            "After the tool returns, check the tool result: if success is true, confirm the mail was submitted and share the tracking number "
+            "if present. If success is false, clearly say the mail was NOT sent/submitted and do not claim it was sent. Do not discuss internal "
+            "billing, costs, or refunds with the caller."
         )
     if has_end_call_tool:
         prompt += (
@@ -495,6 +572,16 @@ async def bot(session_args: Any):
 
     session_mode = _extract_session_mode(body)
     is_video_meeting = session_mode == "video_meeting"
+
+    # Video avatar selection (video meetings only)
+    video_avatar_provider = _env("VIDEO_AVATAR_PROVIDER", "heygen").strip().lower()
+    if not video_avatar_provider:
+        video_avatar_provider = "heygen"
+    if not is_video_meeting:
+        video_avatar_provider = "none"
+
+    # Shared state for Akool -> audio-only failover (used to re-enable TTS).
+    akool_audio_only_fallback: dict[str, Any] = {"active": False, "reason": ""}
 
     # Used for per-session transcript logging back to the portal
     call_id = str(dialin_settings.call_id) if dialin_settings else ""
@@ -607,6 +694,66 @@ async def bot(session_args: Any):
                 await params.result_callback({"success": False, "message": str(e)})
 
         llm.register_function("send_document", _send_document)
+
+    if has_send_custom_email_tool:
+        async def _send_custom_email(params: FunctionCallParams) -> None:
+            args = dict(params.arguments or {})
+            to_email = str(args.get("to_email") or args.get("toEmail") or args.get("email") or "").strip()
+            subject = str(args.get("subject") or "").strip()
+            body = str(args.get("body") or args.get("text") or args.get("message") or "").strip()
+
+            if not to_email:
+                await params.result_callback({"success": False, "message": "to_email is required"})
+                return
+            if not body:
+                await params.result_callback({"success": False, "message": "body is required"})
+                return
+
+            if not portal_base_url or not portal_token:
+                await params.result_callback({
+                    "success": False,
+                    "message": "Portal integration not configured (missing PORTAL_BASE_URL or PORTAL_AGENT_ACTION_TOKEN)",
+                })
+                return
+
+            payload: dict[str, Any] = {
+                "to_email": to_email,
+                "text": body,
+            }
+            if subject:
+                payload["subject"] = subject
+
+            if dialin_settings:
+                payload["call_id"] = str(dialin_settings.call_id)
+                payload["call_domain"] = str(dialin_settings.call_domain)
+
+            url = f"{portal_base_url}/api/ai/agent/send-email"
+            headers = {
+                "Authorization": f"Bearer {portal_token}",
+                "Accept": "application/json",
+            }
+
+            try:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = {"success": False, "message": resp.text}
+
+                if resp.status_code >= 400 or (isinstance(data, dict) and data.get("success") is False):
+                    await params.result_callback({
+                        "success": False,
+                        "status_code": resp.status_code,
+                        "response": data,
+                    })
+                    return
+
+                await params.result_callback({"success": True, "response": data})
+            except Exception as e:
+                await params.result_callback({"success": False, "message": str(e)})
+
+        llm.register_function("send_custom_email", _send_custom_email)
 
     if has_send_video_meeting_tool:
         async def _send_video_meeting_link(params: FunctionCallParams) -> None:
@@ -786,15 +933,150 @@ async def bot(session_args: Any):
 
         llm.register_function("send_physical_mail", _send_physical_mail)
 
-    voice_id = await _resolve_cartesia_voice_id(api_key=cartesia_key)
-    tts = CartesiaTTSService(
-        api_key=cartesia_key,
-        voice_id=voice_id,
-        cartesia_version=_env("CARTESIA_VERSION", "2025-04-16").strip() or "2025-04-16",
-        model=_env("CARTESIA_MODEL", "sonic-3").strip() or "sonic-3",
-        sample_rate=sample_rate,
-        text_filters=[MarkdownTextFilter()],
-    )
+    if has_send_custom_physical_mail_tool:
+        async def _send_custom_physical_mail(params: FunctionCallParams) -> None:
+            args = dict(params.arguments or {})
+
+            # Address fields
+            to_address1 = str(args.get("to_address1") or args.get("toAddress1") or args.get("address1") or "").strip()
+            to_city = str(args.get("to_city") or args.get("toCity") or args.get("city") or "").strip()
+            to_state = str(args.get("to_state") or args.get("toState") or args.get("state") or "").strip()
+            to_postal_code = str(
+                args.get("to_postal_code")
+                or args.get("toPostalCode")
+                or args.get("postal_code")
+                or args.get("postalCode")
+                or args.get("zip")
+                or ""
+            ).strip()
+
+            to_name = str(args.get("to_name") or args.get("toName") or args.get("name") or "").strip()
+            to_organization = str(args.get("to_organization") or args.get("toOrganization") or args.get("organization") or "").strip()
+            to_address2 = str(args.get("to_address2") or args.get("toAddress2") or args.get("address2") or "").strip()
+            to_address3 = str(args.get("to_address3") or args.get("toAddress3") or args.get("address3") or "").strip()
+            to_country = str(args.get("to_country") or args.get("toCountry") or args.get("country") or "US").strip()
+
+            subject = str(args.get("subject") or "").strip()
+            body = str(args.get("body") or args.get("text") or args.get("message") or "").strip()
+
+            if not to_address1 or not to_city or not to_state or not to_postal_code:
+                await params.result_callback({
+                    "success": False,
+                    "message": "to_address1, to_city, to_state, and to_postal_code are required",
+                })
+                return
+            if not body:
+                await params.result_callback({"success": False, "message": "body is required"})
+                return
+
+            if not portal_base_url or not portal_token:
+                await params.result_callback({
+                    "success": False,
+                    "message": "Portal integration not configured (missing PORTAL_BASE_URL or PORTAL_AGENT_ACTION_TOKEN)",
+                })
+                return
+
+            payload: dict[str, Any] = {
+                "to_address1": to_address1,
+                "to_city": to_city,
+                "to_state": to_state,
+                "to_postal_code": to_postal_code,
+                "to_country": to_country or "US",
+                "body": body,
+            }
+
+            if subject:
+                payload["subject"] = subject
+            if to_name:
+                payload["to_name"] = to_name
+            if to_organization:
+                payload["to_organization"] = to_organization
+            if to_address2:
+                payload["to_address2"] = to_address2
+            if to_address3:
+                payload["to_address3"] = to_address3
+
+            if dialin_settings:
+                payload["call_id"] = str(dialin_settings.call_id)
+                payload["call_domain"] = str(dialin_settings.call_domain)
+
+            url = f"{portal_base_url}/api/ai/agent/send-custom-physical-mail"
+            headers = {
+                "Authorization": f"Bearer {portal_token}",
+                "Accept": "application/json",
+            }
+
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = {"success": False, "message": resp.text}
+
+                if resp.status_code >= 400 or (isinstance(data, dict) and data.get("success") is False):
+                    err_msg = ""
+                    if isinstance(data, dict):
+                        err_msg = str(data.get("message") or data.get("error") or "").strip()
+                    if not err_msg:
+                        err_msg = str(resp.text or "").strip()
+                    if not err_msg:
+                        err_msg = "Physical mail request failed"
+
+                    await params.result_callback({
+                        "success": False,
+                        "status_code": resp.status_code,
+                        "message": err_msg,
+                    })
+                    return
+
+                out: dict[str, Any] = {"success": True}
+                if isinstance(data, dict):
+                    out["already_sent"] = bool(data.get("already_sent") or data.get("alreadySent") or False)
+                    batch_id = data.get("batch_id") or data.get("batchId")
+                    tracking_number = data.get("tracking_number") or data.get("trackingNumber")
+                    if batch_id:
+                        out["batch_id"] = str(batch_id)
+                    if tracking_number:
+                        out["tracking_number"] = str(tracking_number)
+
+                await params.result_callback(out)
+            except Exception as e:
+                await params.result_callback({"success": False, "message": str(e)})
+
+        llm.register_function("send_custom_physical_mail", _send_custom_physical_mail)
+
+    # TTS is required for phone calls and for HeyGen video meetings.
+    # For Akool video meetings, the avatar generates audio/video from the stream messages.
+    #
+    # NOTE: If CARTESIA_API_KEY is present, we also enable TTS for Akool meetings so we can
+    # fall back to audio-only if Akool fails (quota, network, etc.).
+    tts = None
+    if is_video_meeting and video_avatar_provider == "akool":
+        cartesia_key = _env("CARTESIA_API_KEY", "").strip()
+        if cartesia_key:
+            voice_id = await _resolve_cartesia_voice_id(api_key=cartesia_key)
+            tts = CartesiaTTSService(
+                api_key=cartesia_key,
+                voice_id=voice_id,
+                cartesia_version=_env("CARTESIA_VERSION", "2025-04-16").strip() or "2025-04-16",
+                model=_env("CARTESIA_MODEL", "sonic-3").strip() or "sonic-3",
+                sample_rate=sample_rate,
+                text_filters=[MarkdownTextFilter()],
+            )
+        else:
+            logger.warning("CARTESIA_API_KEY not set; Akool audio-only fallback will be unavailable")
+    else:
+        cartesia_key = _require("CARTESIA_API_KEY")
+        voice_id = await _resolve_cartesia_voice_id(api_key=cartesia_key)
+        tts = CartesiaTTSService(
+            api_key=cartesia_key,
+            voice_id=voice_id,
+            cartesia_version=_env("CARTESIA_VERSION", "2025-04-16").strip() or "2025-04-16",
+            model=_env("CARTESIA_MODEL", "sonic-3").strip() or "sonic-3",
+            sample_rate=sample_rate,
+            text_filters=[MarkdownTextFilter()],
+        )
 
     # Conversation context (OpenAI-compatible)
     messages = [{"role": "system", "content": prompt}] if prompt else []
@@ -903,33 +1185,161 @@ async def bot(session_args: Any):
 
     heygen_http_session = None
     heygen_service = None
+    akool_service = None
 
-    if is_video_meeting:
+    if is_video_meeting and video_avatar_provider == "heygen":
         heygen_key = _require("HEYGEN_API_KEY")
         try:
             import aiohttp
             from pipecat.frames.frames import UserStoppedSpeakingFrame
             from pipecat.services.heygen.api_interactive_avatar import NewSessionRequest
-            from pipecat.services.heygen.video import HeyGenVideoService
+            from pipecat.services.heygen.video import AVATAR_VAD_STOP_SECS, HeyGenVideoService
         except Exception as e:
             raise RuntimeError("HeyGen dependencies missing. Install pipecat-ai[heygen].") from e
 
         avatar_id = _env("HEYGEN_AVATAR_ID", "Shawn_Therapist_public").strip() or "Shawn_Therapist_public"
 
         class ContinuousListeningHeyGenVideoService(HeyGenVideoService):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._audio_only_fallback = False
+                self._fallback_reason = ""
+                self._fallback_shutdown_task: asyncio.Task | None = None
+
+            async def _enter_audio_only_fallback(self, reason: str, exception: Exception | None = None):
+                if self._audio_only_fallback:
+                    return
+
+                self._audio_only_fallback = True
+                self._fallback_reason = str(reason or "").strip()
+
+                msg = (
+                    "HeyGen avatar unavailable, falling back to audio-only for this meeting"
+                    + (f": {self._fallback_reason}" if self._fallback_reason else "")
+                )
+                if exception:
+                    msg += f" ({exception})"
+                logger.warning(msg)
+
+                async def _shutdown():
+                    # Best-effort: stop HeyGen connections/tasks to avoid noisy retries.
+                    try:
+                        await self._end_conversation()
+                    except Exception:
+                        pass
+                    try:
+                        await self._cancel_send_task()
+                    except Exception:
+                        pass
+
+                if not self._fallback_shutdown_task:
+                    try:
+                        self._fallback_shutdown_task = self.create_task(_shutdown(), name="heygen_fallback_shutdown")
+                    except Exception:
+                        try:
+                            self._fallback_shutdown_task = asyncio.create_task(_shutdown())
+                        except Exception:
+                            pass
+
             async def start(self, frame):
-                await super().start(frame)
-                # Keep a continuous "listening" gesture when idle.
                 try:
-                    await self._client.start_agent_listening()
-                except Exception:
-                    pass
+                    await super().start(frame)
+                except Exception as e:
+                    await self._enter_audio_only_fallback(f"start failed: {e}", exception=e)
+                    return
+
+                # Keep a continuous "listening" gesture when idle.
+                if not self._audio_only_fallback:
+                    try:
+                        await self._client.start_agent_listening()
+                    except Exception:
+                        pass
+
+            async def _on_participant_video_frame(self, video_frame):
+                if self._audio_only_fallback:
+                    return
+                await super()._on_participant_video_frame(video_frame)
+
+            async def _on_participant_audio_data(self, audio_frame):
+                if self._audio_only_fallback:
+                    return
+                await super()._on_participant_audio_data(audio_frame)
+
+            async def _send_task_handler(self):
+                # Override to catch websocket/livekit send errors and fail over to audio-only.
+                sample_rate = self._client.out_sample_rate
+                audio_buffer = bytearray()
+                self._event_id = None
+
+                while True:
+                    try:
+                        frame = await asyncio.wait_for(self._queue.get(), timeout=AVATAR_VAD_STOP_SECS)
+                        if self._audio_only_fallback:
+                            return
+                        if self._is_interrupting:
+                            break
+                        if isinstance(frame, TTSAudioRawFrame):
+                            # starting the new inference
+                            if self._event_id is None:
+                                self._event_id = str(frame.id)
+
+                            audio = await self._resampler.resample(frame.audio, frame.sample_rate, sample_rate)
+                            audio_buffer.extend(audio)
+                            while len(audio_buffer) >= self._audio_chunk_size:
+                                chunk = audio_buffer[: self._audio_chunk_size]
+                                audio_buffer = audio_buffer[self._audio_chunk_size :]
+                                try:
+                                    await self._client.agent_speak(bytes(chunk), self._event_id)
+                                except Exception as e:
+                                    await self._enter_audio_only_fallback(f"agent_speak failed: {e}", exception=e)
+                                    return
+                        self._queue.task_done()
+                    except asyncio.TimeoutError:
+                        # Bot has stopped speaking
+                        if self._event_id is not None:
+                            try:
+                                await self._client.agent_speak_end(self._event_id)
+                            except Exception as e:
+                                await self._enter_audio_only_fallback(f"agent_speak_end failed: {e}", exception=e)
+                                return
+                            self._event_id = None
+                            audio_buffer.clear()
+                    except Exception as e:
+                        await self._enter_audio_only_fallback(f"send loop error: {e}", exception=e)
+                        return
 
             async def process_frame(self, frame, direction: FrameDirection):
+                # Audio-only fallback: passthrough everything (let Daily output play TTS audio).
+                if self._audio_only_fallback:
+                    await self.push_frame(frame, direction)
+                    return
+
+                # If the internal send task crashed, switch to audio-only.
+                if self._send_task and self._send_task.done():
+                    exc = None
+                    try:
+                        exc = self._send_task.exception()
+                    except Exception:
+                        exc = None
+                    await self._enter_audio_only_fallback(
+                        f"send task ended unexpectedly: {exc or 'unknown'}",
+                        exception=exc if isinstance(exc, Exception) else None,
+                    )
+                    await self.push_frame(frame, direction)
+                    return
+
                 # Don't send stop_listening; keep the idle listening gesture continuous.
                 if isinstance(frame, UserStoppedSpeakingFrame):
                     await self.push_frame(frame, direction)
                     return
+
+                # If we're supposed to be using HeyGen but we're not connected, fail over.
+                if isinstance(frame, TTSAudioRawFrame):
+                    if not getattr(self._client, "_connected", False):
+                        await self._enter_audio_only_fallback("websocket not connected")
+                        await self.push_frame(frame, direction)
+                        return
+
                 await super().process_frame(frame, direction)
 
         heygen_http_session = aiohttp.ClientSession()
@@ -939,6 +1349,507 @@ async def bot(session_args: Any):
             session_request=NewSessionRequest(avatar_id=avatar_id, version="v2"),
         )
 
+    if is_video_meeting and video_avatar_provider == "akool":
+        try:
+            from livekit import rtc
+            from livekit.rtc._proto.video_frame_pb2 import VideoBufferType
+        except Exception as e:
+            raise RuntimeError("Akool LiveKit dependencies missing. Install pipecat-ai[heygen] or livekit.") from e
+
+        from pipecat.frames.frames import (
+            CancelFrame,
+            EndFrame as PipecatEndFrame,
+            Frame,
+            InterruptionFrame,
+            LLMFullResponseEndFrame,
+            LLMTextFrame,
+            OutputTransportReadyFrame,
+            SpeechOutputAudioRawFrame,
+            StartFrame,
+            TTSTextFrame as PipecatTTSTextFrame,
+            UserStartedSpeakingFrame,
+            OutputImageRawFrame,
+        )
+
+        akool_api_key = _require("AKOOL_API_KEY")
+        akool_avatar_id = _require("AKOOL_AVATAR_ID")
+
+        akool_base_url = (_env("AKOOL_API_BASE_URL", "https://openapi.akool.com").strip() or "https://openapi.akool.com").rstrip("/")
+        akool_voice_id = _env("AKOOL_VOICE_ID", "").strip()
+        akool_background_id = _env("AKOOL_BACKGROUND_ID", "").strip()
+        akool_mode_type = _parse_int("AKOOL_MODE_TYPE", 1)  # 1=retelling, 2=dialogue
+        akool_duration = _parse_int("AKOOL_DURATION_SECONDS", 1800)
+
+        class AkoolVideoService(FrameProcessor):
+            def __init__(
+                self,
+                *,
+                api_key: str,
+                base_url: str,
+                avatar_id: str,
+                voice_id: str = "",
+                background_id: str = "",
+                mode_type: int = 1,
+                duration_seconds: int = 1800,
+                fallback_state: dict[str, Any] | None = None,
+            ):
+                super().__init__()
+                self._api_key = str(api_key)
+                self._base_url = str(base_url).rstrip("/")
+                self._avatar_id = str(avatar_id)
+                self._voice_id = str(voice_id or "")
+                self._background_id = str(background_id or "")
+                self._mode_type = int(mode_type) if int(mode_type) in (1, 2) else 1
+                self._duration_seconds = max(30, int(duration_seconds) if int(duration_seconds) > 0 else 1800)
+
+                self._http: httpx.AsyncClient | None = None
+                self._session_id: str = ""
+
+                self._room: rtc.Room | None = None
+                self._livekit_url: str = ""
+                self._livekit_token: str = ""
+                self._livekit_room_name: str = ""
+                self._server_identity: str = ""
+
+                self._task_manager = None
+                self._transport_ready = False
+
+                self._audio_task = None
+                self._video_task = None
+
+                self._pending_text = ""
+                self._send_lock = asyncio.Lock()
+                self._current_mid: str | None = None
+
+                self._fallback_state = fallback_state if isinstance(fallback_state, dict) else {}
+                self._audio_only_fallback = False
+                self._fallback_reason = ""
+                self._fallback_lock = asyncio.Lock()
+                self._fallback_shutdown_task: asyncio.Task | None = None
+
+            async def setup(self, setup):
+                await super().setup(setup)
+                self._task_manager = getattr(setup, "task_manager", None)
+
+                headers = {
+                    "x-api-key": self._api_key,
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                }
+                self._http = httpx.AsyncClient(timeout=20.0, headers=headers)
+
+            async def cleanup(self):
+                try:
+                    await self._stop_session()
+                finally:
+                    if self._http:
+                        try:
+                            await self._http.aclose()
+                        except Exception:
+                            pass
+                        self._http = None
+                await super().cleanup()
+
+            async def _create_session(self):
+                if not self._http:
+                    raise RuntimeError("Akool HTTP client not initialized")
+
+                payload: dict[str, Any] = {
+                    "avatar_id": self._avatar_id,
+                    "stream_type": "livekit",
+                    "mode_type": self._mode_type,
+                    "duration": self._duration_seconds,
+                }
+                if self._voice_id:
+                    payload["voice_id"] = self._voice_id
+                if self._background_id:
+                    payload["background_id"] = self._background_id
+
+                url = f"{self._base_url}/api/open/v4/liveAvatar/session/create"
+                resp = await self._http.post(url, json=payload)
+                data = None
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = None
+
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"Akool session create failed (HTTP {resp.status_code}): {resp.text}")
+
+                if not isinstance(data, dict):
+                    raise RuntimeError("Akool session create returned non-JSON response")
+
+                # Typical response: {"code":1000,"msg":"ok","data":{...}}
+                code = data.get("code")
+                msg = data.get("msg")
+                payload_data = data.get("data") if isinstance(data.get("data"), dict) else {}
+
+                if code not in (1000, "1000", 0, "0", None):
+                    raise RuntimeError(f"Akool session create error: code={code} msg={msg}")
+
+                self._session_id = str(payload_data.get("id") or payload_data.get("session_id") or payload_data.get("sessionId") or "").strip()
+                self._livekit_url = str(payload_data.get("livekit_url") or payload_data.get("livekitUrl") or "").strip()
+                self._livekit_token = str(payload_data.get("livekit_token") or payload_data.get("livekitToken") or "").strip()
+                self._livekit_room_name = str(payload_data.get("livekit_room_name") or payload_data.get("livekitRoomName") or "").strip()
+                self._server_identity = str(payload_data.get("livekit_server_identity") or payload_data.get("livekitServerIdentity") or "").strip()
+
+                if not self._livekit_url or not self._livekit_token:
+                    raise RuntimeError("Akool session create did not return livekit_url/livekit_token")
+
+            async def _close_session(self):
+                if not self._http or not self._session_id:
+                    return
+                url = f"{self._base_url}/api/open/v4/liveAvatar/session/close"
+                try:
+                    await self._http.post(url, json={"id": self._session_id})
+                except Exception:
+                    pass
+
+            def _is_avatar_participant(self, participant: rtc.RemoteParticipant) -> bool:
+                if not participant:
+                    return False
+                if self._server_identity:
+                    return str(participant.identity or "") == self._server_identity
+                # Fallback: first remote participant
+                return True
+
+            async def _process_audio_frames(self, stream: rtc.AudioStream):
+                try:
+                    async for frame_event in stream:
+                        audio_frame = frame_event.frame
+                        audio_data = bytes(audio_frame.data)
+                        if not self._transport_ready or self._audio_only_fallback:
+                            continue
+                        out = SpeechOutputAudioRawFrame(
+                            audio=audio_data,
+                            sample_rate=int(getattr(audio_frame, "sample_rate", 0) or 0) or 24000,
+                            num_channels=1,
+                        )
+                        await self.push_frame(out)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"Akool audio stream ended: {e}")
+                    try:
+                        await self._enter_audio_only_fallback(f"audio stream ended: {e}", exception=e)
+                    except Exception:
+                        pass
+
+            async def _process_video_frames(self, stream: rtc.VideoStream):
+                try:
+                    async for frame_event in stream:
+                        video_frame = frame_event.frame
+                        try:
+                            if getattr(video_frame, "type", None) != VideoBufferType.RGB24:
+                                video_frame = video_frame.convert(VideoBufferType.RGB24)
+                        except Exception:
+                            pass
+
+                        if not self._transport_ready or self._audio_only_fallback:
+                            continue
+
+                        out = OutputImageRawFrame(
+                            image=bytes(video_frame.data),
+                            size=(int(video_frame.width), int(video_frame.height)),
+                            format="RGB",
+                        )
+                        try:
+                            out.pts = int(frame_event.timestamp_us // 1000)
+                        except Exception:
+                            pass
+                        await self.push_frame(out)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"Akool video stream ended: {e}")
+                    try:
+                        await self._enter_audio_only_fallback(f"video stream ended: {e}", exception=e)
+                    except Exception:
+                        pass
+
+            async def _connect_livekit(self):
+                if not self._livekit_url or not self._livekit_token:
+                    raise RuntimeError("LiveKit config missing")
+
+                self._room = rtc.Room()
+
+                @self._room.on("track_subscribed")
+                def on_track_subscribed(track: rtc.Track, publication: rtc.RemoteTrackPublication, participant: rtc.RemoteParticipant):
+                    if not self._is_avatar_participant(participant):
+                        return
+
+                    try:
+                        if track.kind == rtc.TrackKind.KIND_VIDEO and self._video_task is None:
+                            stream = rtc.VideoStream(track)
+                            if self._task_manager:
+                                self._video_task = self._task_manager.create_task(self._process_video_frames(stream))
+                            else:
+                                self._video_task = asyncio.create_task(self._process_video_frames(stream))
+                        elif track.kind == rtc.TrackKind.KIND_AUDIO and self._audio_task is None:
+                            stream = rtc.AudioStream(track=track)
+                            if self._task_manager:
+                                self._audio_task = self._task_manager.create_task(self._process_audio_frames(stream))
+                            else:
+                                self._audio_task = asyncio.create_task(self._process_audio_frames(stream))
+                    except Exception:
+                        pass
+
+                await self._room.connect(
+                    self._livekit_url,
+                    self._livekit_token,
+                    options=rtc.RoomOptions(auto_subscribe=True),
+                )
+
+                # Best-effort: start streams for already-subscribed tracks
+                for p in (self._room.remote_participants or {}).values():
+                    if not self._is_avatar_participant(p):
+                        continue
+                    for pub in p.track_publications.values():
+                        try:
+                            if pub.track is None:
+                                continue
+                            if pub.kind == rtc.TrackKind.KIND_VIDEO and self._video_task is None:
+                                stream = rtc.VideoStream(pub.track)
+                                if self._task_manager:
+                                    self._video_task = self._task_manager.create_task(self._process_video_frames(stream))
+                                else:
+                                    self._video_task = asyncio.create_task(self._process_video_frames(stream))
+                            if pub.kind == rtc.TrackKind.KIND_AUDIO and self._audio_task is None:
+                                stream = rtc.AudioStream(track=pub.track)
+                                if self._task_manager:
+                                    self._audio_task = self._task_manager.create_task(self._process_audio_frames(stream))
+                                else:
+                                    self._audio_task = asyncio.create_task(self._process_audio_frames(stream))
+                        except Exception:
+                            continue
+
+            async def _start_session(self):
+                if self._room:
+                    return
+                await self._create_session()
+                await self._connect_livekit()
+
+            async def _stop_session(self):
+                # Cancel stream tasks
+                for t_name in ["_audio_task", "_video_task"]:
+                    t = getattr(self, t_name)
+                    if t is None:
+                        continue
+                    try:
+                        if self._task_manager:
+                            await self._task_manager.cancel_task(t)
+                        else:
+                            t.cancel()
+                    except Exception:
+                        pass
+                    setattr(self, t_name, None)
+
+                # Disconnect LiveKit
+                if self._room:
+                    try:
+                        await self._room.disconnect()
+                    except Exception:
+                        pass
+                    self._room = None
+
+                # Close Akool session
+                try:
+                    await self._close_session()
+                finally:
+                    self._session_id = ""
+
+            async def _send_stream_message(self, obj: dict[str, Any]):
+                if not self._room:
+                    return
+                data = json.dumps(obj).encode("utf-8")
+                try:
+                    if self._server_identity:
+                        await self._room.local_participant.publish_data(
+                            data,
+                            reliable=True,
+                            destination_identities=[self._server_identity],
+                        )
+                    else:
+                        await self._room.local_participant.publish_data(data, reliable=True)
+                except Exception as e:
+                    logger.debug(f"Akool publish_data failed: {e}")
+
+            async def _send_text(self, text: str):
+                text = str(text or "").strip()
+                if not text:
+                    return
+
+                async with self._send_lock:
+                    mid = uuid.uuid4().hex
+                    self._current_mid = mid
+                    payload = {"v": 2, "type": "text", "mid": mid, "pld": {"text": text}}
+                    await self._send_stream_message(payload)
+
+            async def _interrupt(self):
+                if not self._current_mid:
+                    return
+                async with self._send_lock:
+                    mid = uuid.uuid4().hex
+                    payload = {"v": 2, "type": "interrupt", "mid": mid, "pld": {"mid": self._current_mid}}
+                    await self._send_stream_message(payload)
+
+            def _split_flushable(self, s: str) -> tuple[str, str]:
+                # Flush on sentence-ish boundaries.
+                if not s:
+                    return "", ""
+                last = max(s.rfind("."), s.rfind("!"), s.rfind("?"), s.rfind("\n"))
+                if last < 0:
+                    # Also flush very long buffers to avoid huge single messages.
+                    if len(s) > 400:
+                        return s[:400], s[400:]
+                    return "", s
+                return s[: last + 1], s[last + 1 :]
+
+            async def _enter_audio_only_fallback(self, reason: str, exception: Exception | None = None):
+                async with self._fallback_lock:
+                    if self._audio_only_fallback:
+                        return
+                    self._audio_only_fallback = True
+                    self._fallback_reason = str(reason or "").strip()
+
+                    if isinstance(self._fallback_state, dict):
+                        self._fallback_state["active"] = True
+                        self._fallback_state["reason"] = self._fallback_reason
+
+                    msg = (
+                        "Akool avatar unavailable, falling back to audio-only for this meeting"
+                        + (f": {self._fallback_reason}" if self._fallback_reason else "")
+                    )
+                    if exception:
+                        msg += f" ({exception})"
+                    logger.warning(msg)
+
+                    async def _shutdown():
+                        try:
+                            await self._stop_session()
+                        except Exception:
+                            pass
+
+                    if not self._fallback_shutdown_task:
+                        try:
+                            self._fallback_shutdown_task = self.create_task(_shutdown(), name="akool_fallback_shutdown")
+                        except Exception:
+                            try:
+                                self._fallback_shutdown_task = asyncio.create_task(_shutdown())
+                            except Exception:
+                                pass
+
+            async def process_frame(self, frame: Frame, direction: FrameDirection):
+                await super().process_frame(frame, direction)
+
+                if isinstance(frame, StartFrame):
+                    if not self._audio_only_fallback:
+                        try:
+                            await self._start_session()
+                        except Exception as e:
+                            await self._enter_audio_only_fallback(f"start failed: {e}", exception=e)
+                    await self.push_frame(frame, direction)
+                    return
+
+                if isinstance(frame, OutputTransportReadyFrame):
+                    self._transport_ready = True
+                    await self.push_frame(frame, direction)
+                    return
+
+                if isinstance(frame, (PipecatEndFrame, CancelFrame)):
+                    try:
+                        await self._stop_session()
+                    except Exception:
+                        pass
+                    await self.push_frame(frame, direction)
+                    return
+
+                # Avatar disabled: passthrough frames so TTS audio can go to the transport.
+                if self._audio_only_fallback:
+                    await self.push_frame(frame, direction)
+                    return
+
+                if isinstance(frame, (UserStartedSpeakingFrame, InterruptionFrame)):
+                    # Best-effort: stop current avatar speech when the user interrupts.
+                    try:
+                        await self._interrupt()
+                    except Exception:
+                        pass
+                    await self.push_frame(frame, direction)
+                    return
+
+                if isinstance(frame, PipecatTTSTextFrame):
+                    # Greeting / direct text frames
+                    try:
+                        await self._send_text(str(frame.text or ""))
+                    except Exception as e:
+                        await self._enter_audio_only_fallback(f"send_text failed: {e}", exception=e)
+                    await self.push_frame(frame, direction)
+                    return
+
+                if isinstance(frame, LLMTextFrame):
+                    # Buffer streaming LLM tokens into sentences.
+                    self._pending_text += str(frame.text or "")
+                    flush, rest = self._split_flushable(self._pending_text)
+                    self._pending_text = rest
+                    if flush.strip():
+                        try:
+                            await self._send_text(flush)
+                        except Exception as e:
+                            await self._enter_audio_only_fallback(f"send_text failed: {e}", exception=e)
+                    await self.push_frame(frame, direction)
+                    return
+
+                if isinstance(frame, LLMFullResponseEndFrame):
+                    # Flush any remaining buffered text.
+                    if self._pending_text.strip():
+                        try:
+                            await self._send_text(self._pending_text)
+                        except Exception as e:
+                            await self._enter_audio_only_fallback(f"send_text failed: {e}", exception=e)
+                    self._pending_text = ""
+                    await self.push_frame(frame, direction)
+                    return
+
+                await self.push_frame(frame, direction)
+
+        akool_service = AkoolVideoService(
+            api_key=akool_api_key,
+            base_url=akool_base_url,
+            avatar_id=akool_avatar_id,
+            voice_id=akool_voice_id,
+            background_id=akool_background_id,
+            mode_type=akool_mode_type,
+            duration_seconds=akool_duration,
+            fallback_state=akool_audio_only_fallback,
+        )
+
+    # If we're using Akool + Cartesia is configured, keep TTS in the pipeline but suppress it
+    # while the avatar is healthy. If Akool fails, we flip to audio-only by allowing TTS to run.
+    akool_tts_gate = None
+    if is_video_meeting and video_avatar_provider == "akool" and tts:
+
+        class AkoolTTSGate(FrameProcessor):
+            def __init__(self, *, state: dict[str, Any]):
+                super().__init__()
+                self._state = state
+
+            async def process_frame(self, frame, direction: FrameDirection):
+                await super().process_frame(frame, direction)
+
+                if direction is FrameDirection.DOWNSTREAM and hasattr(frame, "skip_tts"):
+                    # When Akool is active, suppress TTS (Akool provides audio).
+                    if not bool(self._state.get("active")):
+                        frame.skip_tts = True
+                    else:
+                        # Audio-only fallback: allow TTS unless explicitly disabled upstream.
+                        if getattr(frame, "skip_tts", None) is not True:
+                            frame.skip_tts = None
+
+                await self.push_frame(frame, direction)
+
+        akool_tts_gate = AkoolTTSGate(state=akool_audio_only_fallback)
+
     # IMPORTANT: assistant context aggregator consumes TextFrames (it aggregates them and does
     # not forward). If it sits *before* TTS, the bot will generate text but you won't hear audio.
     # So we place it after TTS and before the output transport.
@@ -947,12 +1858,17 @@ async def bot(session_args: Any):
         stt,
         ctx.user(),
         llm,
-        tts,
     ]
+    if akool_tts_gate:
+        steps.append(akool_tts_gate)
+    if tts:
+        steps.append(tts)
     if bg_mixer:
         steps.append(bg_mixer)
     if heygen_service:
         steps.append(heygen_service)
+    if akool_service:
+        steps.append(akool_service)
     steps.extend([
         ctx.assistant(),
         transport.output(),
