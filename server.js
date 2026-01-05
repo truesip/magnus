@@ -245,6 +245,10 @@ const CLICK2MAIL_DEFAULT_TRACKING_TYPE = String(process.env.CLICK2MAIL_DEFAULT_T
 const AI_MAIL_MARKUP_FLAT = Math.max(0, parseFloat(process.env.AI_MAIL_MARKUP_FLAT || '0') || 0);
 const AI_MAIL_MARKUP_PERCENT = Math.max(0, parseFloat(process.env.AI_MAIL_MARKUP_PERCENT || '0') || 0);
 
+// Optional: platform fees for AI tools (USD). Set to 0 to disable charging for that action.
+const AI_EMAIL_SEND_COST = Math.max(0, parseFloat(process.env.AI_EMAIL_SEND_COST || '1') || 0);
+const AI_VIDEO_MEETING_LINK_COST = Math.max(0, parseFloat(process.env.AI_VIDEO_MEETING_LINK_COST || '5') || 0);
+
 const click2mailXmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '',
@@ -1550,6 +1554,12 @@ async function initDb() {
     meeting_room_name VARCHAR(191) NULL,
     meeting_room_url TEXT NULL,
     meeting_join_url TEXT NULL,
+    billing_history_id BIGINT NULL,
+    refund_status ENUM('none','pending','completed','failed') NOT NULL DEFAULT 'none',
+    refund_amount DECIMAL(18,8) NULL,
+    refund_billing_history_id BIGINT NULL,
+    refund_error TEXT NULL,
+    refunded_at DATETIME NULL,
     status ENUM('pending','completed','failed') NOT NULL DEFAULT 'pending',
     attempt_count INT NOT NULL DEFAULT 0,
     error TEXT NULL,
@@ -1559,9 +1569,11 @@ async function initDb() {
     KEY idx_ai_email_user (user_id),
     KEY idx_ai_email_agent (agent_id),
     KEY idx_ai_email_template (template_id),
+    KEY idx_ai_email_billing (billing_history_id),
     CONSTRAINT fk_ai_email_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
     CONSTRAINT fk_ai_email_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL,
-    CONSTRAINT fk_ai_email_template FOREIGN KEY (template_id) REFERENCES ai_doc_templates(id) ON DELETE SET NULL
+    CONSTRAINT fk_ai_email_template FOREIGN KEY (template_id) REFERENCES ai_doc_templates(id) ON DELETE SET NULL,
+    CONSTRAINT fk_ai_email_billing FOREIGN KEY (billing_history_id) REFERENCES billing_history(id) ON DELETE SET NULL
   )`);
 
   // Ensure ai_email_sends meeting-link columns exist (existing DB migrations)
@@ -1570,6 +1582,29 @@ async function initDb() {
     { name: 'meeting_room_name', ddl: "ALTER TABLE ai_email_sends ADD COLUMN meeting_room_name VARCHAR(191) NULL AFTER meeting_provider" },
     { name: 'meeting_room_url', ddl: "ALTER TABLE ai_email_sends ADD COLUMN meeting_room_url TEXT NULL AFTER meeting_room_name" },
     { name: 'meeting_join_url', ddl: "ALTER TABLE ai_email_sends ADD COLUMN meeting_join_url TEXT NULL AFTER meeting_room_url" },
+  ]) {
+    try {
+      const [rows] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_email_sends' AND column_name=? LIMIT 1",
+        [dbName, col.name]
+      );
+      if (!rows || !rows.length) {
+        await pool.query(col.ddl);
+        if (DEBUG) console.log(`[schema] Added ai_email_sends.${col.name} column`);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn(`[schema] ai_email_sends.${col.name} check failed`, e.message || e);
+    }
+  }
+
+  // Ensure ai_email_sends billing/refund columns exist (best-effort migrations)
+  for (const col of [
+    { name: 'billing_history_id', ddl: "ALTER TABLE ai_email_sends ADD COLUMN billing_history_id BIGINT NULL AFTER meeting_join_url" },
+    { name: 'refund_status', ddl: "ALTER TABLE ai_email_sends ADD COLUMN refund_status ENUM('none','pending','completed','failed') NOT NULL DEFAULT 'none' AFTER billing_history_id" },
+    { name: 'refund_amount', ddl: "ALTER TABLE ai_email_sends ADD COLUMN refund_amount DECIMAL(18,8) NULL AFTER refund_status" },
+    { name: 'refund_billing_history_id', ddl: "ALTER TABLE ai_email_sends ADD COLUMN refund_billing_history_id BIGINT NULL AFTER refund_amount" },
+    { name: 'refund_error', ddl: "ALTER TABLE ai_email_sends ADD COLUMN refund_error TEXT NULL AFTER refund_billing_history_id" },
+    { name: 'refunded_at', ddl: "ALTER TABLE ai_email_sends ADD COLUMN refunded_at DATETIME NULL AFTER refund_error" },
   ]) {
     try {
       const [rows] = await pool.query(
@@ -3338,6 +3373,35 @@ app.post('/api/ai/agent/send-document', async (req, res) => {
       ? [{ filename: `${safeBase}.pdf`, content: pdfOut, contentType: 'application/pdf' }]
       : [{ filename: `${safeBase}.docx`, content: docxOut, contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }];
 
+    const emailCost = AI_EMAIL_SEND_COST;
+    if (emailCost > 0) {
+      const chargeDesc = `AI email send (document) - ${toEmail}`.substring(0, 255);
+      const charge = await chargeAiEmailSendsRow({
+        sendRowId,
+        userId,
+        amount: emailCost,
+        description: chargeDesc,
+        label: 'ai.email'
+      });
+
+      if (!charge || charge.ok !== true) {
+        const reason = charge?.reason || 'charge_failed';
+        const short = (reason === 'insufficient_funds') ? 'Insufficient balance' : reason;
+        const errMsg = `Email charge failed: ${short}`;
+
+        if (sendRowId) {
+          try {
+            await pool.execute(
+              'UPDATE ai_email_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+              [errMsg, sendRowId]
+            );
+          } catch {}
+        }
+
+        return res.status(reason === 'insufficient_funds' ? 402 : 500).json({ success: false, message: errMsg });
+      }
+    }
+
     try {
       await sendEmailViaUserSmtp({
         userId,
@@ -3364,6 +3428,20 @@ app.post('/api/ai/agent/send-document', async (req, res) => {
       });
     } catch (e) {
       const msg = e?.message || 'Email send failed';
+
+      // Best-effort refund if we charged before sending.
+      if (emailCost > 0) {
+        try {
+          await refundAiEmailSendsRow({
+            sendRowId,
+            userId,
+            amount: emailCost,
+            description: `Refund: AI email send failed (email_id ${sendRowId})`.substring(0, 255),
+            label: 'ai.email'
+          });
+        } catch {}
+      }
+
       if (sendRowId) {
         try {
           await pool.execute(
@@ -3384,6 +3462,8 @@ app.post('/api/ai/agent/send-document', async (req, res) => {
 // Sends a custom email (text/html) via the owning user's SMTP settings (no template required).
 app.post('/api/ai/agent/send-email', async (req, res) => {
   let sendRowId = null;
+  let userId = null;
+  const emailCost = AI_EMAIL_SEND_COST;
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
 
@@ -3398,7 +3478,7 @@ app.post('/api/ai/agent/send-email', async (req, res) => {
     const agent = arows && arows[0];
     if (!agent) return res.status(401).json({ success: false, message: 'Invalid token' });
 
-    const userId = Number(agent.user_id);
+    userId = Number(agent.user_id);
     const agentId = Number(agent.id);
 
     const toEmail = String(req.body?.to_email || req.body?.toEmail || '').trim();
@@ -3469,6 +3549,34 @@ app.post('/api/ai/agent/send-email', async (req, res) => {
       }
     }
 
+    if (emailCost > 0) {
+      const chargeDesc = `AI email send - ${toEmail}`.substring(0, 255);
+      const charge = await chargeAiEmailSendsRow({
+        sendRowId,
+        userId,
+        amount: emailCost,
+        description: chargeDesc,
+        label: 'ai.email'
+      });
+
+      if (!charge || charge.ok !== true) {
+        const reason = charge?.reason || 'charge_failed';
+        const short = (reason === 'insufficient_funds') ? 'Insufficient balance' : reason;
+        const errMsg = `Email charge failed: ${short}`;
+
+        if (sendRowId) {
+          try {
+            await pool.execute(
+              'UPDATE ai_email_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+              [errMsg, sendRowId]
+            );
+          } catch {}
+        }
+
+        return res.status(reason === 'insufficient_funds' ? 402 : 500).json({ success: false, message: errMsg });
+      }
+    }
+
     try {
       await sendEmailViaUserSmtp({
         userId,
@@ -3490,6 +3598,20 @@ app.post('/api/ai/agent/send-email', async (req, res) => {
       return res.json({ success: true, dedupe_key: dedupeKey, already_sent: false });
     } catch (e) {
       const msg = e?.message || 'Email send failed';
+
+      // Best-effort refund if we charged before sending.
+      if (emailCost > 0) {
+        try {
+          await refundAiEmailSendsRow({
+            sendRowId,
+            userId,
+            amount: emailCost,
+            description: `Refund: AI email send failed (email_id ${sendRowId})`.substring(0, 255),
+            label: 'ai.email'
+          });
+        } catch {}
+      }
+
       if (sendRowId) {
         try {
           await pool.execute(
@@ -3503,6 +3625,20 @@ app.post('/api/ai/agent/send-email', async (req, res) => {
   } catch (e) {
     const msg = e?.message || 'Failed to send email';
     if (DEBUG) console.warn('[ai.agent.send-email] error:', msg);
+
+    // Best-effort refund if we already charged.
+    if (sendRowId && pool && userId && emailCost > 0) {
+      try {
+        await refundAiEmailSendsRow({
+          sendRowId,
+          userId,
+          amount: emailCost,
+          description: `Refund: AI email send failed (email_id ${sendRowId})`.substring(0, 255),
+          label: 'ai.email'
+        });
+      } catch {}
+    }
+
     if (sendRowId && pool) {
       try {
         await pool.execute(
@@ -3561,6 +3697,146 @@ async function loadMagnusUserIdByLocalUserId(localUserId) {
   } catch {
     return '';
   }
+}
+
+async function chargeAiEmailSendsRow({ sendRowId, userId, amount, description, label }) {
+  const amt = Math.max(0, Number(amount) || 0);
+  if (!pool) throw new Error('Database not configured');
+  if (!sendRowId || !userId) return { ok: false, reason: 'missing_params' };
+  if (!(amt > 0)) return { ok: true, skipped: true };
+
+  // Skip if already charged
+  try {
+    const [rows] = await pool.execute(
+      'SELECT billing_history_id FROM ai_email_sends WHERE id = ? LIMIT 1',
+      [sendRowId]
+    );
+    const existing = rows && rows[0] && rows[0].billing_history_id ? Number(rows[0].billing_history_id) : null;
+    if (existing) return { ok: true, already_charged: true, billingId: existing };
+  } catch {}
+
+  const magnusUserId = await loadMagnusUserIdByLocalUserId(userId);
+  if (!magnusUserId) return { ok: false, reason: 'magnus_user_missing' };
+
+  const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+  const charge = await applyMagnusCreditDelta({
+    localUserId: userId,
+    magnusUserId,
+    amountDelta: -Math.abs(amt),
+    description: String(description || '').substring(0, 255),
+    httpsAgent: magnusBillingAgent,
+    hostHeader,
+    label: label || 'ai.charge'
+  });
+
+  if (!charge || charge.ok !== true) {
+    return { ok: false, reason: charge?.reason || 'charge_failed', billingId: charge?.billingId || null, creditBefore: charge?.creditBefore };
+  }
+
+  const billingId = charge.billingId;
+
+  // Best-effort persist charge metadata for refunds / idempotency
+  try {
+    await pool.execute(
+      `UPDATE ai_email_sends
+       SET billing_history_id = ?,
+           refund_status = 'none',
+           refund_amount = NULL,
+           refund_billing_history_id = NULL,
+           refund_error = NULL,
+           refunded_at = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? LIMIT 1`,
+      [billingId, sendRowId]
+    );
+  } catch {}
+
+  return { ok: true, billingId, amount: Math.abs(amt) };
+}
+
+async function refundAiEmailSendsRow({ sendRowId, userId, amount, description, label }) {
+  const amt = Math.max(0, Number(amount) || 0);
+  if (!pool) throw new Error('Database not configured');
+  if (!sendRowId || !userId) return { ok: false, reason: 'missing_params' };
+  if (!(amt > 0)) return { ok: true, skipped: true };
+
+  // Best-effort claim to avoid double refunds
+  let canRefund = true;
+  try {
+    const [r] = await pool.execute(
+      `UPDATE ai_email_sends
+       SET refund_status = 'pending',
+           refund_amount = ?,
+           refund_error = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?
+         AND (refund_status = 'none' OR refund_status = 'failed')
+         AND billing_history_id IS NOT NULL
+       LIMIT 1`,
+      [Math.abs(amt), sendRowId]
+    );
+    canRefund = !!(r && r.affectedRows);
+  } catch {
+    canRefund = true;
+  }
+
+  if (!canRefund) return { ok: true, skipped: true };
+
+  const magnusUserId = await loadMagnusUserIdByLocalUserId(userId);
+  if (!magnusUserId) {
+    try {
+      await pool.execute(
+        `UPDATE ai_email_sends
+         SET refund_status = 'failed',
+             refund_error = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? LIMIT 1`,
+        ['Refund failed: MagnusBilling user id not configured', sendRowId]
+      );
+    } catch {}
+    return { ok: false, reason: 'magnus_user_missing' };
+  }
+
+  const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+  const refund = await applyMagnusCreditDelta({
+    localUserId: userId,
+    magnusUserId,
+    amountDelta: Math.abs(amt),
+    description: String(description || '').substring(0, 255),
+    httpsAgent: magnusBillingAgent,
+    hostHeader,
+    label: label ? `${label}.refund` : 'ai.refund'
+  });
+
+  if (refund && refund.ok === true) {
+    try {
+      await pool.execute(
+        `UPDATE ai_email_sends
+         SET refund_status = 'completed',
+             refund_billing_history_id = ?,
+             refunded_at = NOW(),
+             billing_history_id = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? LIMIT 1`,
+        [refund.billingId, sendRowId]
+      );
+    } catch {}
+    return { ok: true, refundBillingId: refund.billingId, amount: Math.abs(amt) };
+  }
+
+  const err = refund?.reason || 'Refund failed';
+  try {
+    await pool.execute(
+      `UPDATE ai_email_sends
+       SET refund_status = 'failed',
+           refund_error = ?,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? LIMIT 1`,
+      [String(err || 'Refund failed').slice(0, 2000), sendRowId]
+    );
+  } catch {}
+
+  return { ok: false, reason: err };
 }
 
 // Agent-auth endpoint called by the Pipecat agent runtime.
@@ -5131,6 +5407,8 @@ function extractDailyRoomNameFromRoomUrl(roomUrl) {
 // Starts a new Daily room + Pipecat session (video meeting) and emails the room link.
 app.post('/api/ai/agent/send-video-meeting-link', async (req, res) => {
   let sendRowId = null;
+  let userId = null;
+  const meetingCost = AI_VIDEO_MEETING_LINK_COST;
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
 
@@ -5145,7 +5423,7 @@ app.post('/api/ai/agent/send-video-meeting-link', async (req, res) => {
     const agent = arows && arows[0];
     if (!agent) return res.status(401).json({ success: false, message: 'Invalid token' });
 
-    const userId = Number(agent.user_id);
+    userId = Number(agent.user_id);
     const agentId = Number(agent.id);
     const agentName = String(agent.pipecat_agent_name || '').trim();
     if (!agentName) return res.status(500).json({ success: false, message: 'Agent not configured' });
@@ -5209,6 +5487,34 @@ app.post('/api/ai/agent/send-video-meeting-link', async (req, res) => {
         } catch {}
       } else {
         return res.status(202).json({ success: true, in_progress: true, dedupe_key: dedupeKey });
+      }
+    }
+
+    if (meetingCost > 0) {
+      const chargeDesc = `AI video meeting link - ${toEmail}`.substring(0, 255);
+      const charge = await chargeAiEmailSendsRow({
+        sendRowId,
+        userId,
+        amount: meetingCost,
+        description: chargeDesc,
+        label: 'ai.meeting'
+      });
+
+      if (!charge || charge.ok !== true) {
+        const reason = charge?.reason || 'charge_failed';
+        const short = (reason === 'insufficient_funds') ? 'Insufficient balance' : reason;
+        const errMsg = `Meeting link charge failed: ${short}`;
+
+        if (sendRowId) {
+          try {
+            await pool.execute(
+              'UPDATE ai_email_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+              [errMsg, sendRowId]
+            );
+          } catch {}
+        }
+
+        return res.status(reason === 'insufficient_funds' ? 402 : 500).json({ success: false, message: errMsg });
       }
     }
 
@@ -5289,6 +5595,20 @@ app.post('/api/ai/agent/send-video-meeting-link', async (req, res) => {
   } catch (e) {
     const msg = e?.message || 'Failed to send video meeting link';
     if (DEBUG) console.warn('[ai.agent.send-video-meeting-link] error:', e?.data || msg);
+
+    // Best-effort refund if we already charged.
+    if (sendRowId && pool && userId && meetingCost > 0) {
+      try {
+        await refundAiEmailSendsRow({
+          sendRowId,
+          userId,
+          amount: meetingCost,
+          description: `Refund: AI video meeting link failed (email_id ${sendRowId})`.substring(0, 255),
+          label: 'ai.meeting'
+        });
+      } catch {}
+    }
+
     if (sendRowId && pool) {
       try {
         await pool.execute(
@@ -7196,9 +7516,10 @@ function parseDailyRoomPresenceCount(presence) {
 // Manually send a new AI video meeting link to an email address from the dashboard UI.
 app.post('/api/me/ai/meetings/send', requireAuth, async (req, res) => {
   let sendRowId = null;
+  const userId = req.session.userId;
+  const meetingCost = AI_VIDEO_MEETING_LINK_COST;
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
-    const userId = req.session.userId;
 
     const agentIdRaw = (req.body?.agent_id !== undefined) ? req.body.agent_id : req.body?.agentId;
     const agentId = parseInt(String(agentIdRaw || '').trim(), 10);
@@ -7285,6 +7606,34 @@ app.post('/api/me/ai/meetings/send', requireAuth, async (req, res) => {
       }
     }
 
+    if (meetingCost > 0) {
+      const chargeDesc = `AI video meeting link (manual) - ${toEmail}`.substring(0, 255);
+      const charge = await chargeAiEmailSendsRow({
+        sendRowId,
+        userId,
+        amount: meetingCost,
+        description: chargeDesc,
+        label: 'ai.meeting'
+      });
+
+      if (!charge || charge.ok !== true) {
+        const reason = charge?.reason || 'charge_failed';
+        const short = (reason === 'insufficient_funds') ? 'Insufficient balance' : reason;
+        const errMsg = `Meeting link charge failed: ${short}`;
+
+        if (sendRowId) {
+          try {
+            await pool.execute(
+              'UPDATE ai_email_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+              [errMsg, sendRowId]
+            );
+          } catch {}
+        }
+
+        return res.status(reason === 'insufficient_funds' ? 402 : 500).json({ success: false, message: errMsg });
+      }
+    }
+
     // Start a new Pipecat session (web video meeting). Pipecat creates a Daily room.
     const startBody = {
       createDailyRoom: true,
@@ -7361,6 +7710,20 @@ app.post('/api/me/ai/meetings/send', requireAuth, async (req, res) => {
   } catch (e) {
     const msg = e?.message || 'Failed to send video meeting link';
     if (DEBUG) console.warn('[ai.meetings.send] error:', e?.data || msg);
+
+    // Best-effort refund if we already charged.
+    if (sendRowId && pool && userId && meetingCost > 0) {
+      try {
+        await refundAiEmailSendsRow({
+          sendRowId,
+          userId,
+          amount: meetingCost,
+          description: `Refund: AI video meeting link failed (email_id ${sendRowId})`.substring(0, 255),
+          label: 'ai.meeting'
+        });
+      } catch {}
+    }
+
     if (sendRowId && pool) {
       try {
         await pool.execute(
