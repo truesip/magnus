@@ -1358,6 +1358,25 @@ async function initDb() {
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
 
+  // Bill.com / BILL payments table - tracks invoice payments and credits
+  await pool.query(`CREATE TABLE IF NOT EXISTS billcom_payments (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    invoice_id VARCHAR(128) NOT NULL,
+    customer_id VARCHAR(128) NULL,
+    order_id VARCHAR(191) NOT NULL,
+    payment_link VARCHAR(2048) NULL,
+    status VARCHAR(64) NOT NULL DEFAULT 'pending',
+    credited TINYINT(1) NOT NULL DEFAULT 0,
+    raw_payload JSON NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_billcom_invoice (invoice_id),
+    KEY idx_billcom_user (user_id),
+    KEY idx_billcom_order (order_id),
+    FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
   // AI Agents (Pipecat Cloud)
   await pool.query(`CREATE TABLE IF NOT EXISTS ai_agents (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -10551,6 +10570,147 @@ app.post('/api/me/nowpayments/checkout', requireAuth, async (req, res) => {
   }
 });
 
+// Create a Bill.com / BILL invoice and return a hosted payment link.
+// Users can pay via BILL and their TalkUSA balance will be credited on webhook confirmation.
+app.post('/api/me/billcom/checkout', requireAuth, async (req, res) => {
+  let billingId = null;
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    if (!isBillcomConfigured()) {
+      return res.status(500).json({ success: false, message: 'Bill.com payments are not configured' });
+    }
+
+    const userId = req.session.userId;
+    const { amount } = req.body || {};
+
+    const amountNum = parseFloat(amount);
+    if (!Number.isFinite(amountNum)) {
+      return res.status(400).json({ success: false, message: 'Invalid amount' });
+    }
+    if (amountNum < CHECKOUT_MIN_AMOUNT || amountNum > CHECKOUT_MAX_AMOUNT) {
+      return res.status(400).json({ success: false, message: `Amount must be between $${CHECKOUT_MIN_AMOUNT} and $${CHECKOUT_MAX_AMOUNT}` });
+    }
+
+    // Fetch user info for description + invoice customer fields
+    let username = '';
+    let firstName = '';
+    let lastName = '';
+    let userEmail = '';
+    try {
+      const [rows] = await pool.execute('SELECT username, firstname, lastname, email FROM signup_users WHERE id=? LIMIT 1', [userId]);
+      if (rows && rows[0]) {
+        if (rows[0].username) username = String(rows[0].username);
+        if (rows[0].firstname) firstName = String(rows[0].firstname);
+        if (rows[0].lastname) lastName = String(rows[0].lastname);
+        if (rows[0].email) userEmail = String(rows[0].email);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[billcom.checkout] Failed to fetch user info:', e.message || e);
+    }
+
+    const baseUser = username || (req.session.username || 'unknown');
+    const fullName = `${firstName || ''} ${lastName || ''}`.trim();
+    const displayName = fullName || baseUser;
+
+    if (!userEmail) {
+      return res.status(400).json({ success: false, message: 'An email address is required to use Bill.com payments' });
+    }
+
+    // Insert pending billing record (we will mark completed after successful webhook)
+    const descRaw = `${baseUser} - $${amountNum.toFixed(2)} - TalkUSA bill.com refill`;
+    const desc = descRaw.substring(0, 255);
+
+    const [insertResult] = await pool.execute(
+      'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
+      [userId, amountNum, desc, 'pending']
+    );
+    billingId = insertResult.insertId;
+
+    const orderId = `bc-${userId}-${billingId}`;
+
+    const dueDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+    // Create invoice
+    const invoicePayload = {
+      invoiceNumber: String(billingId),
+      customer: {
+        // Create/identify customer by name/email (BILL will create if not found)
+        name: String(displayName || baseUser || 'Customer').substring(0, 90),
+        email: String(userEmail).trim()
+      },
+      invoiceDate: dueDate,
+      dueDate,
+      invoiceLineItems: [
+        {
+          quantity: 1,
+          description: `TalkUSA refill (${orderId})`.substring(0, 200),
+          price: Number(amountNum.toFixed(2))
+        }
+      ],
+      processingOptions: {
+        // Send invoice email from BILL (best-effort).
+        sendEmail: true
+      }
+    };
+
+    if (DEBUG) console.log('[billcom.checkout] Creating invoice:', { orderId, amountNum });
+    const invoice = await billcomApiCall({ method: 'POST', path: '/v3/invoices', body: invoicePayload });
+
+    const invoiceId = invoice && invoice.id ? String(invoice.id) : null;
+    const customerId = invoice && invoice.customerId ? String(invoice.customerId) : null;
+
+    if (!invoiceId || !customerId) {
+      await pool.execute(
+        'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+        ['failed', JSON.stringify(invoice || {}), billingId]
+      );
+      return res.status(502).json({ success: false, message: 'Bill.com did not return invoice identifiers' });
+    }
+
+    // Create payment link
+    const linkPayload = { customerId, email: String(userEmail).trim() };
+    const link = await billcomApiCall({
+      method: 'POST',
+      path: `/v3/invoices/${encodeURIComponent(invoiceId)}/payment-link`,
+      body: linkPayload
+    });
+
+    const paymentUrl = link && (link.paymentLink || link.payment_link || link.url) ? String(link.paymentLink || link.payment_link || link.url) : null;
+    if (!paymentUrl) {
+      await pool.execute(
+        'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+        ['failed', JSON.stringify(link || {}), billingId]
+      );
+      return res.status(502).json({ success: false, message: 'Bill.com did not return a payment link' });
+    }
+
+    // Record BILL invoice/payment link for tracking/idempotency
+    try {
+      const rawPayload = JSON.stringify({ invoice, payment_link: link });
+      await pool.execute(
+        'INSERT INTO billcom_payments (user_id, invoice_id, customer_id, order_id, payment_link, status, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, 0, ?)',
+        [userId, invoiceId, customerId, orderId, paymentUrl, 'pending', rawPayload]
+      );
+    } catch (e) {
+      if (DEBUG) console.warn('[billcom.checkout] Failed to insert billcom_payments row:', e.message || e);
+      // Do not fail the checkout creation if this insert fails; webhook can still be processed via billing_history.
+    }
+
+    return res.json({ success: true, payment_url: paymentUrl });
+  } catch (e) {
+    if (billingId && pool) {
+      try {
+        await pool.execute(
+          'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+          ['failed', String(e?.message || e), billingId]
+        );
+      } catch {}
+    }
+    if (DEBUG) console.error('[billcom.checkout] error:', e?.data || e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to create Bill.com payment' });
+  }
+});
+
 // Create a Square Payment Link checkout for card payments
 // Returns a hosted Square URL where the user can pay with card.
 async function handleSquareCheckout(req, res) {
@@ -11511,6 +11671,237 @@ app.post('/webhooks/stripe', async (req, res) => {
     return res.status(200).json({ success: true });
   } catch (e) {
     if (DEBUG) console.error('[stripe.webhook] Unhandled error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Webhook handling failed' });
+  }
+});
+
+// Bill.com / BILL webhook (invoice updated)
+// Configure BILL connect-events subscription to include invoice.updated and point it to:
+//   PUBLIC_BASE_URL + /webhooks/billcom
+app.post('/webhooks/billcom', async (req, res) => {
+  try {
+    if (!pool) {
+      return res.status(500).json({ success: false, message: 'Database not configured' });
+    }
+
+    const sigOk = verifyBillcomWebhookSignature(req);
+    if (!sigOk) {
+      if (DEBUG) console.warn('[billcom.webhook] Invalid signature');
+      return res.status(400).json({ success: false, message: 'Invalid signature' });
+    }
+
+    const evt = req.body || {};
+    const meta = evt.metadata || {};
+    const eventTypeRaw = meta.eventType || evt.eventType || evt.type || '';
+    const eventType = String(eventTypeRaw || '').trim().toLowerCase();
+
+    // We only care about invoice updates.
+    if (!eventType.startsWith('invoice.')) {
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const inv = evt.invoice || evt.payload?.invoice || null;
+    if (!inv || typeof inv !== 'object') {
+      if (DEBUG) console.warn('[billcom.webhook] Missing invoice object');
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const invoiceId = String(inv.id || '').trim();
+    const status = String(inv.status || '').toUpperCase();
+    const invoiceNumber = String(inv.invoiceNumber || '').trim();
+    const dueAmount = (inv.dueAmount != null && Number.isFinite(Number(inv.dueAmount))) ? Number(inv.dueAmount) : null;
+
+    const payloadJson = JSON.stringify(evt);
+
+    // Best-effort: sync status/payload into billcom_payments
+    if (invoiceId) {
+      try {
+        await pool.execute(
+          'UPDATE billcom_payments SET status = ?, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE invoice_id = ? LIMIT 1',
+          [status || eventType || 'unknown', payloadJson, invoiceId]
+        );
+      } catch {}
+    }
+
+    // Only credit on paid in full (dueAmount <= 0 as extra guard)
+    const isPaidInFull = (status === 'PAID_IN_FULL') || (dueAmount != null && dueAmount <= 0 && status.startsWith('PAID'));
+    if (!isPaidInFull) {
+      return res.status(200).json({ success: true, pending: true });
+    }
+
+    // First try: find our local billcom_payments row by invoice_id
+    let bc = null;
+    if (invoiceId) {
+      try {
+        const [rows] = await pool.execute(
+          'SELECT * FROM billcom_payments WHERE invoice_id = ? LIMIT 1',
+          [invoiceId]
+        );
+        bc = rows && rows[0] ? rows[0] : null;
+      } catch {}
+    }
+
+    // Fallback: parse billing id from invoiceNumber (we set invoiceNumber = billingId)
+    let billingId = null;
+    let userId = null;
+    let orderId = null;
+
+    if (bc) {
+      userId = Number(bc.user_id);
+      orderId = String(bc.order_id || '').trim() || null;
+      const m = orderId ? /^bc-(\d+)-(\d+)$/.exec(orderId) : null;
+      if (m) billingId = Number(m[2]);
+    }
+
+    if (!billingId && invoiceNumber && /^\d+$/.test(invoiceNumber)) {
+      billingId = Number(invoiceNumber);
+    }
+
+    if (!userId && billingId) {
+      try {
+        const [bRows] = await pool.execute(
+          'SELECT user_id FROM billing_history WHERE id = ? LIMIT 1',
+          [billingId]
+        );
+        const b = bRows && bRows[0] ? bRows[0] : null;
+        if (b && b.user_id != null) userId = Number(b.user_id);
+      } catch {}
+    }
+
+    if (!userId || !billingId) {
+      if (DEBUG) console.warn('[billcom.webhook] Could not resolve userId/billingId:', { invoiceId, invoiceNumber, status });
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    // Acquire a per-invoice lock to prevent double-crediting.
+    let lockAcquired = false;
+    if (invoiceId) {
+      try {
+        const [lockResult] = await pool.execute(
+          'UPDATE billcom_payments SET status = ?, credited = 2, raw_payload = ? WHERE invoice_id = ? AND credited = 0',
+          ['PROCESSING', payloadJson, invoiceId]
+        );
+        lockAcquired = !!(lockResult && lockResult.affectedRows > 0);
+      } catch {}
+    }
+
+    if (!lockAcquired) {
+      // If row missing (or insert failed earlier), insert a lock row now.
+      if (invoiceId) {
+        try {
+          const insertOrderId = orderId || `bc-${userId}-${billingId}`;
+          await pool.execute(
+            'INSERT INTO billcom_payments (user_id, invoice_id, customer_id, order_id, payment_link, status, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, 2, ?)',
+            [userId, invoiceId, inv.customerId ? String(inv.customerId) : null, insertOrderId, null, 'PROCESSING', payloadJson]
+          );
+          lockAcquired = true;
+        } catch (e) {
+          if (e?.code !== 'ER_DUP_ENTRY' && DEBUG) console.warn('[billcom.webhook] Failed to insert lock row:', e.message || e);
+        }
+      }
+    }
+
+    if (!lockAcquired) {
+      // Someone else has already processed or is processing.
+      try {
+        if (invoiceId) {
+          const [freshRows] = await pool.execute('SELECT credited FROM billcom_payments WHERE invoice_id = ? LIMIT 1', [invoiceId]);
+          const creditedVal = freshRows && freshRows[0] ? Number(freshRows[0].credited || 0) : 0;
+          if (creditedVal === 1) return res.status(200).json({ success: true, alreadyCredited: true });
+        }
+      } catch {}
+      return res.status(200).json({ success: true, pending: true, duplicate: true });
+    }
+
+    // Fetch billing_history row
+    const [billingRows] = await pool.execute(
+      'SELECT id, user_id, amount, description, status FROM billing_history WHERE id = ? LIMIT 1',
+      [billingId]
+    );
+    const billing = billingRows && billingRows[0] ? billingRows[0] : null;
+    if (!billing || String(billing.user_id) !== String(userId)) {
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    // If already completed, just mark provider row as credited.
+    if (billing.status === 'completed') {
+      try {
+        if (invoiceId) {
+          await pool.execute(
+            'UPDATE billcom_payments SET status = ?, credited = 1, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE invoice_id = ? AND credited <> 1',
+            ['COMPLETED', payloadJson, invoiceId]
+          );
+        }
+      } catch {}
+      return res.status(200).json({ success: true, alreadyCredited: true });
+    }
+
+    // Fetch user row for MagnusBilling id and email
+    const [userRows] = await pool.execute(
+      'SELECT id, magnus_user_id, username, firstname, lastname, email FROM signup_users WHERE id = ? LIMIT 1',
+      [userId]
+    );
+    const user = userRows && userRows[0] ? userRows[0] : null;
+    if (!user) {
+      try { if (invoiceId) await pool.execute('UPDATE billcom_payments SET credited = 0, status = ? WHERE invoice_id = ? AND credited = 2', ['FAILED', invoiceId]); } catch {}
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const magnusUserId = String(user.magnus_user_id || '').trim();
+    if (!magnusUserId) {
+      try { if (invoiceId) await pool.execute('UPDATE billcom_payments SET credited = 0, status = ? WHERE invoice_id = ? AND credited = 2', ['FAILED', invoiceId]); } catch {}
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const nameBase = user.username || '';
+    const fullName = `${user.firstname || ''} ${user.lastname || ''}`.trim();
+    const displayName = fullName || nameBase || 'Customer';
+    const userEmail = user.email || '';
+
+    const amountNum = Number(billing.amount || 0);
+    const desc = billing.description || `TalkUSA bill.com refill (${invoiceId || billingId})`;
+
+    const httpsAgent = magnusBillingAgent;
+    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+
+    const result = await applyMagnusRefill({
+      userId,
+      magnusUserId,
+      amountNum,
+      desc,
+      displayName,
+      userEmail,
+      httpsAgent,
+      hostHeader,
+      billingId
+    });
+
+    if (!result.success) {
+      // Release the processing lock so a future retry can attempt again.
+      try {
+        if (invoiceId) {
+          await pool.execute(
+            'UPDATE billcom_payments SET status = ?, credited = 0, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE invoice_id = ? AND credited = 2',
+            ['FAILED', payloadJson, invoiceId]
+          );
+        }
+      } catch {}
+      return res.status(500).json({ success: false, message: 'Failed to credit MagnusBilling' });
+    }
+
+    // Mark as credited
+    try {
+      if (invoiceId) {
+        await pool.execute(
+          'UPDATE billcom_payments SET status = ?, credited = 1, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE invoice_id = ?',
+          ['COMPLETED', payloadJson, invoiceId]
+        );
+      }
+    } catch {}
+
+    return res.status(200).json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[billcom.webhook] Unhandled error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Webhook handling failed' });
   }
 });
@@ -13186,6 +13577,19 @@ const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || '';
 const NOWPAYMENTS_API_URL = process.env.NOWPAYMENTS_API_URL || 'https://api.nowpayments.io/v1';
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || '';
 
+// Bill.com / BILL configuration (invoice + payment link)
+const BILLCOM_ENVIRONMENT = String(process.env.BILLCOM_ENVIRONMENT || 'sandbox').trim().toLowerCase(); // sandbox | production
+const BILLCOM_API_URL = process.env.BILLCOM_API_URL || (
+  BILLCOM_ENVIRONMENT === 'production'
+    ? 'https://gateway.prod.bill.com/connect'
+    : 'https://gateway.stage.bill.com/connect'
+);
+const BILLCOM_USERNAME = process.env.BILLCOM_USERNAME || '';
+const BILLCOM_PASSWORD = process.env.BILLCOM_PASSWORD || '';
+const BILLCOM_ORGANIZATION_ID = process.env.BILLCOM_ORGANIZATION_ID || '';
+const BILLCOM_DEV_KEY = process.env.BILLCOM_DEV_KEY || '';
+const BILLCOM_WEBHOOK_SECURITY_KEY = process.env.BILLCOM_WEBHOOK_SECURITY_KEY || '';
+
 // Card payment provider selector
 // - square (default): Square Payment Links
 // - stripe: Stripe hosted Checkout
@@ -13226,6 +13630,104 @@ function nowpaymentsAxios() {
       'Accept': 'application/json'
     }
   });
+}
+
+// ========== Bill.com / BILL helpers ==========
+let billcomSessionId = null;
+let billcomSessionLastUsedAt = 0;
+
+function isBillcomConfigured() {
+  return !!(BILLCOM_USERNAME && BILLCOM_PASSWORD && BILLCOM_ORGANIZATION_ID && BILLCOM_DEV_KEY);
+}
+
+async function billcomLogin() {
+  if (!isBillcomConfigured()) {
+    throw new Error('BILL.com is not configured');
+  }
+
+  const payload = {
+    username: String(BILLCOM_USERNAME),
+    password: String(BILLCOM_PASSWORD),
+    organizationId: String(BILLCOM_ORGANIZATION_ID),
+    devKey: String(BILLCOM_DEV_KEY)
+  };
+
+  const resp = await axios.post(`${BILLCOM_API_URL}/v3/login`, payload, {
+    timeout: 30000,
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    },
+    validateStatus: () => true
+  });
+
+  if (!(resp.status >= 200 && resp.status < 300)) {
+    const msg = (resp.data && (resp.data.message || resp.data.error))
+      ? String(resp.data.message || resp.data.error)
+      : `BILL.com login failed (${resp.status})`;
+    throw new Error(msg);
+  }
+
+  const sid = resp?.data?.sessionId;
+  if (!sid) {
+    throw new Error('BILL.com login failed (missing sessionId)');
+  }
+
+  billcomSessionId = String(sid);
+  billcomSessionLastUsedAt = Date.now();
+  return billcomSessionId;
+}
+
+async function ensureBillcomSessionId() {
+  const now = Date.now();
+  const maxIdleMs = 34 * 60 * 1000; // keep below BILL's 35-minute idle expiry
+  if (billcomSessionId && (now - billcomSessionLastUsedAt) < maxIdleMs) {
+    billcomSessionLastUsedAt = now;
+    return billcomSessionId;
+  }
+  return billcomLogin();
+}
+
+async function billcomApiCall({ method, path, body, params, retry = true }) {
+  if (!isBillcomConfigured()) {
+    throw new Error('BILL.com is not configured');
+  }
+
+  const sid = await ensureBillcomSessionId();
+  const resp = await axios.request({
+    method,
+    url: `${BILLCOM_API_URL}${path}`,
+    data: body,
+    params,
+    timeout: 30000,
+    headers: {
+      devKey: String(BILLCOM_DEV_KEY),
+      sessionId: String(sid),
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    },
+    validateStatus: () => true
+  });
+
+  // If the session expired, retry once after re-login.
+  if (retry && (resp.status === 401 || resp.status === 403)) {
+    billcomSessionId = null;
+    billcomSessionLastUsedAt = 0;
+    return billcomApiCall({ method, path, body, params, retry: false });
+  }
+
+  if (!(resp.status >= 200 && resp.status < 300)) {
+    const msg = (resp.data && (resp.data.message || resp.data.error))
+      ? String(resp.data.message || resp.data.error)
+      : `BILL.com API error (${resp.status})`;
+    const err = new Error(msg);
+    err.status = resp.status;
+    err.data = resp.data;
+    throw err;
+  }
+
+  billcomSessionLastUsedAt = Date.now();
+  return resp.data;
 }
 
 // Square configuration (card payments via Square Payment Links)
@@ -13351,6 +13853,42 @@ function verifySquareSignature(req) {
     return false;
   } catch (e) {
     if (DEBUG) console.warn('[square.webhook] Signature verification error:', e.message || e);
+    return false;
+  }
+}
+
+// Verify Bill.com / BILL webhook signature (x-bill-sha-signature)
+// Bill computes: base64(HMAC_SHA256(raw_json_body, securityKey))
+function verifyBillcomWebhookSignature(req) {
+  try {
+    if (!BILLCOM_WEBHOOK_SECURITY_KEY) {
+      if (DEBUG) console.warn('[billcom.webhook] Security key not set; skipping verification');
+      return true;
+    }
+
+    const signature = req.headers['x-bill-sha-signature'];
+    if (!signature) {
+      if (DEBUG) console.warn('[billcom.webhook] Missing x-bill-sha-signature header');
+      return false;
+    }
+
+    const raw = req.rawBody;
+    if (!raw || !Buffer.isBuffer(raw)) {
+      if (DEBUG) console.warn('[billcom.webhook] Missing rawBody for signature verification');
+      return false;
+    }
+
+    const expected = crypto
+      .createHmac('sha256', String(BILLCOM_WEBHOOK_SECURITY_KEY))
+      .update(raw)
+      .digest('base64');
+
+    const a = Buffer.from(expected, 'utf8');
+    const b = Buffer.from(String(signature), 'utf8');
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch (e) {
+    if (DEBUG) console.warn('[billcom.webhook] Signature verification error:', e.message || e);
     return false;
   }
 }

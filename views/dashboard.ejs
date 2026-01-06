@@ -137,6 +137,11 @@
       color:#1d4ed8;
       border:1px solid #bfdbfe;
     }
+    .bill-tag-billcom {
+      background:#f5f3ff;
+      color:#5b21b6;
+      border:1px solid #ddd6fe;
+    }
     /* Status badges for billing rows */
     .bill-status {
       display:inline-block;
@@ -580,9 +585,13 @@
           <label style="margin-left:8px;cursor:pointer">
             <input type="radio" name="fundMethod" value="crypto"> Crypto
           </label>
+          <label style="margin-left:8px;cursor:pointer">
+            <input type="radio" name="fundMethod" value="billcom"> Bill.com
+          </label>
           <div style="margin-top:6px;font-size:12px;color:#6b7280">
             <div><strong>Card</strong>: instant credit after successful payment.</div>
             <div><strong>Crypto</strong>: credit is applied after network confirmations (may take several minutes).</div>
+            <div><strong>Bill.com</strong>: credit is applied after invoice payment is confirmed (may take a few minutes).</div>
           </div>
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
@@ -3380,6 +3389,8 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
             methodBadge = '<span class="bill-tag bill-tag-card">Card</span>';
           } else if (lowerDesc.includes('crypto refill')) {
             methodBadge = '<span class="bill-tag bill-tag-crypto">Crypto</span>';
+          } else if (lowerDesc.includes('bill.com refill') || lowerDesc.includes('billcom refill')) {
+            methodBadge = '<span class="bill-tag bill-tag-billcom">Bill.com</span>';
           }
           tr.innerHTML = `<td>${escapeHtml(date)}</td>`+
                         `<td style=\"color:${amountColor};font-weight:600\">${amountPrefix}${escapeHtml(amountDisplay)}</td>`+
@@ -3435,12 +3446,18 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       const method = methodInput ? methodInput.value : 'card';
 
       $('#confirmFundBtn').disabled = true;
-      $('#confirmFundBtn').textContent = method === 'crypto' ? 'Redirecting to Crypto...' : 'Redirecting to Card...';
+      $('#confirmFundBtn').textContent = method === 'crypto'
+        ? 'Redirecting to Crypto...'
+        : method === 'billcom'
+          ? 'Redirecting to Bill.com...'
+          : 'Redirecting to Card...';
 
       try {
         const endpoint = method === 'crypto'
           ? '/api/me/nowpayments/checkout'
-          : '/api/me/card/checkout';
+          : method === 'billcom'
+            ? '/api/me/billcom/checkout'
+            : '/api/me/card/checkout';
         const r = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -3449,14 +3466,24 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         const j = await r.json();
 
         if (!j.success || !j.payment_url) {
-          const label = method === 'crypto' ? 'Crypto payment' : method === 'card' ? 'Card payment' : 'Payment';
+          const label = method === 'crypto'
+            ? 'Crypto payment'
+            : method === 'billcom'
+              ? 'Bill.com payment'
+              : method === 'card'
+                ? 'Card payment'
+                : 'Payment';
           showToast(j.message || `${label} could not be started. Please try again.`, 'error');
           return;
         }
 
         // Hide modal and show a toast with a direct link before redirecting
         $('#addFundModal').style.display = 'none';
-        const label = method === 'crypto' ? 'Crypto payment' : 'Card payment';
+        const label = method === 'crypto'
+          ? 'Crypto payment'
+          : method === 'billcom'
+            ? 'Bill.com payment'
+            : 'Card payment';
         showLinkToast(`${label} checkout page is ready. If you are not redirected automatically, click the link below.`, 'Open payment page', j.payment_url, 'success');
 
         // Redirect user to hosted checkout page (Card provider or NOWPayments)
