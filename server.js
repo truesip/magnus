@@ -2652,6 +2652,9 @@ app.get('/signup', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+// Serve sidebar icon assets
+app.use('/Icon', express.static(path.join(__dirname, 'Icon')));
+
 // Serve static files from public directory (after route handlers to prevent index.html from being served at root)
 app.use(express.static('public'));
 

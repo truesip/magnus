@@ -19,9 +19,10 @@
     .header-balance{font-size:14px;color:#e5e7eb}
     .wrap{display:flex;height:calc(100vh - 54px)}
     aside{width:220px;border-right:1px solid #e5e7eb;background:#ffffff}
-    aside a{display:block;padding:14px 18px;color:#1f2937;text-decoration:none;border-bottom:1px solid #e5e7eb;transition:all 0.2s}
+    aside a{display:flex;align-items:center;gap:10px;padding:14px 18px;color:#1f2937;text-decoration:none;border-bottom:1px solid #e5e7eb;transition:all 0.2s}
     aside a:hover{background:#e5e7eb;color:#111827}
     aside a.active{background:#eff6ff;color:#1e3a8a;font-weight:600}
+    .nav-icon{width:18px;height:18px;flex:0 0 auto}
     .sidebar-user{padding:12px 18px;color:#6b7280;font-size:12px;border-top:1px solid #e5e7eb;background:#f9fafb}
     main{flex:1;overflow:auto;padding:16px}
     h2{margin:8px 0 12px 0}
@@ -179,15 +180,15 @@
   </header>
   <div class="wrap">
     <aside>
-      <a href="#overview" id="tab-overview" class="active">📊 Overview</a>
-      <a href="#sip" id="tab-sip">📞 SIP Account</a>
-      <a href="#mydids" id="tab-mydids">📱 My Numbers</a>
-      <a href="#buydid" id="tab-buydid">🛒 Buy Numbers</a>
-      <a href="#ai" id="tab-ai">🤖 AI Agent</a>
-      <a href="#trunk" id="tab-trunk">↪️ Call Forwarding</a>
-      <a href="#cdr" id="tab-cdr">📈 Call History</a>
-      <a href="#billing" id="tab-billing">💳 Billing History</a>
-      <a href="#profile" id="tab-profile">👤 Profile</a>
+      <a href="#overview" id="tab-overview" class="active"><img class="nav-icon" src="/Icon/Overview.ico" alt="" aria-hidden="true"><span>Overview</span></a>
+      <a href="#sip" id="tab-sip"><img class="nav-icon" src="/Icon/SIP%20Accounts.ico" alt="" aria-hidden="true"><span>SIP Account</span></a>
+      <a href="#mydids" id="tab-mydids"><img class="nav-icon" src="/Icon/My%20Numbers.ico" alt="" aria-hidden="true"><span>My Numbers</span></a>
+      <a href="#buydid" id="tab-buydid"><img class="nav-icon" src="/Icon/Buy%20Numbers.ico" alt="" aria-hidden="true"><span>Buy Numbers</span></a>
+      <a href="#ai" id="tab-ai"><img class="nav-icon" src="/Icon/AI%20Agent.ico" alt="" aria-hidden="true"><span>AI Agent</span></a>
+      <a href="#trunk" id="tab-trunk"><img class="nav-icon" src="/Icon/call-forwarding.ico" alt="" aria-hidden="true"><span>Call Forwarding</span></a>
+      <a href="#cdr" id="tab-cdr"><img class="nav-icon" src="/Icon/Call%20History.ico" alt="" aria-hidden="true"><span>Call History</span></a>
+      <a href="#billing" id="tab-billing"><img class="nav-icon" src="/Icon/Billing%20History.ico" alt="" aria-hidden="true"><span>Billing History</span></a>
+      <a href="#profile" id="tab-profile"><img class="nav-icon" src="/Icon/Profile.ico" alt="" aria-hidden="true"><span>Profile</span></a>
       <div class="sidebar-user">Signed in as <strong><%= username %></strong></div>
     </aside>
     <main>
