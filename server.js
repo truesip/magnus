@@ -10577,7 +10577,7 @@ app.post('/api/me/billcom/checkout', requireAuth, async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     if (!isBillcomConfigured()) {
-      return res.status(500).json({ success: false, message: 'Bill.com payments are not configured' });
+      return res.status(500).json({ success: false, message: 'ACH payments are not configured' });
     }
 
     const userId = req.session.userId;
@@ -10613,11 +10613,11 @@ app.post('/api/me/billcom/checkout', requireAuth, async (req, res) => {
     const displayName = fullName || baseUser;
 
     if (!userEmail) {
-      return res.status(400).json({ success: false, message: 'An email address is required to use Bill.com payments' });
+      return res.status(400).json({ success: false, message: 'An email address is required to use ACH payments' });
     }
 
     // Insert pending billing record (we will mark completed after successful webhook)
-    const descRaw = `${baseUser} - $${amountNum.toFixed(2)} - TalkUSA bill.com refill`;
+    const descRaw = `${baseUser} - $${amountNum.toFixed(2)} - TalkUSA ACH refill`;
     const desc = descRaw.substring(0, 255);
 
     const [insertResult] = await pool.execute(
@@ -10664,7 +10664,7 @@ app.post('/api/me/billcom/checkout', requireAuth, async (req, res) => {
         'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
         ['failed', JSON.stringify(invoice || {}), billingId]
       );
-      return res.status(502).json({ success: false, message: 'Bill.com did not return invoice identifiers' });
+      return res.status(502).json({ success: false, message: 'Payment provider did not return invoice identifiers' });
     }
 
     // Create payment link
@@ -10681,7 +10681,7 @@ app.post('/api/me/billcom/checkout', requireAuth, async (req, res) => {
         'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
         ['failed', JSON.stringify(link || {}), billingId]
       );
-      return res.status(502).json({ success: false, message: 'Bill.com did not return a payment link' });
+      return res.status(502).json({ success: false, message: 'Payment provider did not return a payment link' });
     }
 
     // Record BILL invoice/payment link for tracking/idempotency
@@ -10707,7 +10707,7 @@ app.post('/api/me/billcom/checkout', requireAuth, async (req, res) => {
       } catch {}
     }
     if (DEBUG) console.error('[billcom.checkout] error:', e?.data || e?.message || e);
-    return res.status(500).json({ success: false, message: 'Failed to create Bill.com payment' });
+    return res.status(500).json({ success: false, message: 'Failed to create ACH payment' });
   }
 });
 
@@ -11859,7 +11859,7 @@ app.post('/webhooks/billcom', async (req, res) => {
     const userEmail = user.email || '';
 
     const amountNum = Number(billing.amount || 0);
-    const desc = billing.description || `TalkUSA bill.com refill (${invoiceId || billingId})`;
+    const desc = billing.description || `TalkUSA ACH refill (${invoiceId || billingId})`;
 
     const httpsAgent = magnusBillingAgent;
     const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;

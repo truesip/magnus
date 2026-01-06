@@ -586,12 +586,12 @@
             <input type="radio" name="fundMethod" value="crypto"> Crypto
           </label>
           <label style="margin-left:8px;cursor:pointer">
-            <input type="radio" name="fundMethod" value="billcom"> Bill.com
+            <input type="radio" name="fundMethod" value="billcom"> ACH
           </label>
           <div style="margin-top:6px;font-size:12px;color:#6b7280">
             <div><strong>Card</strong>: instant credit after successful payment.</div>
             <div><strong>Crypto</strong>: credit is applied after network confirmations (may take several minutes).</div>
-            <div><strong>Bill.com</strong>: credit is applied after invoice payment is confirmed (may take a few minutes).</div>
+            <div><strong>ACH</strong>: credit is applied after invoice payment is confirmed (may take a few minutes).</div>
           </div>
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
@@ -3389,8 +3389,8 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
             methodBadge = '<span class="bill-tag bill-tag-card">Card</span>';
           } else if (lowerDesc.includes('crypto refill')) {
             methodBadge = '<span class="bill-tag bill-tag-crypto">Crypto</span>';
-          } else if (lowerDesc.includes('bill.com refill') || lowerDesc.includes('billcom refill')) {
-            methodBadge = '<span class="bill-tag bill-tag-billcom">Bill.com</span>';
+          } else if (lowerDesc.includes('ach refill') || lowerDesc.includes('bill.com refill') || lowerDesc.includes('billcom refill')) {
+            methodBadge = '<span class="bill-tag bill-tag-billcom">ACH</span>';
           }
           tr.innerHTML = `<td>${escapeHtml(date)}</td>`+
                         `<td style=\"color:${amountColor};font-weight:600\">${amountPrefix}${escapeHtml(amountDisplay)}</td>`+
@@ -3449,7 +3449,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       $('#confirmFundBtn').textContent = method === 'crypto'
         ? 'Redirecting to Crypto...'
         : method === 'billcom'
-          ? 'Redirecting to Bill.com...'
+          ? 'Redirecting to ACH...'
           : 'Redirecting to Card...';
 
       try {
@@ -3469,7 +3469,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           const label = method === 'crypto'
             ? 'Crypto payment'
             : method === 'billcom'
-              ? 'Bill.com payment'
+              ? 'ACH payment'
               : method === 'card'
                 ? 'Card payment'
                 : 'Payment';
@@ -3482,7 +3482,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         const label = method === 'crypto'
           ? 'Crypto payment'
           : method === 'billcom'
-            ? 'Bill.com payment'
+            ? 'ACH payment'
             : 'Card payment';
         showLinkToast(`${label} checkout page is ready. If you are not redirected automatically, click the link below.`, 'Open payment page', j.payment_url, 'success');
 
