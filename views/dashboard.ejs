@@ -2041,6 +2041,7 @@
           `<td>${escapeHtml(num || '-')}</td>`+
           `<td>`+
             `<button class="edit-ai-agent" data-id="${escapeHtml(String(a.id))}">Edit</button> `+
+            `<button class="redeploy-ai-agent" data-id="${escapeHtml(String(a.id))}" style="background:#f59e0b">Redeploy</button> `+
             `<button class="del-ai-agent" data-id="${escapeHtml(String(a.id))}" style="background:#ef4444">Delete</button>`+
           `</td>`;
         tbody.appendChild(tr);
@@ -2421,6 +2422,33 @@
         const id = ev.target.getAttribute('data-id');
         const agent = aiAgentsData.find(a => String(a.id) === String(id));
         openAiAgentModal(agent || null);
+      }
+      if (ev.target && ev.target.classList.contains('redeploy-ai-agent')) {
+        const btn = ev.target;
+        const id = btn.getAttribute('data-id');
+        if (!id) return;
+        if (!confirm('Redeploy this agent now? This will restart the agent service and may interrupt active calls.')) return;
+
+        btn.disabled = true;
+        const old = btn.textContent;
+        btn.textContent = 'Redeploying...';
+
+        try {
+          const r = await fetch(`/api/me/ai/agents/${encodeURIComponent(id)}/redeploy`, { method: 'POST' });
+          const j = await r.json().catch(() => null);
+          if (!r.ok || !j || j.success === false) {
+            showToast(j?.message || 'Failed to redeploy agent', 'error');
+            return;
+          }
+          showToast('Agent redeployed.');
+          await loadAiAgents();
+          await loadAiNumbers();
+        } catch {
+          showToast('Failed to redeploy agent', 'error');
+        } finally {
+          btn.disabled = false;
+          btn.textContent = old;
+        }
       }
       if (ev.target && ev.target.classList.contains('del-ai-agent')) {
         const id = ev.target.getAttribute('data-id');

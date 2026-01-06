@@ -5960,17 +5960,18 @@ async function pipecatUpsertSecretSet(setName, secretsObj, regionOverride) {
   });
 }
 
-async function pipecatCreateAgent({ agentName, secretSetName }) {
+async function pipecatCreateAgent({ agentName, secretSetName, regionOverride }) {
   assertConfiguredOrThrow('PIPECAT_AGENT_IMAGE', PIPECAT_AGENT_IMAGE);
 
   const autoScaling = buildPipecatAutoScaling();
   const enableKrisp = parseOptionalBoolEnv(PIPECAT_ENABLE_KRISP);
+  const region = String(regionOverride || PIPECAT_REGION || 'us-west');
 
   const body = {
     serviceName: agentName,
     image: PIPECAT_AGENT_IMAGE,
     nodeType: 'arm',
-    region: PIPECAT_REGION,
+    region,
     secretSet: secretSetName,
     agentProfile: PIPECAT_AGENT_PROFILE,
     ...(autoScaling ? { autoScaling } : {}),
@@ -8447,6 +8448,71 @@ app.get('/api/public/ai/agents/:id/background-audio.wav', async (req, res) => {
   } catch (e) {
     if (DEBUG) console.warn('[ai.public.background-audio] error:', e.message || e);
     return res.status(404).send('Not found');
+  }
+});
+
+// Redeploy agent (force restart by deleting + recreating the Pipecat agent with the same name + secrets)
+app.post('/api/me/ai/agents/:id/redeploy', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const agentId = String(req.params.id || '').trim();
+    if (!agentId) return res.status(400).json({ success: false, message: 'Missing agent id' });
+
+    const [rows] = await pool.execute('SELECT * FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1', [agentId, userId]);
+    const agent = rows && rows[0];
+    if (!agent) return res.status(404).json({ success: false, message: 'Agent not found' });
+
+    const agentName = String(agent.pipecat_agent_name || '').trim();
+    const secretSetName = String(agent.pipecat_secret_set || '').trim();
+    const region = String(agent.pipecat_region || PIPECAT_REGION || 'us-west');
+
+    if (!agentName || !secretSetName) {
+      return res.status(500).json({ success: false, message: 'Agent not configured' });
+    }
+
+    try {
+      let portalToken = '';
+      if (agent.agent_action_token_enc && agent.agent_action_token_iv && agent.agent_action_token_tag) {
+        const key = getUserSmtpEncryptionKey();
+        if (!key) throw new Error('USER_SMTP_ENCRYPTION_KEY not configured');
+        portalToken = decryptAes256Gcm(agent.agent_action_token_enc, agent.agent_action_token_iv, agent.agent_action_token_tag, key);
+      }
+
+      const operatorNumber = await getUserAiTransferDestination(userId);
+      const publicBaseUrl = getPublicBaseUrlFromReq(req);
+      const bgUrlResolved = await resolveAgentBackgroundAudioUrl({
+        userId,
+        agentId,
+        fallbackUrl: agent.background_audio_url,
+        publicBaseUrl
+      });
+
+      const secrets = buildPipecatSecrets({
+        greeting: agent.greeting,
+        prompt: agent.prompt,
+        cartesiaVoiceId: agent.cartesia_voice_id,
+        portalAgentActionToken: portalToken,
+        operatorNumber,
+        backgroundAudioUrl: bgUrlResolved,
+        backgroundAudioGain: agent.background_audio_gain
+      });
+
+      // Ensure the secret set exists/updated
+      await pipecatUpsertSecretSet(secretSetName, secrets, region);
+
+      // Force a restart by deleting + recreating the Pipecat agent service.
+      await pipecatDeleteAgent(agentName);
+      await pipecatCreateAgent({ agentName, secretSetName, regionOverride: region });
+    } catch (provErr) {
+      const msg = provErr?.message || 'Failed to redeploy agent in Pipecat';
+      return res.status(502).json({ success: false, message: msg, error: provErr?.data });
+    }
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[ai.agents.redeploy] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to redeploy agent' });
   }
 });
 
