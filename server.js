@@ -1569,6 +1569,10 @@ async function initDb() {
     call_domain VARCHAR(64) NULL,
     to_email VARCHAR(255) NOT NULL,
     subject VARCHAR(255) NULL,
+    email_text TEXT NULL,
+    email_html MEDIUMTEXT NULL,
+    attachments_json JSON NULL,
+    smtp_message_id VARCHAR(255) NULL,
     meeting_provider VARCHAR(32) NULL,
     meeting_room_name VARCHAR(191) NULL,
     meeting_room_url TEXT NULL,
@@ -1601,6 +1605,27 @@ async function initDb() {
     { name: 'meeting_room_name', ddl: "ALTER TABLE ai_email_sends ADD COLUMN meeting_room_name VARCHAR(191) NULL AFTER meeting_provider" },
     { name: 'meeting_room_url', ddl: "ALTER TABLE ai_email_sends ADD COLUMN meeting_room_url TEXT NULL AFTER meeting_room_name" },
     { name: 'meeting_join_url', ddl: "ALTER TABLE ai_email_sends ADD COLUMN meeting_join_url TEXT NULL AFTER meeting_room_url" },
+  ]) {
+    try {
+      const [rows] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_email_sends' AND column_name=? LIMIT 1",
+        [dbName, col.name]
+      );
+      if (!rows || !rows.length) {
+        await pool.query(col.ddl);
+        if (DEBUG) console.log(`[schema] Added ai_email_sends.${col.name} column`);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn(`[schema] ai_email_sends.${col.name} check failed`, e.message || e);
+    }
+  }
+
+  // Ensure ai_email_sends preview columns exist (best-effort migrations)
+  for (const col of [
+    { name: 'email_text', ddl: "ALTER TABLE ai_email_sends ADD COLUMN email_text TEXT NULL AFTER subject" },
+    { name: 'email_html', ddl: "ALTER TABLE ai_email_sends ADD COLUMN email_html MEDIUMTEXT NULL AFTER email_text" },
+    { name: 'attachments_json', ddl: "ALTER TABLE ai_email_sends ADD COLUMN attachments_json JSON NULL AFTER email_html" },
+    { name: 'smtp_message_id', ddl: "ALTER TABLE ai_email_sends ADD COLUMN smtp_message_id VARCHAR(255) NULL AFTER attachments_json" },
   ]) {
     try {
       const [rows] = await pool.query(
@@ -3421,8 +3446,23 @@ app.post('/api/ai/agent/send-document', async (req, res) => {
       }
     }
 
+    // Persist preview content (best-effort)
+    if (sendRowId) {
+      try {
+        const attachmentsMeta = (attachments || []).map(a => ({
+          filename: a && a.filename ? String(a.filename) : 'attachment',
+          content_type: a && a.contentType ? String(a.contentType) : null,
+          size_bytes: (a && a.content && Buffer.isBuffer(a.content)) ? a.content.length : null
+        }));
+        await pool.execute(
+          'UPDATE ai_email_sends SET email_text = ?, email_html = NULL, attachments_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          ['Please find your document attached.', JSON.stringify(attachmentsMeta), sendRowId]
+        );
+      } catch {}
+    }
+
     try {
-      await sendEmailViaUserSmtp({
+      const info = await sendEmailViaUserSmtp({
         userId,
         toEmail,
         subject,
@@ -3430,11 +3470,13 @@ app.post('/api/ai/agent/send-document', async (req, res) => {
         attachments
       });
 
+      const messageId = info && info.messageId ? String(info.messageId) : null;
+
       if (sendRowId) {
         try {
           await pool.execute(
-            'UPDATE ai_email_sends SET status = \'completed\', error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
-            [sendRowId]
+            'UPDATE ai_email_sends SET status = \'completed\', smtp_message_id = COALESCE(?, smtp_message_id), error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+            [messageId, sendRowId]
           );
         } catch {}
       }
@@ -3568,6 +3610,16 @@ app.post('/api/ai/agent/send-email', async (req, res) => {
       }
     }
 
+    // Persist preview content (best-effort)
+    if (sendRowId) {
+      try {
+        await pool.execute(
+          'UPDATE ai_email_sends SET email_text = ?, email_html = ?, attachments_json = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [text || null, html || null, sendRowId]
+        );
+      } catch {}
+    }
+
     if (emailCost > 0) {
       const chargeDesc = `AI email send - ${toEmail}`.substring(0, 255);
       const charge = await chargeAiEmailSendsRow({
@@ -3597,7 +3649,7 @@ app.post('/api/ai/agent/send-email', async (req, res) => {
     }
 
     try {
-      await sendEmailViaUserSmtp({
+      const info = await sendEmailViaUserSmtp({
         userId,
         toEmail,
         subject,
@@ -3605,11 +3657,13 @@ app.post('/api/ai/agent/send-email', async (req, res) => {
         ...(html ? { html } : {})
       });
 
+      const messageId = info && info.messageId ? String(info.messageId) : null;
+
       if (sendRowId) {
         try {
           await pool.execute(
-            'UPDATE ai_email_sends SET status = \'completed\', error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
-            [sendRowId]
+            'UPDATE ai_email_sends SET status = \'completed\', smtp_message_id = COALESCE(?, smtp_message_id), error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+            [messageId, sendRowId]
           );
         } catch {}
       }
@@ -5588,7 +5642,17 @@ app.post('/api/ai/agent/send-video-meeting-link', async (req, res) => {
         <p>Open it in your browser to join.</p>
       </div>`;
 
-    await sendEmailViaUserSmtp({
+    // Persist preview content (best-effort)
+    if (sendRowId) {
+      try {
+        await pool.execute(
+          'UPDATE ai_email_sends SET email_text = ?, email_html = ?, attachments_json = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [text || null, html || null, sendRowId]
+        );
+      } catch {}
+    }
+
+    const info = await sendEmailViaUserSmtp({
       userId,
       toEmail,
       subject,
@@ -5596,11 +5660,13 @@ app.post('/api/ai/agent/send-video-meeting-link', async (req, res) => {
       html
     });
 
+    const messageId = info && info.messageId ? String(info.messageId) : null;
+
     if (sendRowId) {
       try {
         await pool.execute(
-          'UPDATE ai_email_sends SET status = \'completed\', error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
-          [sendRowId]
+          'UPDATE ai_email_sends SET status = \'completed\', smtp_message_id = COALESCE(?, smtp_message_id), error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [messageId, sendRowId]
         );
       } catch {}
     }
@@ -7703,7 +7769,17 @@ app.post('/api/me/ai/meetings/send', requireAuth, async (req, res) => {
         <p>Open it in your browser to join.</p>
       </div>`;
 
-    await sendEmailViaUserSmtp({
+    // Persist preview content (best-effort)
+    if (sendRowId) {
+      try {
+        await pool.execute(
+          'UPDATE ai_email_sends SET email_text = ?, email_html = ?, attachments_json = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [text || null, html || null, sendRowId]
+        );
+      } catch {}
+    }
+
+    const info = await sendEmailViaUserSmtp({
       userId,
       toEmail,
       subject,
@@ -7711,11 +7787,13 @@ app.post('/api/me/ai/meetings/send', requireAuth, async (req, res) => {
       html
     });
 
+    const messageId = info && info.messageId ? String(info.messageId) : null;
+
     if (sendRowId) {
       try {
         await pool.execute(
-          'UPDATE ai_email_sends SET status = \'completed\', error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
-          [sendRowId]
+          'UPDATE ai_email_sends SET status = \'completed\', smtp_message_id = COALESCE(?, smtp_message_id), error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [messageId, sendRowId]
         );
       } catch {}
     }
@@ -7844,6 +7922,115 @@ app.get('/api/me/ai/meetings', requireAuth, async (req, res) => {
   } catch (e) {
     if (DEBUG) console.warn('[ai.meetings.list] error:', e?.message || e);
     return res.status(500).json({ success: false, message: 'Failed to load meetings' });
+  }
+});
+
+// List AI emails sent by the agent for the logged-in user.
+app.get('/api/me/ai/emails', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const page = Math.max(0, parseInt(String(req.query.page || '0'), 10) || 0);
+    const pageSizeRaw = parseInt(String(req.query.pageSize || '25'), 10) || 25;
+    const pageSize = Math.max(1, Math.min(100, pageSizeRaw));
+    const offset = page * pageSize;
+
+    const agentIdRaw = String(req.query.agent_id || req.query.agentId || '').trim();
+    const agentId = agentIdRaw ? agentIdRaw : '';
+
+    const statusRaw = String(req.query.status || '').trim().toLowerCase();
+    let status = '';
+    if (statusRaw) {
+      if (!['pending', 'completed', 'failed'].includes(statusRaw)) {
+        return res.status(400).json({ success: false, message: 'status must be one of: pending, completed, failed' });
+      }
+      status = statusRaw;
+    }
+
+    const where = [`e.user_id = ?`];
+    const params = [userId];
+
+    if (agentId) {
+      where.push('e.agent_id = ?');
+      params.push(agentId);
+    }
+
+    if (status) {
+      where.push('e.status = ?');
+      params.push(status);
+    }
+
+    const whereSql = where.length ? ('WHERE ' + where.join(' AND ')) : '';
+
+    const [cntRows] = await pool.execute(
+      `SELECT COUNT(*) AS total
+       FROM ai_email_sends e
+       ${whereSql}`,
+      params
+    );
+    const total = Number(cntRows && cntRows[0] ? (cntRows[0].total || 0) : 0);
+
+    const [rows] = await pool.query(
+      `SELECT e.id, e.created_at, e.updated_at,
+              e.agent_id,
+              a.display_name AS agent_name,
+              e.to_email, e.subject,
+              e.status,
+              e.template_id,
+              e.meeting_provider, e.meeting_room_name, e.meeting_room_url, e.meeting_join_url,
+              e.error
+       FROM ai_email_sends e
+       LEFT JOIN ai_agents a ON a.id = e.agent_id
+       ${whereSql}
+       ORDER BY e.created_at DESC, e.id DESC
+       LIMIT ${parseInt(pageSize, 10)} OFFSET ${parseInt(offset, 10)}`,
+      params
+    );
+
+    return res.json({ success: true, data: rows || [], total });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.emails.list] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load emails' });
+  }
+});
+
+// Get one AI email send row (for preview) for the logged-in user.
+app.get('/api/me/ai/emails/:id', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const id = parseInt(String(req.params.id || '').trim(), 10);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid email id' });
+    }
+
+    const [rows] = await pool.execute(
+      `SELECT e.id, e.created_at, e.updated_at,
+              e.agent_id,
+              a.display_name AS agent_name,
+              e.to_email, e.subject,
+              e.status, e.attempt_count, e.error,
+              e.template_id,
+              e.meeting_provider, e.meeting_room_name, e.meeting_room_url, e.meeting_join_url,
+              e.email_text, e.email_html, e.attachments_json, e.smtp_message_id
+       FROM ai_email_sends e
+       LEFT JOIN ai_agents a ON a.id = e.agent_id
+       WHERE e.id = ? AND e.user_id = ?
+       LIMIT 1`,
+      [id, userId]
+    );
+
+    const row = rows && rows[0];
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'Email not found' });
+    }
+
+    return res.json({ success: true, data: row });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.emails.get] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load email' });
   }
 });
 
