@@ -5509,9 +5509,23 @@ app.post('/api/ai/agent/send-video-meeting-link', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Valid to_email is required' });
     }
 
-    // This endpoint assumes HeyGen is available for the avatar tile in the video room.
-    if (!process.env.HEYGEN_API_KEY) {
-      return res.status(500).json({ success: false, message: 'HEYGEN_API_KEY not configured' });
+    const videoProvider = String(process.env.VIDEO_AVATAR_PROVIDER || 'heygen').trim().toLowerCase() || 'heygen';
+    if (videoProvider === 'akool') {
+      if (!process.env.AKOOL_API_KEY) {
+        return res.status(500).json({ success: false, message: 'AKOOL_API_KEY not configured' });
+      }
+      if (!process.env.AKOOL_AVATAR_ID) {
+        return res.status(500).json({ success: false, message: 'AKOOL_AVATAR_ID not configured' });
+      }
+    } else if (videoProvider === 'heygen') {
+      if (!process.env.HEYGEN_API_KEY) {
+        return res.status(500).json({ success: false, message: 'HEYGEN_API_KEY not configured' });
+      }
+    } else {
+      return res.status(500).json({
+        success: false,
+        message: `VIDEO_AVATAR_PROVIDER must be one of: heygen, akool (got: ${videoProvider || 'empty'})`
+      });
     }
 
     const callId = String(req.body?.call_id || req.body?.callId || '').trim() || null;
@@ -5943,8 +5957,22 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl,
   const cartesia = process.env.CARTESIA_API_KEY || '';
   const xai = process.env.XAI_API_KEY || '';
   const daily = process.env.DAILY_API_KEY || '';
+
+  // Video avatar provider (video meetings only; used by the agent runtime)
+  const videoAvatarProvider = String(process.env.VIDEO_AVATAR_PROVIDER || '').trim().toLowerCase();
+
+  // Optional provider keys
   const heygen = process.env.HEYGEN_API_KEY || '';
   const heygenAvatarId = process.env.HEYGEN_AVATAR_ID || '';
+
+  const akoolApiKey = process.env.AKOOL_API_KEY || '';
+  const akoolAvatarId = process.env.AKOOL_AVATAR_ID || '';
+  const akoolBaseUrl = process.env.AKOOL_API_BASE_URL || '';
+  const akoolVoiceId = process.env.AKOOL_VOICE_ID || '';
+  const akoolBackgroundId = process.env.AKOOL_BACKGROUND_ID || '';
+  const akoolModeType = process.env.AKOOL_MODE_TYPE;
+  const akoolDurationSeconds = process.env.AKOOL_DURATION_SECONDS;
+
   // Platform-owned keys are required.
   assertConfiguredOrThrow('DEEPGRAM_API_KEY', deepgram);
   assertConfiguredOrThrow('CARTESIA_API_KEY', cartesia);
@@ -5967,9 +5995,23 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl,
     AGENT_PROMPT: String(prompt || '')
   };
 
-  // Optional: required only for avatar/video-meeting mode.
+  // Video meeting avatar provider
+  if (videoAvatarProvider) {
+    secrets.VIDEO_AVATAR_PROVIDER = videoAvatarProvider;
+  }
+
+  // Optional: HeyGen (video meetings)
   if (heygen) secrets.HEYGEN_API_KEY = heygen;
   if (heygenAvatarId) secrets.HEYGEN_AVATAR_ID = String(heygenAvatarId);
+
+  // Optional: Akool (video meetings)
+  if (akoolApiKey) secrets.AKOOL_API_KEY = akoolApiKey;
+  if (akoolAvatarId) secrets.AKOOL_AVATAR_ID = String(akoolAvatarId);
+  if (akoolBaseUrl) secrets.AKOOL_API_BASE_URL = String(akoolBaseUrl);
+  if (akoolVoiceId) secrets.AKOOL_VOICE_ID = String(akoolVoiceId);
+  if (akoolBackgroundId) secrets.AKOOL_BACKGROUND_ID = String(akoolBackgroundId);
+  if (akoolModeType != null && String(akoolModeType).trim()) secrets.AKOOL_MODE_TYPE = String(akoolModeType);
+  if (akoolDurationSeconds != null && String(akoolDurationSeconds).trim()) secrets.AKOOL_DURATION_SECONDS = String(akoolDurationSeconds);
 
   const portalBase = String(portalBaseUrl || process.env.PORTAL_BASE_URL || process.env.PUBLIC_BASE_URL || '').trim();
   if (portalBase) secrets.PORTAL_BASE_URL = portalBase;
@@ -7720,6 +7762,18 @@ app.post('/api/me/ai/meetings/send', requireAuth, async (req, res) => {
         }
 
         return res.status(reason === 'insufficient_funds' ? 402 : 500).json({ success: false, message: errMsg });
+      }
+    }
+
+    // Validate video avatar provider configuration for video meetings.
+    const videoProvider = String(process.env.VIDEO_AVATAR_PROVIDER || 'heygen').trim().toLowerCase() || 'heygen';
+    if (videoProvider === 'akool') {
+      if (!process.env.AKOOL_API_KEY || !process.env.AKOOL_AVATAR_ID) {
+        return res.status(500).json({ success: false, message: 'Akool is selected but AKOOL_API_KEY/AKOOL_AVATAR_ID are not configured' });
+      }
+    } else if (videoProvider === 'heygen') {
+      if (!process.env.HEYGEN_API_KEY) {
+        return res.status(500).json({ success: false, message: 'HeyGen is selected but HEYGEN_API_KEY is not configured' });
       }
     }
 
