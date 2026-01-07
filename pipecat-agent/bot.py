@@ -1543,7 +1543,8 @@ async def bot(session_args: Any):
 
                 # Session id (best-effort)
                 self._session_id = _as_str(
-                    payload_data.get("id")
+                    payload_data.get("_id")
+                    or payload_data.get("id")
                     or payload_data.get("session_id")
                     or payload_data.get("sessionId")
                     or ""
@@ -1715,15 +1716,15 @@ async def bot(session_args: Any):
                     try:
                         if track.kind == rtc.TrackKind.KIND_VIDEO and self._video_task is None:
                             stream = rtc.VideoStream(track)
-                            if self._task_manager:
-                                self._video_task = self._task_manager.create_task(self._process_video_frames(stream))
-                            else:
+                            try:
+                                self._video_task = self.create_task(self._process_video_frames(stream), name="akool_video_stream")
+                            except Exception:
                                 self._video_task = asyncio.create_task(self._process_video_frames(stream))
                         elif track.kind == rtc.TrackKind.KIND_AUDIO and self._audio_task is None:
                             stream = rtc.AudioStream(track=track)
-                            if self._task_manager:
-                                self._audio_task = self._task_manager.create_task(self._process_audio_frames(stream))
-                            else:
+                            try:
+                                self._audio_task = self.create_task(self._process_audio_frames(stream), name="akool_audio_stream")
+                            except Exception:
                                 self._audio_task = asyncio.create_task(self._process_audio_frames(stream))
                     except Exception:
                         pass
@@ -1744,15 +1745,15 @@ async def bot(session_args: Any):
                                 continue
                             if pub.kind == rtc.TrackKind.KIND_VIDEO and self._video_task is None:
                                 stream = rtc.VideoStream(pub.track)
-                                if self._task_manager:
-                                    self._video_task = self._task_manager.create_task(self._process_video_frames(stream))
-                                else:
+                                try:
+                                    self._video_task = self.create_task(self._process_video_frames(stream), name="akool_video_stream")
+                                except Exception:
                                     self._video_task = asyncio.create_task(self._process_video_frames(stream))
                             if pub.kind == rtc.TrackKind.KIND_AUDIO and self._audio_task is None:
                                 stream = rtc.AudioStream(track=pub.track)
-                                if self._task_manager:
-                                    self._audio_task = self._task_manager.create_task(self._process_audio_frames(stream))
-                                else:
+                                try:
+                                    self._audio_task = self.create_task(self._process_audio_frames(stream), name="akool_audio_stream")
+                                except Exception:
                                     self._audio_task = asyncio.create_task(self._process_audio_frames(stream))
                         except Exception:
                             continue
