@@ -5973,6 +5973,14 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl,
   const akoolModeType = process.env.AKOOL_MODE_TYPE;
   const akoolDurationSeconds = process.env.AKOOL_DURATION_SECONDS;
 
+  // Akool Vision Sense (two-way video)
+  const akoolVisionEnabled = process.env.AKOOL_VISION_ENABLED || '';
+  const akoolVisionFps = process.env.AKOOL_VISION_FPS;
+
+  // Optional: attach participant camera frames to the LLM as image input
+  const akoolVisionLlmEnabled = process.env.AKOOL_VISION_LLM_ENABLED || '';
+  const akoolVisionLlmMaxAgeS = process.env.AKOOL_VISION_LLM_MAX_AGE_S;
+
   // Platform-owned keys are required.
   assertConfiguredOrThrow('DEEPGRAM_API_KEY', deepgram);
   assertConfiguredOrThrow('CARTESIA_API_KEY', cartesia);
@@ -6012,6 +6020,12 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl,
   if (akoolBackgroundId) secrets.AKOOL_BACKGROUND_ID = String(akoolBackgroundId);
   if (akoolModeType != null && String(akoolModeType).trim()) secrets.AKOOL_MODE_TYPE = String(akoolModeType);
   if (akoolDurationSeconds != null && String(akoolDurationSeconds).trim()) secrets.AKOOL_DURATION_SECONDS = String(akoolDurationSeconds);
+
+  if (akoolVisionEnabled && String(akoolVisionEnabled).trim()) secrets.AKOOL_VISION_ENABLED = String(akoolVisionEnabled).trim();
+  if (akoolVisionFps != null && String(akoolVisionFps).trim()) secrets.AKOOL_VISION_FPS = String(akoolVisionFps).trim();
+
+  if (akoolVisionLlmEnabled && String(akoolVisionLlmEnabled).trim()) secrets.AKOOL_VISION_LLM_ENABLED = String(akoolVisionLlmEnabled).trim();
+  if (akoolVisionLlmMaxAgeS != null && String(akoolVisionLlmMaxAgeS).trim()) secrets.AKOOL_VISION_LLM_MAX_AGE_S = String(akoolVisionLlmMaxAgeS).trim();
 
   const portalBase = String(portalBaseUrl || process.env.PORTAL_BASE_URL || process.env.PUBLIC_BASE_URL || '').trim();
   if (portalBase) secrets.PORTAL_BASE_URL = portalBase;

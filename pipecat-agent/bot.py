@@ -580,8 +580,30 @@ async def bot(session_args: Any):
     if not is_video_meeting:
         video_avatar_provider = "none"
 
-    # Shared state for Akool -> audio-only failover (used to re-enable TTS).
-    akool_audio_only_fallback: dict[str, Any] = {"active": False, "reason": ""}
+    # Akool "Vision Sense" (two-way video) support.
+    # When enabled, we capture the first participant's camera frames from Daily and (optionally)
+    # publish them into Akool's LiveKit room so the avatar can "see" the user's camera feed.
+    akool_vision_enabled = (
+        _env("AKOOL_VISION_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+    )
+    akool_vision_fps = max(1, _parse_int("AKOOL_VISION_FPS", 3))
+
+    # Optional: attach the latest captured camera frame to the LLM so the assistant can
+    # answer questions based on what it "sees".
+    akool_vision_llm_enabled = (
+        _env("AKOOL_VISION_LLM_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+    )
+    akool_vision_llm_max_age_s = min(60.0, max(0.0, _parse_float("AKOOL_VISION_LLM_MAX_AGE_S", 5.0)))
+
+    # We only turn on Daily video input if at least one vision feature is enabled.
+    akool_vision_capture_enabled = bool(akool_vision_enabled or akool_vision_llm_enabled)
+
+    if is_video_meeting and video_avatar_provider == "akool" and akool_vision_llm_enabled:
+        prompt += (
+            "\n\nYou are in a video meeting. You may receive still images from the user's camera. "
+            "Use them when relevant to answer questions about what you see. "
+            "If no recent image is available, say you can't see the camera right now."
+        )
 
     # Used for per-session transcript logging back to the portal
     call_id = str(dialin_settings.call_id) if dialin_settings else ""
@@ -595,6 +617,8 @@ async def bot(session_args: Any):
         audio_out_enabled=True,
         audio_in_sample_rate=sample_rate,
         audio_out_sample_rate=sample_rate,
+        # Enable video input only when explicitly requested (Akool Vision Sense).
+        video_in_enabled=bool(is_video_meeting and video_avatar_provider == "akool" and akool_vision_capture_enabled),
         # Enable video output only for explicit video meeting sessions.
         video_out_enabled=is_video_meeting,
         video_out_is_live=is_video_meeting,
@@ -1047,26 +1071,9 @@ async def bot(session_args: Any):
         llm.register_function("send_custom_physical_mail", _send_custom_physical_mail)
 
     # TTS is required for phone calls and for HeyGen video meetings.
-    # For Akool video meetings, the avatar generates audio/video from the stream messages.
-    #
-    # NOTE: If CARTESIA_API_KEY is present, we also enable TTS for Akool meetings so we can
-    # fall back to audio-only if Akool fails (quota, network, etc.).
+    # For Akool video meetings, Akool generates audio/video from stream messages, so we do not run TTS.
     tts = None
-    if is_video_meeting and video_avatar_provider == "akool":
-        cartesia_key = _env("CARTESIA_API_KEY", "").strip()
-        if cartesia_key:
-            voice_id = await _resolve_cartesia_voice_id(api_key=cartesia_key)
-            tts = CartesiaTTSService(
-                api_key=cartesia_key,
-                voice_id=voice_id,
-                cartesia_version=_env("CARTESIA_VERSION", "2025-04-16").strip() or "2025-04-16",
-                model=_env("CARTESIA_MODEL", "sonic-3").strip() or "sonic-3",
-                sample_rate=sample_rate,
-                text_filters=[MarkdownTextFilter()],
-            )
-        else:
-            logger.warning("CARTESIA_API_KEY not set; Akool audio-only fallback will be unavailable")
-    else:
+    if not (is_video_meeting and video_avatar_provider == "akool"):
         cartesia_key = _require("CARTESIA_API_KEY")
         voice_id = await _resolve_cartesia_voice_id(api_key=cartesia_key)
         tts = CartesiaTTSService(
@@ -1156,12 +1163,36 @@ async def bot(session_args: Any):
         orig_add = context.add_message
 
         def add_message_hook(msg: Any) -> None:
+            def _content_for_log(content: Any) -> str:
+                # Avoid logging data:image/jpeg;base64,... blobs (vision messages).
+                try:
+                    if isinstance(content, str):
+                        return content
+                    if isinstance(content, list):
+                        parts: list[str] = []
+                        for item in content:
+                            if not isinstance(item, dict):
+                                continue
+                            typ = str(item.get("type") or "").strip().lower()
+                            if typ == "text":
+                                t = str(item.get("text") or "").strip()
+                                if t:
+                                    parts.append(t)
+                            elif typ == "image_url":
+                                parts.append("[image]")
+                            elif typ:
+                                parts.append(f"[{typ}]")
+                        return "\n".join([p for p in parts if p]).strip()
+                    return str(content or "")
+                except Exception:
+                    return ""
+
             try:
                 if isinstance(msg, dict):
                     r = str(msg.get("role") or "").strip().lower()
                     if r in ("user", "assistant"):
                         c = msg.get("content")
-                        t = asyncio.create_task(_log_turn(r, str(c or "")))
+                        t = asyncio.create_task(_log_turn(r, _content_for_log(c)))
                         pending_log_tasks.add(t)
                         t.add_done_callback(lambda tt: pending_log_tasks.discard(tt))
             except Exception:
@@ -1367,6 +1398,7 @@ async def bot(session_args: Any):
             SpeechOutputAudioRawFrame,
             StartFrame,
             TTSTextFrame as PipecatTTSTextFrame,
+            UserImageRawFrame,
             UserStartedSpeakingFrame,
             OutputImageRawFrame,
         )
@@ -1380,6 +1412,10 @@ async def bot(session_args: Any):
         akool_mode_type = _parse_int("AKOOL_MODE_TYPE", 1)  # 1=retelling, 2=dialogue
         akool_duration = _parse_int("AKOOL_DURATION_SECONDS", 1800)
 
+        # Vision Sense / two-way video: send Daily participant camera frames to Akool.
+        akool_vision_enabled = bool(akool_vision_enabled)
+        akool_vision_fps = int(akool_vision_fps)
+
         class AkoolVideoService(FrameProcessor):
             def __init__(
                 self,
@@ -1392,7 +1428,8 @@ async def bot(session_args: Any):
                 mode_type: int = 1,
                 duration_seconds: int = 1800,
                 out_sample_rate: int = 16000,
-                fallback_state: dict[str, Any] | None = None,
+                vision_enabled: bool = False,
+                vision_fps: int = 3,
             ):
                 super().__init__()
                 self._api_key = str(api_key)
@@ -1405,6 +1442,16 @@ async def bot(session_args: Any):
 
                 self._out_sample_rate = int(out_sample_rate) if int(out_sample_rate) > 0 else 16000
                 self._audio_ratecv_state = None
+
+                # Vision Sense (optional): publish a local video track to Akool's LiveKit room.
+                self._vision_enabled = bool(vision_enabled)
+                self._vision_fps = max(1, int(vision_fps) if int(vision_fps) > 0 else 3)
+                self._vision_lock = asyncio.Lock()
+                self._vision_source: rtc.VideoSource | None = None
+                self._vision_track: rtc.LocalVideoTrack | None = None
+                self._vision_width: int = 0
+                self._vision_height: int = 0
+                self._vision_last_sent_s: float = 0.0
 
                 # Route LiveKit media frames to the same output destination as the pipeline.
                 self._transport_destination = None
@@ -1428,11 +1475,10 @@ async def bot(session_args: Any):
                 self._send_lock = asyncio.Lock()
                 self._current_mid: str | None = None
 
-                self._fallback_state = fallback_state if isinstance(fallback_state, dict) else {}
-                self._audio_only_fallback = False
-                self._fallback_reason = ""
-                self._fallback_lock = asyncio.Lock()
-                self._fallback_shutdown_task: asyncio.Task | None = None
+                self._disabled = False
+                self._disabled_reason = ""
+                self._shutdown_lock = asyncio.Lock()
+                self._shutdown_task: asyncio.Task | None = None
 
             async def setup(self, setup):
                 await super().setup(setup)
@@ -1660,7 +1706,7 @@ async def bot(session_args: Any):
                     async for frame_event in stream:
                         audio_frame = frame_event.frame
 
-                        if not self._transport_ready or self._audio_only_fallback:
+                        if not self._transport_ready or self._disabled:
                             continue
 
                         # LiveKit audio is typically PCM16.
@@ -1714,7 +1760,7 @@ async def bot(session_args: Any):
                 except Exception as e:
                     logger.warning(f"Akool audio stream ended: {e}")
                     try:
-                        await self._enter_audio_only_fallback(f"audio stream ended: {e}", exception=e)
+                        await self._disable_avatar(f"audio stream ended: {e}", exception=e)
                     except Exception:
                         pass
 
@@ -1728,7 +1774,7 @@ async def bot(session_args: Any):
                         except Exception:
                             pass
 
-                        if not self._transport_ready or self._audio_only_fallback:
+                        if not self._transport_ready or self._disabled:
                             continue
 
                         out = OutputImageRawFrame(
@@ -1748,7 +1794,7 @@ async def bot(session_args: Any):
                 except Exception as e:
                     logger.warning(f"Akool video stream ended: {e}")
                     try:
-                        await self._enter_audio_only_fallback(f"video stream ended: {e}", exception=e)
+                        await self._disable_avatar(f"video stream ended: {e}", exception=e)
                     except Exception:
                         pass
 
@@ -1831,6 +1877,13 @@ async def bot(session_args: Any):
                         pass
                     setattr(self, t_name, None)
 
+                # Reset vision publishing state
+                self._vision_source = None
+                self._vision_track = None
+                self._vision_width = 0
+                self._vision_height = 0
+                self._vision_last_sent_s = 0.0
+
                 # Disconnect LiveKit
                 if self._room:
                     try:
@@ -1844,6 +1897,114 @@ async def bot(session_args: Any):
                     await self._close_session()
                 finally:
                     self._session_id = ""
+
+            async def _ensure_vision_track(self, *, width: int, height: int) -> None:
+                if not self._vision_enabled:
+                    return
+                if self._disabled:
+                    return
+                if not self._room:
+                    return
+                if self._vision_source is not None and self._vision_track is not None:
+                    return
+
+                width = int(width) if int(width) > 0 else 0
+                height = int(height) if int(height) > 0 else 0
+                if not width or not height:
+                    return
+
+                async with self._vision_lock:
+                    if self._vision_source is not None and self._vision_track is not None:
+                        return
+                    if not self._room:
+                        return
+
+                    self._vision_width = width
+                    self._vision_height = height
+
+                    try:
+                        self._vision_source = rtc.VideoSource(width, height)
+                        self._vision_track = rtc.LocalVideoTrack.create_video_track("camera", self._vision_source)
+
+                        # Track publish options vary by livekit SDK version; keep this best-effort.
+                        opts = None
+                        try:
+                            TrackPublishOptions = getattr(rtc, "TrackPublishOptions", None)
+                            TrackSource = getattr(rtc, "TrackSource", None)
+                            if TrackPublishOptions is not None:
+                                if TrackSource is not None and hasattr(TrackSource, "SOURCE_CAMERA"):
+                                    opts = TrackPublishOptions(source=TrackSource.SOURCE_CAMERA)
+                                else:
+                                    opts = TrackPublishOptions()
+                        except Exception:
+                            opts = None
+
+                        try:
+                            if opts is None:
+                                await self._room.local_participant.publish_track(self._vision_track)
+                            else:
+                                await self._room.local_participant.publish_track(self._vision_track, opts)
+                        except Exception:
+                            # Older SDKs may require the options arg.
+                            await self._room.local_participant.publish_track(self._vision_track, opts)  # type: ignore
+
+                        logger.info(f"Akool Vision Sense enabled: publishing user camera to LiveKit ({width}x{height} @ {self._vision_fps}fps)")
+                    except Exception as e:
+                        # Don't kill the whole session if vision publishing fails.
+                        self._vision_source = None
+                        self._vision_track = None
+                        logger.warning(f"Akool Vision Sense publish failed (continuing without vision): {e}")
+
+            async def ingest_user_image(self, frame: UserImageRawFrame) -> None:
+                """Best-effort: publish Daily participant camera frames into Akool's LiveKit room."""
+                if not self._vision_enabled:
+                    return
+                if self._disabled:
+                    return
+                if not self._room:
+                    return
+
+                try:
+                    w, h = frame.size
+                except Exception:
+                    return
+
+                # Throttle frames to configured FPS.
+                try:
+                    now = asyncio.get_running_loop().time()
+                except Exception:
+                    now = 0.0
+
+                min_interval = 1.0 / float(self._vision_fps or 1)
+                if self._vision_last_sent_s and (now - self._vision_last_sent_s) < min_interval:
+                    return
+                self._vision_last_sent_s = now
+
+                fmt = str(getattr(frame, "format", "") or "").upper()
+                if fmt not in ("RGB", "RGB24"):
+                    return
+
+                img = getattr(frame, "image", b"") or b""
+                if not img:
+                    return
+
+                expected = int(w) * int(h) * 3
+                if expected <= 0:
+                    return
+                if len(img) < expected:
+                    return
+                if len(img) != expected:
+                    img = bytes(img[:expected])
+
+                await self._ensure_vision_track(width=int(w), height=int(h))
+                if not self._vision_source:
+                    return
+
+                try:
+                    vf = rtc.VideoFrame(int(w), int(h), VideoBufferType.RGB24, img)
+                    self._vision_source.capture_frame(vf)
+                except Exception as e:
+                    logger.debug(f"Akool Vision Sense capture_frame failed: {e}")
 
             async def _send_stream_message(self, obj: dict[str, Any]):
                 if not self._room:
@@ -1909,20 +2070,15 @@ async def bot(session_args: Any):
                     return "", s
                 return s[: last + 1], s[last + 1 :]
 
-            async def _enter_audio_only_fallback(self, reason: str, exception: Exception | None = None):
-                async with self._fallback_lock:
-                    if self._audio_only_fallback:
+            async def _disable_avatar(self, reason: str, exception: Exception | None = None):
+                async with self._shutdown_lock:
+                    if self._disabled:
                         return
-                    self._audio_only_fallback = True
-                    self._fallback_reason = str(reason or "").strip()
+                    self._disabled = True
+                    self._disabled_reason = str(reason or "").strip()
 
-                    if isinstance(self._fallback_state, dict):
-                        self._fallback_state["active"] = True
-                        self._fallback_state["reason"] = self._fallback_reason
-
-                    msg = (
-                        "Akool avatar unavailable, falling back to audio-only for this meeting"
-                        + (f": {self._fallback_reason}" if self._fallback_reason else "")
+                    msg = "Akool avatar disabled for this meeting" + (
+                        f": {self._disabled_reason}" if self._disabled_reason else ""
                     )
                     if exception:
                         msg += f" ({exception})"
@@ -1934,12 +2090,12 @@ async def bot(session_args: Any):
                         except Exception:
                             pass
 
-                    if not self._fallback_shutdown_task:
+                    if not self._shutdown_task:
                         try:
-                            self._fallback_shutdown_task = self.create_task(_shutdown(), name="akool_fallback_shutdown")
+                            self._shutdown_task = self.create_task(_shutdown(), name="akool_shutdown")
                         except Exception:
                             try:
-                                self._fallback_shutdown_task = asyncio.create_task(_shutdown())
+                                self._shutdown_task = asyncio.create_task(_shutdown())
                             except Exception:
                                 pass
 
@@ -1956,11 +2112,11 @@ async def bot(session_args: Any):
                     except Exception:
                         self._transport_destination = None
 
-                    if not self._audio_only_fallback:
+                    if not self._disabled:
                         try:
                             await self._start_session()
                         except Exception as e:
-                            await self._enter_audio_only_fallback(f"start failed: {e}", exception=e)
+                            await self._disable_avatar(f"start failed: {e}", exception=e)
                     await self.push_frame(frame, direction)
                     return
 
@@ -1982,8 +2138,16 @@ async def bot(session_args: Any):
                     await self.push_frame(frame, direction)
                     return
 
-                # Avatar disabled: passthrough frames so TTS audio can go to the transport.
-                if self._audio_only_fallback:
+                if self._disabled:
+                    await self.push_frame(frame, direction)
+                    return
+
+                if isinstance(frame, UserImageRawFrame):
+                    # Best-effort: forward participant camera frames into Akool for Vision Sense.
+                    try:
+                        await self.ingest_user_image(frame)
+                    except Exception:
+                        pass
                     await self.push_frame(frame, direction)
                     return
 
@@ -2001,7 +2165,7 @@ async def bot(session_args: Any):
                     try:
                         await self._send_text(str(frame.text or ""))
                     except Exception as e:
-                        await self._enter_audio_only_fallback(f"send_text failed: {e}", exception=e)
+                        await self._disable_avatar(f"send_text failed: {e}", exception=e)
                     await self.push_frame(frame, direction)
                     return
 
@@ -2014,7 +2178,7 @@ async def bot(session_args: Any):
                         try:
                             await self._send_text(flush)
                         except Exception as e:
-                            await self._enter_audio_only_fallback(f"send_text failed: {e}", exception=e)
+                            await self._disable_avatar(f"send_text failed: {e}", exception=e)
                     await self.push_frame(frame, direction)
                     return
 
@@ -2024,7 +2188,7 @@ async def bot(session_args: Any):
                         try:
                             await self._send_text(self._pending_text)
                         except Exception as e:
-                            await self._enter_audio_only_fallback(f"send_text failed: {e}", exception=e)
+                            await self._disable_avatar(f"send_text failed: {e}", exception=e)
                     self._pending_text = ""
                     await self.push_frame(frame, direction)
                     return
@@ -2040,46 +2204,103 @@ async def bot(session_args: Any):
             mode_type=akool_mode_type,
             duration_seconds=akool_duration,
             out_sample_rate=sample_rate,
-            fallback_state=akool_audio_only_fallback,
+            vision_enabled=akool_vision_enabled,
+            vision_fps=akool_vision_fps,
         )
-
-    # If we're using Akool + Cartesia is configured, keep TTS in the pipeline but suppress it
-    # while the avatar is healthy. If Akool fails, we flip to audio-only by allowing TTS to run.
-    akool_tts_gate = None
-    if is_video_meeting and video_avatar_provider == "akool" and tts:
-
-        class AkoolTTSGate(FrameProcessor):
-            def __init__(self, *, state: dict[str, Any]):
-                super().__init__()
-                self._state = state
-
-            async def process_frame(self, frame, direction: FrameDirection):
-                await super().process_frame(frame, direction)
-
-                if direction is FrameDirection.DOWNSTREAM and hasattr(frame, "skip_tts"):
-                    # When Akool is active, suppress TTS (Akool provides audio).
-                    if not bool(self._state.get("active")):
-                        frame.skip_tts = True
-                    else:
-                        # Audio-only fallback: allow TTS unless explicitly disabled upstream.
-                        if getattr(frame, "skip_tts", None) is not True:
-                            frame.skip_tts = None
-
-                await self.push_frame(frame, direction)
-
-        akool_tts_gate = AkoolTTSGate(state=akool_audio_only_fallback)
 
     # IMPORTANT: assistant context aggregator consumes TextFrames (it aggregates them and does
     # not forward). If it sits *before* TTS, the bot will generate text but you won't hear audio.
     # So we place it after TTS and before the output transport.
+
+    ctx_user = ctx.user()
+    ctx_assistant = ctx.assistant()
+
+    def _mono_time_s() -> float:
+        try:
+            return asyncio.get_running_loop().time()
+        except Exception:
+            return 0.0
+
+    # Optional: keep a "latest camera frame" snapshot and attach it to the user's next LLM turn.
+    vision_state: dict[str, Any] | None = None
+    if is_video_meeting and video_avatar_provider == "akool" and akool_vision_llm_enabled:
+        vision_state = {"format": "", "size": (0, 0), "image": b"", "ts": 0.0}
+
+        import types
+
+        async def _handle_aggregation_with_vision(self, aggregation: str):
+            text = str(aggregation or "").strip()
+            if not text:
+                return
+
+            snap = vision_state or {}
+            img = snap.get("image") or b""
+            if img:
+                now = _mono_time_s()
+                ts = float(snap.get("ts") or 0.0)
+                if akool_vision_llm_max_age_s <= 0 or (now - ts) <= akool_vision_llm_max_age_s:
+                    try:
+                        fmt = str(snap.get("format") or "RGB").strip() or "RGB"
+                        size = tuple(snap.get("size") or (0, 0))
+                        self._context.add_image_frame_message(format=fmt, size=size, image=img, text=text)
+                        return
+                    except Exception as e:
+                        logger.debug(f"Vision frame attach failed (falling back to text): {e}")
+
+            self._context.add_message({"role": self.role, "content": text})
+
+        ctx_user.handle_aggregation = types.MethodType(_handle_aggregation_with_vision, ctx_user)
+        logger.info(
+            "Akool assistant vision enabled: attaching participant camera frames to LLM input (requires a vision-capable model)"
+        )
+
+    # For Akool Vision Sense, capture participant camera frames and forward to Akool.
+    akool_vision_bridge = None
+    if is_video_meeting and video_avatar_provider == "akool" and akool_service and akool_vision_capture_enabled:
+
+        class AkoolVisionBridge(FrameProcessor):
+            def __init__(self, *, akool: Any, vision_state: Optional[dict[str, Any]] = None):
+                super().__init__()
+                self._akool = akool
+                self._vision_state = vision_state
+
+            async def process_frame(self, frame, direction: FrameDirection):
+                await super().process_frame(frame, direction)
+
+                if direction is FrameDirection.DOWNSTREAM and isinstance(frame, UserImageRawFrame):
+                    # Best-effort: store for the LLM.
+                    if self._vision_state is not None:
+                        try:
+                            self._vision_state["format"] = str(getattr(frame, "format", "") or "RGB").strip() or "RGB"
+                            self._vision_state["size"] = tuple(getattr(frame, "size", (0, 0)) or (0, 0))
+                            self._vision_state["image"] = bytes(getattr(frame, "image", b"") or b"")
+                            self._vision_state["ts"] = _mono_time_s()
+                        except Exception:
+                            pass
+
+                    # Best-effort: forward to Akool LiveKit (no-op if Akool vision publishing is disabled).
+                    try:
+                        await self._akool.ingest_user_image(frame)
+                    except Exception:
+                        pass
+
+                    # Drop the raw frame to avoid sending large video frames through the rest of the pipeline.
+                    return
+
+                await self.push_frame(frame, direction)
+
+        akool_vision_bridge = AkoolVisionBridge(akool=akool_service, vision_state=vision_state)
+
     steps = [
         transport.input(),
-        stt,
-        ctx.user(),
-        llm,
     ]
-    if akool_tts_gate:
-        steps.append(akool_tts_gate)
+    if akool_vision_bridge:
+        steps.append(akool_vision_bridge)
+    steps.extend([
+        stt,
+        ctx_user,
+        llm,
+    ])
     if tts:
         steps.append(tts)
     if bg_mixer:
@@ -2089,7 +2310,7 @@ async def bot(session_args: Any):
     if akool_service:
         steps.append(akool_service)
     steps.extend([
-        ctx.assistant(),
+        ctx_assistant,
         transport.output(),
     ])
 
@@ -2265,21 +2486,56 @@ async def bot(session_args: Any):
 
         llm.register_function("transfer_call", _transfer_call)
 
-    # Speak first (direct TTS), once.
-    if greeting:
-        greeted = False
+    greeted = False
+    video_capture_started = False
 
-        @transport.event_handler("on_first_participant_joined")
-        async def on_first_participant_joined(_transport, _participant):
-            nonlocal greeted
-            if greeted:
-                return
+    @transport.event_handler("on_first_participant_joined")
+    async def on_first_participant_joined(_transport, _participant):
+        nonlocal greeted
+        nonlocal video_capture_started
+
+        # Optional greeting
+        if greeting and not greeted:
             greeted = True
             try:
                 context.add_message({"role": "assistant", "content": greeting})
             except Exception:
                 pass
             await task.queue_frames([TTSTextFrame(greeting, aggregated_by=AggregationType.SENTENCE)])
+
+        # Akool Vision Sense: capture participant camera and forward to Akool LiveKit.
+        if (
+            not video_capture_started
+            and is_video_meeting
+            and video_avatar_provider == "akool"
+            and akool_vision_capture_enabled
+        ):
+            pid = ""
+            try:
+                if isinstance(_participant, dict):
+                    pid = str(
+                        _participant.get("id")
+                        or _participant.get("participant_id")
+                        or _participant.get("participantId")
+                        or ""
+                    ).strip()
+                else:
+                    pid = str(getattr(_participant, "id", "") or getattr(_participant, "participant_id", "") or "").strip()
+            except Exception:
+                pid = ""
+
+            if pid:
+                video_capture_started = True
+                try:
+                    await transport.capture_participant_video(
+                        pid,
+                        framerate=akool_vision_fps,
+                        video_source="camera",
+                        color_format="RGB",
+                    )
+                    logger.info(f"Akool Vision Sense: capturing participant camera (id={pid}) at {akool_vision_fps}fps")
+                except Exception as e:
+                    logger.warning(f"Akool Vision Sense: failed to capture participant camera (id={pid}): {e}")
 
     runner = PipelineRunner()
     try:
