@@ -1482,19 +1482,153 @@ async def bot(session_args: Any):
                 # Typical response: {"code":1000,"msg":"ok","data":{...}}
                 code = data.get("code")
                 msg = data.get("msg")
-                payload_data = data.get("data") if isinstance(data.get("data"), dict) else {}
+
+                payload_data_raw = data.get("data")
+                payload_data: dict[str, Any] = {}
+                if isinstance(payload_data_raw, dict):
+                    payload_data = payload_data_raw
+                elif isinstance(payload_data_raw, list) and payload_data_raw and isinstance(payload_data_raw[0], dict):
+                    payload_data = payload_data_raw[0]
 
                 if code not in (1000, "1000", 0, "0", None):
                     raise RuntimeError(f"Akool session create error: code={code} msg={msg}")
 
-                self._session_id = str(payload_data.get("id") or payload_data.get("session_id") or payload_data.get("sessionId") or "").strip()
-                self._livekit_url = str(payload_data.get("livekit_url") or payload_data.get("livekitUrl") or "").strip()
-                self._livekit_token = str(payload_data.get("livekit_token") or payload_data.get("livekitToken") or "").strip()
-                self._livekit_room_name = str(payload_data.get("livekit_room_name") or payload_data.get("livekitRoomName") or "").strip()
-                self._server_identity = str(payload_data.get("livekit_server_identity") or payload_data.get("livekitServerIdentity") or "").strip()
+                # Helper: traverse nested dict/list and find values without logging secrets.
+                def _walk(obj: Any, path: list[Any] | None = None, depth: int = 0, max_depth: int = 6):
+                    if path is None:
+                        path = []
+                    if depth > max_depth:
+                        return
+                    if isinstance(obj, dict):
+                        for k, v in obj.items():
+                            p = path + [k]
+                            yield p, v
+                            if isinstance(v, (dict, list)):
+                                yield from _walk(v, p, depth + 1, max_depth)
+                    elif isinstance(obj, list):
+                        for i, v in enumerate(obj):
+                            p = path + [i]
+                            yield p, v
+                            if isinstance(v, (dict, list)):
+                                yield from _walk(v, p, depth + 1, max_depth)
+
+                def _as_str(v: Any) -> str:
+                    if v is None:
+                        return ""
+                    try:
+                        s = str(v).strip()
+                    except Exception:
+                        return ""
+                    return s
+
+                def _first_str_by_key_pred(obj: Any, pred) -> str:
+                    for p, v in _walk(obj):
+                        if not p:
+                            continue
+                        k = p[-1]
+                        if not isinstance(k, str):
+                            continue
+                        # Avoid accidentally stringifying nested objects.
+                        if isinstance(v, (dict, list)):
+                            continue
+                        if not pred(k, p):
+                            continue
+                        s = _as_str(v)
+                        if s:
+                            return s
+                    return ""
+
+                # Prefer top-level direct fields, but also handle nested schemas.
+                search_obj = payload_data if payload_data else data
+
+                # Session id (best-effort)
+                self._session_id = _as_str(
+                    payload_data.get("id")
+                    or payload_data.get("session_id")
+                    or payload_data.get("sessionId")
+                    or ""
+                )
+
+                # Direct keys
+                self._livekit_url = _as_str(payload_data.get("livekit_url") or payload_data.get("livekitUrl") or "")
+                self._livekit_token = _as_str(payload_data.get("livekit_token") or payload_data.get("livekitToken") or "")
+                self._livekit_room_name = _as_str(payload_data.get("livekit_room_name") or payload_data.get("livekitRoomName") or "")
+                self._server_identity = _as_str(payload_data.get("livekit_server_identity") or payload_data.get("livekitServerIdentity") or "")
+
+                # Nested: look for livekit url/token under any livekit-related path.
+                if not self._livekit_url:
+                    cand = _first_str_by_key_pred(
+                        search_obj,
+                        lambda k, p: (
+                            ("livekit" in "/".join(str(x).lower() for x in p) or "livekit" in k.lower())
+                            and "url" in k.lower()
+                        ),
+                    )
+                    if cand.lower().startswith(("ws://", "wss://", "http://", "https://")):
+                        self._livekit_url = cand
+
+                if not self._livekit_url:
+                    # Common pattern: livekit: { url: ..., ws_url: ... }
+                    cand = _first_str_by_key_pred(
+                        search_obj,
+                        lambda k, p: (
+                            "livekit" in "/".join(str(x).lower() for x in p)
+                            and k.lower() in ("url", "ws_url", "wsurl", "wss_url", "wssurl", "server_url", "serverurl")
+                        ),
+                    )
+                    if cand.lower().startswith(("ws://", "wss://", "http://", "https://")):
+                        self._livekit_url = cand
+
+                if not self._livekit_token:
+                    cand = _first_str_by_key_pred(
+                        search_obj,
+                        lambda k, p: (
+                            ("livekit" in "/".join(str(x).lower() for x in p) or "livekit" in k.lower())
+                            and ("token" in k.lower() or k.lower() in ("jwt", "access_token", "accesstoken"))
+                        ),
+                    )
+                    if len(cand) > 20:
+                        self._livekit_token = cand
+
+                if not self._livekit_room_name:
+                    self._livekit_room_name = _first_str_by_key_pred(
+                        search_obj,
+                        lambda k, p: (
+                            "livekit" in "/".join(str(x).lower() for x in p)
+                            and ("room" in k.lower() and "name" in k.lower())
+                        ),
+                    )
+
+                if not self._server_identity:
+                    self._server_identity = _first_str_by_key_pred(
+                        search_obj,
+                        lambda k, p: (
+                            "livekit" in "/".join(str(x).lower() for x in p)
+                            and ("server" in k.lower() and "identity" in k.lower())
+                        ),
+                    )
 
                 if not self._livekit_url or not self._livekit_token:
-                    raise RuntimeError("Akool session create did not return livekit_url/livekit_token")
+                    # Log only structural hints (no token values)
+                    livekit_paths: list[str] = []
+                    try:
+                        for p, v in _walk(search_obj):
+                            if not p:
+                                continue
+                            if any((isinstance(x, str) and "livekit" in x.lower()) for x in p):
+                                livekit_paths.append("/".join(str(x) for x in p))
+                            if len(livekit_paths) >= 25:
+                                break
+                    except Exception:
+                        livekit_paths = []
+
+                    top_keys = list(search_obj.keys()) if isinstance(search_obj, dict) else []
+                    logger.warning(
+                        f"Akool session create missing LiveKit details. code={code} msg={msg} "
+                        f"top_keys={top_keys[:30]} livekit_paths={livekit_paths}"
+                    )
+
+                    raise RuntimeError("Akool session create did not return LiveKit connection details")
 
             async def _close_session(self):
                 if not self._http or not self._session_id:
