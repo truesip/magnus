@@ -1862,22 +1862,39 @@ async def bot(session_args: Any):
                     logger.debug(f"Akool publish_data failed: {e}")
 
             async def _send_text(self, text: str):
+                """Send a chat message to the Akool avatar over the WebRTC data channel.
+
+                Akool Streaming Avatar expects the stream message schema:
+                  - type: "chat"
+                  - idx/fin for chunking
+                """
                 text = str(text or "").strip()
                 if not text:
                     return
 
                 async with self._send_lock:
-                    mid = uuid.uuid4().hex
+                    mid = f"msg-{uuid.uuid4().hex}"
                     self._current_mid = mid
-                    payload = {"v": 2, "type": "text", "mid": mid, "pld": {"text": text}}
+                    payload = {
+                        "v": 2,
+                        "type": "chat",
+                        "mid": mid,
+                        "idx": 0,
+                        "fin": True,
+                        "pld": {"text": text},
+                    }
                     await self._send_stream_message(payload)
 
             async def _interrupt(self):
-                if not self._current_mid:
-                    return
+                # Interrupt any currently scheduled avatar speech.
                 async with self._send_lock:
-                    mid = uuid.uuid4().hex
-                    payload = {"v": 2, "type": "interrupt", "mid": mid, "pld": {"mid": self._current_mid}}
+                    mid = f"msg-{uuid.uuid4().hex}"
+                    payload = {
+                        "v": 2,
+                        "type": "command",
+                        "mid": mid,
+                        "pld": {"cmd": "interrupt"},
+                    }
                     await self._send_stream_message(payload)
 
             def _split_flushable(self, s: str) -> tuple[str, str]:
