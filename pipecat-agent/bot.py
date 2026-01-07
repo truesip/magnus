@@ -1391,6 +1391,7 @@ async def bot(session_args: Any):
                 background_id: str = "",
                 mode_type: int = 1,
                 duration_seconds: int = 1800,
+                out_sample_rate: int = 16000,
                 fallback_state: dict[str, Any] | None = None,
             ):
                 super().__init__()
@@ -1401,6 +1402,12 @@ async def bot(session_args: Any):
                 self._background_id = str(background_id or "")
                 self._mode_type = int(mode_type) if int(mode_type) in (1, 2) else 1
                 self._duration_seconds = max(30, int(duration_seconds) if int(duration_seconds) > 0 else 1800)
+
+                self._out_sample_rate = int(out_sample_rate) if int(out_sample_rate) > 0 else 16000
+                self._audio_ratecv_state = None
+
+                # Route LiveKit media frames to the same output destination as the pipeline.
+                self._transport_destination = None
 
                 self._http: httpx.AsyncClient | None = None
                 self._session_id: str = ""
@@ -1652,14 +1659,55 @@ async def bot(session_args: Any):
                 try:
                     async for frame_event in stream:
                         audio_frame = frame_event.frame
-                        audio_data = bytes(audio_frame.data)
+
                         if not self._transport_ready or self._audio_only_fallback:
                             continue
+
+                        # LiveKit audio is typically PCM16.
+                        audio_data = bytes(getattr(audio_frame, "data", b"") or b"")
+                        if not audio_data:
+                            continue
+
+                        src_rate = int(getattr(audio_frame, "sample_rate", 0) or 0) or self._out_sample_rate
+                        src_channels = int(getattr(audio_frame, "num_channels", 0) or 0) or 1
+
+                        # Normalize to mono for Daily (and for our pipeline sample rate).
+                        try:
+                            if src_channels == 2:
+                                audio_data = audioop.tomono(audio_data, 2, 0.5, 0.5)
+                                src_channels = 1
+                        except Exception:
+                            # Best-effort; keep whatever we got.
+                            src_channels = 1
+
+                        # Resample to the pipeline / Daily output sample rate.
+                        try:
+                            if src_rate and src_rate != self._out_sample_rate:
+                                audio_data, self._audio_ratecv_state = audioop.ratecv(
+                                    audio_data,
+                                    2,
+                                    src_channels,
+                                    src_rate,
+                                    self._out_sample_rate,
+                                    self._audio_ratecv_state,
+                                )
+                                src_rate = self._out_sample_rate
+                        except Exception:
+                            # If resampling fails, still try sending raw data.
+                            pass
+
                         out = SpeechOutputAudioRawFrame(
                             audio=audio_data,
-                            sample_rate=int(getattr(audio_frame, "sample_rate", 0) or 0) or 24000,
-                            num_channels=1,
+                            sample_rate=src_rate,
+                            num_channels=src_channels,
                         )
+                        if self._transport_destination is not None:
+                            out.transport_destination = self._transport_destination
+                        try:
+                            out.pts = int(getattr(frame_event, "timestamp_us", 0) // 1000)
+                        except Exception:
+                            pass
+
                         await self.push_frame(out)
                 except asyncio.CancelledError:
                     raise
@@ -1688,6 +1736,8 @@ async def bot(session_args: Any):
                             size=(int(video_frame.width), int(video_frame.height)),
                             format="RGB",
                         )
+                        if self._transport_destination is not None:
+                            out.transport_destination = self._transport_destination
                         try:
                             out.pts = int(frame_event.timestamp_us // 1000)
                         except Exception:
@@ -1882,6 +1932,10 @@ async def bot(session_args: Any):
                     # that reaches this processor. We still want to forward avatar audio/video
                     # once the pipeline starts.
                     self._transport_ready = True
+                    try:
+                        self._transport_destination = getattr(frame, "transport_destination", None)
+                    except Exception:
+                        self._transport_destination = None
 
                     if not self._audio_only_fallback:
                         try:
@@ -1893,6 +1947,11 @@ async def bot(session_args: Any):
 
                 if isinstance(frame, OutputTransportReadyFrame):
                     self._transport_ready = True
+                    try:
+                        if self._transport_destination is None:
+                            self._transport_destination = getattr(frame, "transport_destination", None)
+                    except Exception:
+                        pass
                     await self.push_frame(frame, direction)
                     return
 
@@ -1961,6 +2020,7 @@ async def bot(session_args: Any):
             background_id=akool_background_id,
             mode_type=akool_mode_type,
             duration_seconds=akool_duration,
+            out_sample_rate=sample_rate,
             fallback_state=akool_audio_only_fallback,
         )
 
