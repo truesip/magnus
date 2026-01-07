@@ -1771,13 +1771,14 @@ async def bot(session_args: Any):
                             except Exception:
                                 self._video_task = asyncio.create_task(self._process_video_frames(stream))
                         elif track.kind == rtc.TrackKind.KIND_AUDIO and self._audio_task is None:
-                            stream = rtc.AudioStream(track=track)
+                            # NOTE: AudioStream ctor signature can vary; use positional to be safe.
+                            stream = rtc.AudioStream(track)
                             try:
                                 self._audio_task = self.create_task(self._process_audio_frames(stream), name="akool_audio_stream")
                             except Exception:
                                 self._audio_task = asyncio.create_task(self._process_audio_frames(stream))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Akool track_subscribed handler error: {e}")
 
                 await self._room.connect(
                     self._livekit_url,
@@ -1800,7 +1801,8 @@ async def bot(session_args: Any):
                                 except Exception:
                                     self._video_task = asyncio.create_task(self._process_video_frames(stream))
                             if pub.kind == rtc.TrackKind.KIND_AUDIO and self._audio_task is None:
-                                stream = rtc.AudioStream(track=pub.track)
+                                # NOTE: AudioStream ctor signature can vary; use positional to be safe.
+                                stream = rtc.AudioStream(pub.track)
                                 try:
                                     self._audio_task = self.create_task(self._process_audio_frames(stream), name="akool_audio_stream")
                                 except Exception:
