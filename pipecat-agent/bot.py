@@ -1743,6 +1743,11 @@ async def bot(session_args: Any):
                 await super().process_frame(frame, direction)
 
                 if isinstance(frame, StartFrame):
+                    # Some transports/versions may not emit OutputTransportReadyFrame in a way
+                    # that reaches this processor. We still want to forward avatar audio/video
+                    # once the pipeline starts.
+                    self._transport_ready = True
+
                     if not self._audio_only_fallback:
                         try:
                             await self._start_session()
