@@ -14,7 +14,7 @@ from deepgram.clients.listen.v1.websocket.options import LiveOptions
 from loguru import logger
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import AggregationType, EndFrame, TTSAudioRawFrame, TTSTextFrame
+from pipecat.frames.frames import AggregationType, EndFrame, TTSAudioRawFrame, TTSTextFrame, UserImageRawFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -611,9 +611,14 @@ async def bot(session_args: Any):
     akool_vision_llm_jpeg_quality = max(30, min(95, _parse_int("AKOOL_VISION_LLM_JPEG_QUALITY", 65)))
 
     # We only turn on Daily video input if at least one vision feature is enabled.
-    akool_vision_capture_enabled = bool(akool_vision_enabled or akool_vision_llm_enabled)
+    #
+    # - LLM vision is provider-agnostic (works for HeyGen or Akool video meetings)
+    # - Akool Vision Sense publishing only applies when VIDEO_AVATAR_PROVIDER=akool
+    vision_llm_enabled = bool(is_video_meeting and akool_vision_llm_enabled)
+    akool_vision_publish_enabled = bool(is_video_meeting and video_avatar_provider == "akool" and akool_vision_enabled)
+    vision_capture_enabled = bool(vision_llm_enabled or akool_vision_publish_enabled)
 
-    if is_video_meeting and video_avatar_provider == "akool" and akool_vision_llm_enabled:
+    if is_video_meeting and vision_llm_enabled:
         prompt += (
             "\n\nYou are in a video meeting. You may receive still images from the user's camera. "
             "Use them when relevant to answer questions about what you see. "
@@ -632,8 +637,8 @@ async def bot(session_args: Any):
         audio_out_enabled=True,
         audio_in_sample_rate=sample_rate,
         audio_out_sample_rate=sample_rate,
-        # Enable video input only when explicitly requested (Akool Vision Sense).
-        video_in_enabled=bool(is_video_meeting and video_avatar_provider == "akool" and akool_vision_capture_enabled),
+        # Enable video input only when explicitly requested (vision capture).
+        video_in_enabled=bool(is_video_meeting and vision_capture_enabled),
         # Enable video output only for explicit video meeting sessions.
         video_out_enabled=is_video_meeting,
         video_out_is_live=is_video_meeting,
@@ -708,7 +713,7 @@ async def bot(session_args: Any):
     xai_text_model = _env("XAI_MODEL", "grok-3").strip() or "grok-3"
     xai_base_url = _env("XAI_BASE_URL", "https://api.x.ai/v1").strip() or "https://api.x.ai/v1"
 
-    if is_video_meeting and video_avatar_provider == "akool" and akool_vision_llm_enabled:
+    if vision_llm_enabled:
         xai_vision_model = _env("AKOOL_VISION_LLM_MODEL", "grok-4").strip() or "grok-4"
         llm = RoutingOpenAILLMService(
             api_key=xai_key,
@@ -2288,7 +2293,7 @@ async def bot(session_args: Any):
 
     # Optional: keep a "latest camera frame" snapshot and attach it to the user's next LLM turn.
     vision_state: dict[str, Any] | None = None
-    if is_video_meeting and video_avatar_provider == "akool" and akool_vision_llm_enabled:
+    if is_video_meeting and vision_llm_enabled:
         vision_state = {"format": "", "size": (0, 0), "image": b"", "ts": 0.0}
 
         import types
@@ -2389,17 +2394,26 @@ async def bot(session_args: Any):
 
         ctx_user.handle_aggregation = types.MethodType(_handle_aggregation_with_vision, ctx_user)
         logger.info(
-            "Akool assistant vision enabled: attaching participant camera frames to LLM input (requires a vision-capable model)"
+            "Assistant vision enabled: attaching participant camera frames to LLM input (requires a vision-capable model)"
         )
 
-    # For Akool Vision Sense, capture participant camera frames and forward to Akool.
-    akool_vision_bridge = None
-    if is_video_meeting and video_avatar_provider == "akool" and akool_service and akool_vision_capture_enabled:
+    # Vision capture bridge:
+    # - stores latest participant camera frame for the LLM (HeyGen or Akool meetings)
+    # - optionally forwards frames into Akool LiveKit for Akool Vision Sense
+    vision_bridge = None
+    if is_video_meeting and vision_capture_enabled:
 
-        class AkoolVisionBridge(FrameProcessor):
-            def __init__(self, *, akool: Any, vision_state: Optional[dict[str, Any]] = None):
+        class VisionBridge(FrameProcessor):
+            def __init__(
+                self,
+                *,
+                akool: Any | None = None,
+                akool_forward_enabled: bool = False,
+                vision_state: Optional[dict[str, Any]] = None,
+            ):
                 super().__init__()
                 self._akool = akool
+                self._akool_forward_enabled = bool(akool_forward_enabled)
                 self._vision_state = vision_state
 
             async def process_frame(self, frame, direction: FrameDirection):
@@ -2416,24 +2430,29 @@ async def bot(session_args: Any):
                         except Exception:
                             pass
 
-                    # Best-effort: forward to Akool LiveKit (no-op if Akool vision publishing is disabled).
-                    try:
-                        await self._akool.ingest_user_image(frame)
-                    except Exception:
-                        pass
+                    # Best-effort: forward to Akool LiveKit.
+                    if self._akool_forward_enabled and self._akool is not None:
+                        try:
+                            await self._akool.ingest_user_image(frame)
+                        except Exception:
+                            pass
 
                     # Drop the raw frame to avoid sending large video frames through the rest of the pipeline.
                     return
 
                 await self.push_frame(frame, direction)
 
-        akool_vision_bridge = AkoolVisionBridge(akool=akool_service, vision_state=vision_state)
+        vision_bridge = VisionBridge(
+            akool=akool_service,
+            akool_forward_enabled=akool_vision_publish_enabled,
+            vision_state=vision_state,
+        )
 
     steps = [
         transport.input(),
     ]
-    if akool_vision_bridge:
-        steps.append(akool_vision_bridge)
+    if vision_bridge:
+        steps.append(vision_bridge)
     steps.extend([
         stt,
         ctx_user,
@@ -2641,12 +2660,11 @@ async def bot(session_args: Any):
                 pass
             await task.queue_frames([TTSTextFrame(greeting, aggregated_by=AggregationType.SENTENCE)])
 
-        # Akool Vision Sense: capture participant camera and forward to Akool LiveKit.
+        # Vision capture (HeyGen or Akool meetings).
         if (
             not video_capture_started
             and is_video_meeting
-            and video_avatar_provider == "akool"
-            and akool_vision_capture_enabled
+            and vision_capture_enabled
         ):
             pid = ""
             try:
@@ -2671,9 +2689,9 @@ async def bot(session_args: Any):
                         video_source="camera",
                         color_format="RGB",
                     )
-                    logger.info(f"Akool Vision Sense: capturing participant camera (id={pid}) at {akool_vision_fps}fps")
+                    logger.info(f"Vision capture: capturing participant camera (id={pid}) at {akool_vision_fps}fps")
                 except Exception as e:
-                    logger.warning(f"Akool Vision Sense: failed to capture participant camera (id={pid}): {e}")
+                    logger.warning(f"Vision capture: failed to capture participant camera (id={pid}): {e}")
 
     runner = PipelineRunner()
     try:
