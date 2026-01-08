@@ -7373,6 +7373,85 @@ async function didwwFetchDidMapWithVoiceInTrunk(didIds) {
   return out;
 }
 
+// Fetch DIDs from DIDWW by id list (chunked) and return merged data + included.
+// Useful to keep local user_dids in sync when numbers are released outside the portal.
+async function didwwFetchDidsByIds({ didIds, include = '' }) {
+  const ids = Array.from(new Set((didIds || []).map(v => String(v || '').trim()).filter(Boolean)));
+  const dids = [];
+  const included = [];
+  const seenIncluded = new Set();
+  const foundIds = new Set();
+
+  if (!ids.length) {
+    return { dids, included, requestedIds: ids, foundIds, staleIds: [] };
+  }
+
+  const inc = (include != null ? String(include).trim() : '');
+  const chunkSize = 50;
+
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    const filter = chunk.join(',');
+    const path = inc
+      ? `/dids?filter[id]=${encodeURIComponent(filter)}&include=${encodeURIComponent(inc)}`
+      : `/dids?filter[id]=${encodeURIComponent(filter)}`;
+
+    const data = await didwwApiCall({ method: 'GET', path });
+
+    for (const d of (data?.data || [])) {
+      if (d && d.id) {
+        dids.push(d);
+        foundIds.add(String(d.id));
+      }
+    }
+
+    for (const incObj of (data?.included || [])) {
+      const t = incObj && incObj.type ? String(incObj.type) : '';
+      const id = incObj && incObj.id ? String(incObj.id) : '';
+      if (!t || !id) continue;
+      const key = `${t}:${id}`;
+      if (seenIncluded.has(key)) continue;
+      seenIncluded.add(key);
+      included.push(incObj);
+    }
+  }
+
+  const staleIds = ids.filter(id => !foundIds.has(id));
+  return { dids, included, requestedIds: ids, foundIds, staleIds };
+}
+
+async function cleanupStaleDidwwDids({ localUserId, didIds }) {
+  const uid = localUserId != null ? String(localUserId) : '';
+  const ids = Array.from(new Set((didIds || []).map(v => String(v || '').trim()).filter(Boolean)));
+  if (!pool || !uid || !ids.length) return { deleted: 0 };
+
+  const ph = ids.map(() => '?').join(',');
+
+  // Remove from local DID ownership table
+  try {
+    await pool.execute(
+      `DELETE FROM user_dids WHERE user_id = ? AND didww_did_id IN (${ph})`,
+      [uid, ...ids]
+    );
+  } catch {}
+
+  // Best-effort: clean up local markup tracking rows for these DIDs.
+  try {
+    await pool.execute(
+      `DELETE FROM user_did_markups WHERE user_id = ? AND didww_did_id IN (${ph})`,
+      [uid, ...ids]
+    );
+  } catch {}
+  try {
+    await pool.execute(
+      `DELETE FROM user_did_markup_cycles WHERE user_id = ? AND didww_did_id IN (${ph})`,
+      [uid, ...ids]
+    );
+  } catch {}
+
+  return { deleted: ids.length };
+}
+
 async function disableDidwwInboundRoutingForUser({ localUserId, didById }) {
   if (!pool || !localUserId) return { disabledCount: 0 };
 
@@ -10169,13 +10248,33 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
     }
 
     // Total DIDs for this user (DIDWW + AI numbers)
+    // NOTE: Numbers can be released outside the portal. Reconcile against DIDWW so
+    // local user_dids rows don't keep inflating the Overview count.
     let didwwDidCount = 0;
     try {
-      const [[row]] = await pool.execute(
-        'SELECT COUNT(*) AS total FROM user_dids WHERE user_id = ?',
+      const [idRows] = await pool.execute(
+        'SELECT didww_did_id FROM user_dids WHERE user_id = ?',
         [userId]
       );
-      didwwDidCount = Number(row?.total || 0);
+      const localDidIds = Array.from(new Set((idRows || [])
+        .map(r => String(r?.didww_did_id || '').trim())
+        .filter(Boolean)));
+
+      if (localDidIds.length) {
+        try {
+          const fetched = await didwwFetchDidsByIds({ didIds: localDidIds });
+          didwwDidCount = Array.isArray(fetched.dids) ? fetched.dids.length : 0;
+
+          if (Array.isArray(fetched.staleIds) && fetched.staleIds.length) {
+            await cleanupStaleDidwwDids({ localUserId: userId, didIds: fetched.staleIds });
+          }
+        } catch (reconcileErr) {
+          didwwDidCount = localDidIds.length;
+          if (DEBUG) console.warn('[me.stats.dids] DIDWW reconcile failed; using local count:', reconcileErr?.message || reconcileErr);
+        }
+      } else {
+        didwwDidCount = 0;
+      }
     } catch (e) {
       if (DEBUG) console.warn('[me.stats.dids] failed:', e.message || e);
     }
@@ -16716,20 +16815,28 @@ app.get('/api/me/didww/dids', requireAuth, async (req, res) => {
     let userDidIds = [];
     if (pool && req.session.userId) {
       const [rows] = await pool.execute('SELECT didww_did_id FROM user_dids WHERE user_id = ?', [req.session.userId]);
-      userDidIds = rows.map(r => r.didww_did_id);
+      userDidIds = (rows || []).map(r => r.didww_did_id);
     }
     
     // If user has no DIDs, return empty
     if (userDidIds.length === 0) {
       return res.json({ success: true, data: [], included: [] });
     }
-    
-    // Fetch all DIDs from DIDWW API with location and pricing info
-    const data = await didwwApiCall({ method: 'GET', path: '/dids?include=voice_in_trunk,did_group.city,did_group.region,did_group.country,did_group.stock_keeping_units,capacity_pool' });
-    
-    // Filter to only user's DIDs
-    const allDids = data.data || [];
-    const userDids = allDids.filter(d => userDidIds.includes(d.id));
+
+    // Fetch only the user's DIDs from DIDWW (by id) and clean up any stale local rows.
+    const include = 'voice_in_trunk,did_group.city,did_group.region,did_group.country,did_group.stock_keeping_units,capacity_pool';
+    const fetched = await didwwFetchDidsByIds({ didIds: userDidIds, include });
+    const userDids = fetched.dids || [];
+    const allIncluded = fetched.included || [];
+
+    if (Array.isArray(fetched.staleIds) && fetched.staleIds.length) {
+      await cleanupStaleDidwwDids({ localUserId: req.session.userId, didIds: fetched.staleIds });
+    }
+
+    // If none of the user's stored IDs exist in DIDWW anymore, return empty.
+    if (!userDids.length) {
+      return res.json({ success: true, data: [], included: [] });
+    }
     
     // Best-effort: for any of the user's DIDs that do NOT have capacity relationships yet,
     // attach them to the configured Capacity Pool and/or Shared Capacity Group. This also
@@ -16813,7 +16920,6 @@ app.get('/api/me/didww/dids', requireAuth, async (req, res) => {
     }
     
     // Filter included data to only relevant items
-    const allIncluded = data.included || [];
     const relevantIncluded = allIncluded.filter(inc => {
       // Keep voice_in_trunks that are assigned to user's DIDs
       if (inc.type === 'voice_in_trunks') {
