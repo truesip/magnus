@@ -1468,7 +1468,6 @@ async def bot(session_args: Any):
             SpeechOutputAudioRawFrame,
             StartFrame,
             TTSTextFrame as PipecatTTSTextFrame,
-            UserImageRawFrame,
             UserStartedSpeakingFrame,
             OutputImageRawFrame,
         )
