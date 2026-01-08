@@ -2305,24 +2305,67 @@ async function sendWelcomeEmail(toEmail, username, sipDomain, portalUrl, passwor
   await smtp2goSendEmail(payload, { kind: 'welcome', to: toEmail, subject });
 }
 
+function buildRefillDescription(invoiceNumber) {
+  const inv = String(invoiceNumber ?? '').trim();
+  const line = `(A.I Service Credit + TalkUSA + Invoice Number ${inv})`.trim();
+  return line.substring(0, 255);
+}
+
 // Send a refill receipt email when funds are added
-async function sendRefillReceiptEmail({ toEmail, username, amount, description }) {
+async function sendRefillReceiptEmail({ toEmail, username, amount, description, invoiceNumber, paymentMethod, processorTransactionId }) {
   const apiKey = process.env.SMTP2GO_API_KEY;
   const sender = process.env.SMTP2GO_SENDER || `no-reply@${(process.env.SENDER_DOMAIN || 'talkusa.net')}`;
   if (!apiKey) throw new Error('SMTP2GO_API_KEY missing');
+
   const amt = Number(amount || 0);
   const safeUser = username || 'Customer';
-  const subject = `Payment receipt - $${amt.toFixed(2)} added to your TalkUSA balance`;
-  const text = `Hello ${safeUser},\n\nWe have received your payment of $${amt.toFixed(2)}.\nDescription: ${description}\n\nYou can view your updated balance in your TalkUSA portal.\n\nThank you for your business,\nTalkUSA`;
+
+  const inv = invoiceNumber != null ? String(invoiceNumber).trim() : '';
+  const method = paymentMethod != null ? String(paymentMethod).trim() : '';
+  const txn = processorTransactionId != null ? String(processorTransactionId).trim() : '';
+
+  const subjectSuffix = inv ? ` (Invoice ${inv})` : '';
+  const subject = `Payment receipt - $${amt.toFixed(2)} added to your TalkUSA balance${subjectSuffix}`;
+
+  const lines = [
+    `Hello ${safeUser},`,
+    '',
+    `We have received your payment of $${amt.toFixed(2)}.`,
+    inv ? `Invoice Number: ${inv}` : null,
+    method ? `Payment Method: ${method}` : null,
+    txn ? `Transaction ID: ${txn}` : null,
+    description ? `Description: ${description}` : null,
+    '',
+    'You can view your updated balance in your TalkUSA portal.',
+    '',
+    'Thank you for your business,',
+    'TalkUSA'
+  ].filter(Boolean);
+
+  const text = lines.join('\n');
+
+  const htmlRows = [
+    `<tr><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\"><b>Amount</b></td><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\">$${amt.toFixed(2)}</td></tr>`,
+    inv ? `<tr><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\"><b>Invoice Number</b></td><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\">${inv}</td></tr>` : '',
+    method ? `<tr><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\"><b>Payment Method</b></td><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\">${method}</td></tr>` : '',
+    txn ? `<tr><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\"><b>Transaction ID</b></td><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\">${txn}</td></tr>` : '',
+    description ? `<tr><td style=\"padding:6px 10px;\"><b>Description</b></td><td style=\"padding:6px 10px;\">${description}</td></tr>` : ''
+  ].filter(Boolean).join('');
+
   const html = `
   <div style=\"font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;\">\r
     <h2>Payment receipt</h2>\r
     <p>Hello ${safeUser},</p>\r
-    <p>We have received your payment of <strong>$${amt.toFixed(2)}</strong>.</p>\r
-    <p><b>Description:</b> ${description}</p>\r
+    <p>We have received your payment.</p>\r
+    <table style=\"border:1px solid #e5e7eb;border-radius:10px;border-collapse:separate;border-spacing:0;overflow:hidden;max-width:560px;background:#ffffff\">\r
+      <tbody>\r
+        ${htmlRows}\r
+      </tbody>\r
+    </table>\r
     <p style=\"margin-top:16px;\">You can log in to your TalkUSA portal to see your updated balance and billing history.</p>\r
     <p style=\"color:#555;margin-top:18px;\">Thank you for your business.</p>\r
   </div>`;
+
   const adminEmail = process.env.ADMIN_NOTIFY_EMAIL;
   const to = [toEmail].filter(Boolean);
   const payload = {
@@ -10537,7 +10580,7 @@ async function applyMagnusCreditDelta({ localUserId, magnusUserId, amountDelta, 
 }
 
 // Shared helper to apply a refill in MagnusBilling, update billing_history and send receipt
-async function applyMagnusRefill({ userId, magnusUserId, amountNum, desc, displayName, userEmail, httpsAgent, hostHeader, billingId }) {
+async function applyMagnusRefill({ userId, magnusUserId, amountNum, desc, displayName, userEmail, httpsAgent, hostHeader, billingId, paymentMethod, processorTransactionId }) {
   if (!pool) throw new Error('Database not configured');
   if (!magnusUserId) throw new Error('Missing MagnusBilling user id');
 
@@ -10637,7 +10680,15 @@ async function applyMagnusRefill({ userId, magnusUserId, amountNum, desc, displa
       // Send refill receipt email (best-effort, do not fail the caller if this fails)
       try {
         if (userEmail) {
-          await sendRefillReceiptEmail({ toEmail: userEmail, username: displayName, amount: amountNum, description: desc });
+          await sendRefillReceiptEmail({
+            toEmail: userEmail,
+            username: displayName,
+            amount: amountNum,
+            description: desc,
+            invoiceNumber: billingId,
+            paymentMethod,
+            processorTransactionId
+          });
         }
       } catch (emailErr) {
         if (DEBUG) console.warn('[refill] Failed to send refill receipt email:', emailErr.message || emailErr);
@@ -10691,7 +10742,7 @@ app.post('/api/me/add-funds', requireAuth, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Amount cannot exceed $10,000' });
     }
 
-    // Build a standard refill description: username + amount + fixed note
+    // Fetch user info for receipt email (display name + recipient)
     let username = '';
     let firstName = '';
     let lastName = '';
@@ -10712,8 +10763,6 @@ app.post('/api/me/add-funds', requireAuth, async (req, res) => {
     const baseUser = username || (req.session.username || 'unknown');
     const fullName = `${firstName || ''} ${lastName || ''}`.trim();
     const displayName = fullName || baseUser;
-    const descRaw = `${baseUser} - $${amountNum.toFixed(2)} - TalkUSA refill`;
-    const desc = descRaw.substring(0, 255);
 
     // Get Magnus user ID
     const httpsAgent = new https.Agent({
@@ -10727,12 +10776,19 @@ app.post('/api/me/add-funds', requireAuth, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Could not find MagnusBilling user ID' });
     }
 
-    // Insert pending billing record
+    const paymentMethod = 'Manual';
+
+    // Insert pending billing record. billing_history.id is our invoice number.
     const [insertResult] = await pool.execute(
       'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, desc, 'pending']
+      [userId, amountNum, null, 'pending']
     );
     const billingId = insertResult.insertId;
+
+    const desc = buildRefillDescription(billingId);
+    try {
+      await pool.execute('UPDATE billing_history SET description = ? WHERE id = ?', [desc, billingId]);
+    } catch {}
 
     const result = await applyMagnusRefill({
       userId,
@@ -10743,7 +10799,9 @@ app.post('/api/me/add-funds', requireAuth, async (req, res) => {
       userEmail,
       httpsAgent,
       hostHeader,
-      billingId
+      billingId,
+      paymentMethod,
+      processorTransactionId: 'N/A'
     });
 
     if (result.success) {
@@ -10794,15 +10852,19 @@ app.post('/api/me/nowpayments/checkout', requireAuth, async (req, res) => {
     const baseUser = username || (req.session.username || 'unknown');
     const fullName = `${firstName || ''} ${lastName || ''}`.trim();
     const displayName = fullName || baseUser;
-    const descRaw = `${baseUser} - $${amountNum.toFixed(2)} - TalkUSA crypto refill`;
-    const desc = descRaw.substring(0, 255);
 
-    // Insert pending billing record (we will mark completed after successful IPN)
+    // Insert pending billing record (we will mark completed after successful IPN).
+    // billing_history.id is our invoice number.
     const [insertResult] = await pool.execute(
       'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, desc, 'pending']
+      [userId, amountNum, null, 'pending']
     );
     const billingId = insertResult.insertId;
+
+    const desc = buildRefillDescription(billingId);
+    try {
+      await pool.execute('UPDATE billing_history SET description = ? WHERE id = ?', [desc, billingId]);
+    } catch {}
 
     // Build deterministic order_id encoding userId + billingId for later lookup from IPN
     const orderId = `np-${userId}-${billingId}`;
@@ -10903,15 +10965,18 @@ app.post('/api/me/billcom/checkout', requireAuth, async (req, res) => {
       return res.status(400).json({ success: false, message: 'An email address is required to use ACH payments' });
     }
 
-    // Insert pending billing record (we will mark completed after successful webhook)
-    const descRaw = `${baseUser} - $${amountNum.toFixed(2)} - TalkUSA ACH refill`;
-    const desc = descRaw.substring(0, 255);
-
+    // Insert pending billing record (we will mark completed after successful webhook).
+    // billing_history.id is our invoice number.
     const [insertResult] = await pool.execute(
       'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, desc, 'pending']
+      [userId, amountNum, null, 'pending']
     );
     billingId = insertResult.insertId;
+
+    const desc = buildRefillDescription(billingId);
+    try {
+      await pool.execute('UPDATE billing_history SET description = ? WHERE id = ?', [desc, billingId]);
+    } catch {}
 
     const orderId = `bc-${userId}-${billingId}`;
 
@@ -10930,7 +10995,7 @@ app.post('/api/me/billcom/checkout', requireAuth, async (req, res) => {
       invoiceLineItems: [
         {
           quantity: 1,
-          description: `TalkUSA refill (${orderId})`.substring(0, 200),
+          description: desc.substring(0, 200),
           price: Number(amountNum.toFixed(2))
         }
       ],
@@ -11034,15 +11099,19 @@ async function handleSquareCheckout(req, res) {
       if (DEBUG) console.warn('[square.checkout] Failed to fetch user info:', e.message || e);
     }
     const baseUser = username || (req.session.username || 'unknown');
-    const descRaw = `${baseUser} - $${amountNum.toFixed(2)} - TalkUSA card refill`;
-    const desc = descRaw.substring(0, 255);
 
-    // Insert pending billing record (we will mark completed after successful webhook)
+    // Insert pending billing record (we will mark completed after successful webhook).
+    // billing_history.id is our invoice number.
     const [insertResult] = await pool.execute(
       'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, desc, 'pending']
+      [userId, amountNum, null, 'pending']
     );
     const billingId = insertResult.insertId;
+
+    const desc = buildRefillDescription(billingId);
+    try {
+      await pool.execute('UPDATE billing_history SET description = ? WHERE id = ?', [desc, billingId]);
+    } catch {}
 
     // Build deterministic local order_id encoding userId + billingId for correlation with Square
     const orderId = `sq-${userId}-${billingId}`;
@@ -11160,15 +11229,19 @@ async function handleStripeCheckout(req, res) {
     }
 
     const baseUser = username || (req.session.username || 'unknown');
-    const descRaw = `${baseUser} - $${amountNum.toFixed(2)} - TalkUSA card refill`;
-    const desc = descRaw.substring(0, 255);
 
-    // Insert pending billing record (we will mark completed after successful webhook)
+    // Insert pending billing record (we will mark completed after successful webhook).
+    // billing_history.id is our invoice number.
     const [insertResult] = await pool.execute(
       'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, desc, 'pending']
+      [userId, amountNum, null, 'pending']
     );
     billingId = insertResult.insertId;
+
+    const desc = buildRefillDescription(billingId);
+    try {
+      await pool.execute('UPDATE billing_history SET description = ? WHERE id = ?', [desc, billingId]);
+    } catch {}
 
     // Build deterministic order_id encoding userId + billingId for correlation with Stripe
     const orderId = `st-${userId}-${billingId}`;
@@ -11285,15 +11358,18 @@ async function handleDodoPaymentsCheckout(req, res) {
       return res.status(400).json({ success: false, message: 'An email address is required for card payments' });
     }
 
-    const descRaw = `${baseUser} - $${amountNum.toFixed(2)} - TalkUSA card refill`;
-    const desc = descRaw.substring(0, 255);
-
-    // Insert pending billing record (we will mark completed after successful webhook)
+    // Insert pending billing record (we will mark completed after successful webhook).
+    // billing_history.id is our invoice number.
     const [insertResult] = await pool.execute(
       'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, desc, 'pending']
+      [userId, amountNum, null, 'pending']
     );
     billingId = insertResult.insertId;
+
+    const desc = buildRefillDescription(billingId);
+    try {
+      await pool.execute('UPDATE billing_history SET description = ? WHERE id = ?', [desc, billingId]);
+    } catch {}
 
     // Build deterministic order_id encoding userId + billingId for correlation with Dodo Payments
     const orderId = `dd-${userId}-${billingId}`;
@@ -11305,9 +11381,9 @@ async function handleDodoPaymentsCheckout(req, res) {
     // single "pay-what-you-want" product in Dodo and provide amount (in cents).
     const dodo = await getDodoPaymentsApiClient();
     const session = await dodo.checkoutSessions.create({
-      productCart: [
+      product_cart: [
         {
-          productId: String(DODO_PAYMENTS_REFILL_PRODUCT_ID),
+          product_id: String(DODO_PAYMENTS_REFILL_PRODUCT_ID),
           quantity: 1,
           amount: Math.round(amountNum * 100)
         }
@@ -11316,7 +11392,7 @@ async function handleDodoPaymentsCheckout(req, res) {
         email: String(userEmail).trim(),
         name: String(displayName || '').trim() || undefined
       },
-      returnUrl,
+      return_url: returnUrl,
       metadata: {
         order_id: orderId,
         user_id: String(userId),
@@ -11324,8 +11400,12 @@ async function handleDodoPaymentsCheckout(req, res) {
       }
     });
 
-    const checkoutSessionId = session && session.id ? String(session.id) : '';
-    const paymentUrl = session && (session.checkoutUrl || session.checkout_url) ? String(session.checkoutUrl || session.checkout_url) : null;
+    const checkoutSessionId = session && (session.session_id || session.sessionId || session.id)
+      ? String(session.session_id || session.sessionId || session.id)
+      : '';
+    const paymentUrl = session && (session.checkout_url || session.checkoutUrl)
+      ? String(session.checkout_url || session.checkoutUrl)
+      : null;
 
     if (!paymentUrl) {
       if (DEBUG) console.error('[dodopayments.checkout] Missing checkout URL in response:', session);
@@ -11554,7 +11634,7 @@ app.post('/nowpayments/ipn', async (req, res) => {
 
     // Use the amount from billing_history as source of truth (what we asked customer to pay)
     const amountNum = Number(billing.amount || priceAmount || 0);
-    const desc = billing.description || p.order_description || `TalkUSA crypto refill (${orderId})`;
+    const desc = billing.description || p.order_description || buildRefillDescription(billingId);
 
     const httpsAgent = magnusBillingAgent;
     const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
@@ -11568,7 +11648,9 @@ app.post('/nowpayments/ipn', async (req, res) => {
       userEmail,
       httpsAgent,
       hostHeader,
-      billingId
+      billingId,
+      paymentMethod: 'NOWPayments (Crypto)',
+      processorTransactionId: remotePaymentId || 'N/A'
     });
 
     if (!result.success) {
@@ -11790,7 +11872,7 @@ app.post('/webhooks/dodopayments', async (req, res) => {
 
     // Use amount from billing_history as source of truth
     const amountNum = Number(billing.amount || 0);
-    const desc = billing.description || `TalkUSA card refill (${orderId})`;
+    const desc = billing.description || buildRefillDescription(billingId);
 
     const httpsAgent = magnusBillingAgent;
     const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
@@ -11804,7 +11886,9 @@ app.post('/webhooks/dodopayments', async (req, res) => {
       userEmail,
       httpsAgent,
       hostHeader,
-      billingId
+      billingId,
+      paymentMethod: 'Dodo Payments (Card)',
+      processorTransactionId: paymentId || 'N/A'
     });
 
     if (!result.success) {
@@ -12019,7 +12103,7 @@ app.post('/webhooks/square', async (req, res) => {
 
     // Use the amount from billing_history as source of truth (what we asked customer to pay)
     const amountNum = Number(billing.amount || 0);
-    const desc = billing.description || `TalkUSA card refill (${localOrderId})`;
+    const desc = billing.description || buildRefillDescription(billingId);
 
     const httpsAgent = magnusBillingAgent;
     const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
@@ -12033,7 +12117,9 @@ app.post('/webhooks/square', async (req, res) => {
       userEmail,
       httpsAgent,
       hostHeader,
-      billingId
+      billingId,
+      paymentMethod: 'Square (Card)',
+      processorTransactionId: String(payment.id || sq.square_payment_id || '').trim() || 'N/A'
     });
 
     if (!result.success) {
@@ -12274,7 +12360,7 @@ app.post('/webhooks/stripe', async (req, res) => {
 
     // Use amount from billing_history as source of truth
     const amountNum = Number(billing.amount || 0);
-    const desc = billing.description || `TalkUSA card refill (${orderId})`;
+    const desc = billing.description || buildRefillDescription(billingId);
 
     const httpsAgent = magnusBillingAgent;
     const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
@@ -12288,7 +12374,9 @@ app.post('/webhooks/stripe', async (req, res) => {
       userEmail,
       httpsAgent,
       hostHeader,
-      billingId
+      billingId,
+      paymentMethod: 'Stripe (Card)',
+      processorTransactionId: paymentIntentId || 'N/A'
     });
 
     if (!result.success) {
@@ -12505,7 +12593,7 @@ app.post('/webhooks/billcom', async (req, res) => {
     const userEmail = user.email || '';
 
     const amountNum = Number(billing.amount || 0);
-    const desc = billing.description || `TalkUSA ACH refill (${invoiceId || billingId})`;
+    const desc = billing.description || buildRefillDescription(billingId);
 
     const httpsAgent = magnusBillingAgent;
     const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
@@ -12519,7 +12607,9 @@ app.post('/webhooks/billcom', async (req, res) => {
       userEmail,
       httpsAgent,
       hostHeader,
-      billingId
+      billingId,
+      paymentMethod: 'BILL.com (ACH)',
+      processorTransactionId: invoiceId || 'N/A'
     });
 
     if (!result.success) {
