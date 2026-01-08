@@ -5981,6 +5981,9 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl,
   const akoolVisionLlmEnabled = process.env.AKOOL_VISION_LLM_ENABLED || '';
   const akoolVisionLlmMaxAgeS = process.env.AKOOL_VISION_LLM_MAX_AGE_S;
   const akoolVisionLlmModel = process.env.AKOOL_VISION_LLM_MODEL;
+  const akoolVisionLlmAttachMode = process.env.AKOOL_VISION_LLM_ATTACH_MODE;
+  const akoolVisionLlmMaxDim = process.env.AKOOL_VISION_LLM_MAX_DIM;
+  const akoolVisionLlmJpegQuality = process.env.AKOOL_VISION_LLM_JPEG_QUALITY;
 
   // Platform-owned keys are required.
   assertConfiguredOrThrow('DEEPGRAM_API_KEY', deepgram);
@@ -6028,6 +6031,9 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl,
   if (akoolVisionLlmEnabled && String(akoolVisionLlmEnabled).trim()) secrets.AKOOL_VISION_LLM_ENABLED = String(akoolVisionLlmEnabled).trim();
   if (akoolVisionLlmMaxAgeS != null && String(akoolVisionLlmMaxAgeS).trim()) secrets.AKOOL_VISION_LLM_MAX_AGE_S = String(akoolVisionLlmMaxAgeS).trim();
   if (akoolVisionLlmModel != null && String(akoolVisionLlmModel).trim()) secrets.AKOOL_VISION_LLM_MODEL = String(akoolVisionLlmModel).trim();
+  if (akoolVisionLlmAttachMode != null && String(akoolVisionLlmAttachMode).trim()) secrets.AKOOL_VISION_LLM_ATTACH_MODE = String(akoolVisionLlmAttachMode).trim();
+  if (akoolVisionLlmMaxDim != null && String(akoolVisionLlmMaxDim).trim()) secrets.AKOOL_VISION_LLM_MAX_DIM = String(akoolVisionLlmMaxDim).trim();
+  if (akoolVisionLlmJpegQuality != null && String(akoolVisionLlmJpegQuality).trim()) secrets.AKOOL_VISION_LLM_JPEG_QUALITY = String(akoolVisionLlmJpegQuality).trim();
 
   const portalBase = String(portalBaseUrl || process.env.PORTAL_BASE_URL || process.env.PUBLIC_BASE_URL || '').trim();
   if (portalBase) secrets.PORTAL_BASE_URL = portalBase;

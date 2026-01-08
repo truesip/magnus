@@ -596,6 +596,20 @@ async def bot(session_args: Any):
     )
     akool_vision_llm_max_age_s = min(60.0, max(0.0, _parse_float("AKOOL_VISION_LLM_MAX_AGE_S", 5.0)))
 
+    # Performance tuning: attaching an image to every turn can slow response latency.
+    #
+    # Modes:
+    #  - always: attach the latest camera frame to every user turn
+    #  - auto: attach only when the user's text likely requires vision (faster)
+    #  - never: never attach images (equivalent to AKOOL_VISION_LLM_ENABLED=0)
+    akool_vision_llm_attach_mode = (_env("AKOOL_VISION_LLM_ATTACH_MODE", "always").strip().lower() or "always")
+    if akool_vision_llm_attach_mode not in ("always", "auto", "never"):
+        akool_vision_llm_attach_mode = "always"
+
+    # Downscale/compress the attached image before sending to the LLM (reduces payload + latency).
+    akool_vision_llm_max_dim = max(0, min(2048, _parse_int("AKOOL_VISION_LLM_MAX_DIM", 512)))
+    akool_vision_llm_jpeg_quality = max(30, min(95, _parse_int("AKOOL_VISION_LLM_JPEG_QUALITY", 65)))
+
     # We only turn on Daily video input if at least one vision feature is enabled.
     akool_vision_capture_enabled = bool(akool_vision_enabled or akool_vision_llm_enabled)
 
@@ -653,20 +667,62 @@ async def bot(session_args: Any):
         live_options=stt_live_options,
     )
 
-    xai_model = _env("XAI_MODEL", "grok-3").strip() or "grok-3"
+    class RoutingOpenAILLMService(OpenAILLMService):
+        def __init__(self, *, text_model: str, vision_model: str, **kwargs):
+            self._text_model_name = str(text_model or "").strip()
+            self._vision_model_name = str(vision_model or "").strip()
+            super().__init__(model=self._text_model_name, **kwargs)
 
-    # If we are attaching image inputs, switch to a vision-capable model.
-    # xAI supports image inputs for certain models (e.g. grok-4). If you send images
-    # to a text-only model (e.g. grok-3), the API returns a 400 error.
+        def build_chat_completion_params(self, params_from_context):
+            params = super().build_chat_completion_params(params_from_context)
+
+            # Route to vision model only when an image is present in the message content.
+            model = self._text_model_name
+            try:
+                messages = None
+                if isinstance(params_from_context, dict):
+                    messages = params_from_context.get("messages")
+                if not isinstance(messages, list):
+                    messages = []
+
+                for msg in messages:
+                    if not isinstance(msg, dict):
+                        continue
+                    content = msg.get("content")
+                    if not isinstance(content, list):
+                        continue
+                    for item in content:
+                        if not isinstance(item, dict):
+                            continue
+                        if str(item.get("type") or "").strip().lower() == "image_url":
+                            model = self._vision_model_name
+                            raise StopIteration
+            except StopIteration:
+                pass
+            except Exception:
+                pass
+
+            params["model"] = model
+            return params
+
+    xai_text_model = _env("XAI_MODEL", "grok-3").strip() or "grok-3"
+    xai_base_url = _env("XAI_BASE_URL", "https://api.x.ai/v1").strip() or "https://api.x.ai/v1"
+
     if is_video_meeting and video_avatar_provider == "akool" and akool_vision_llm_enabled:
-        xai_model = _env("AKOOL_VISION_LLM_MODEL", "grok-4").strip() or "grok-4"
-
-    llm = OpenAILLMService(
-        api_key=xai_key,
-        # grok-beta was deprecated; default to grok-3 (unless vision is enabled above).
-        model=xai_model,
-        base_url=_env("XAI_BASE_URL", "https://api.x.ai/v1").strip() or "https://api.x.ai/v1",
-    )
+        xai_vision_model = _env("AKOOL_VISION_LLM_MODEL", "grok-4").strip() or "grok-4"
+        llm = RoutingOpenAILLMService(
+            api_key=xai_key,
+            text_model=xai_text_model,
+            vision_model=xai_vision_model,
+            base_url=xai_base_url,
+        )
+    else:
+        llm = OpenAILLMService(
+            api_key=xai_key,
+            # grok-beta was deprecated; default to grok-3.
+            model=xai_text_model,
+            base_url=xai_base_url,
+        )
 
     # Register tool handler (if portal integration is configured)
     if has_send_document_tool:
@@ -2237,9 +2293,54 @@ async def bot(session_args: Any):
 
         import types
 
+        def _should_attach_vision_to_text(text: str) -> bool:
+            mode = str(akool_vision_llm_attach_mode or "always").strip().lower()
+            if mode == "never":
+                return False
+            if mode == "always":
+                return True
+
+            # auto: only attach vision when the user likely needs it.
+            t = str(text or "").strip().lower()
+            if not t:
+                return False
+
+            # Simple keyword heuristic (fast + avoids extra model calls).
+            keywords = (
+                "see",
+                "look",
+                "show",
+                "camera",
+                "image",
+                "photo",
+                "picture",
+                "screen",
+                "read",
+                "what is this",
+                "what's this",
+                "who is",
+                "what am i",
+                "wearing",
+                "holding",
+                "color",
+                "colour",
+                "shirt",
+                "hat",
+                "glasses",
+                "sign",
+                "logo",
+                "text",
+            )
+            return any(k in t for k in keywords)
+
         async def _handle_aggregation_with_vision(self, aggregation: str):
             text = str(aggregation or "").strip()
             if not text:
+                return
+
+            # If not needed, keep this as a plain text turn (fast path).
+            if not _should_attach_vision_to_text(text):
+                self._context.add_message({"role": self.role, "content": text})
                 return
 
             snap = vision_state or {}
@@ -2251,7 +2352,35 @@ async def bot(session_args: Any):
                     try:
                         fmt = str(snap.get("format") or "RGB").strip() or "RGB"
                         size = tuple(snap.get("size") or (0, 0))
-                        self._context.add_image_frame_message(format=fmt, size=size, image=img, text=text)
+
+                        # Convert to a smaller JPEG in a worker thread to avoid blocking the event loop.
+                        def _encode_jpeg_b64() -> tuple[str, tuple[int, int]]:
+                            import base64
+                            import io
+
+                            from PIL import Image
+
+                            im = Image.frombytes(fmt, size, img)
+                            if akool_vision_llm_max_dim and max(im.size) > int(akool_vision_llm_max_dim):
+                                im.thumbnail((int(akool_vision_llm_max_dim), int(akool_vision_llm_max_dim)))
+
+                            buf = io.BytesIO()
+                            im.save(
+                                buf,
+                                format="JPEG",
+                                quality=int(akool_vision_llm_jpeg_quality),
+                                optimize=True,
+                            )
+                            b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                            return b64, (int(im.size[0]), int(im.size[1]))
+
+                        b64, resized = await asyncio.to_thread(_encode_jpeg_b64)
+                        content: list[dict[str, Any]] = [
+                            {"type": "text", "text": text},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                        ]
+                        self._context.add_message({"role": "user", "content": content})
+                        logger.debug(f"Attached vision frame to LLM ({resized[0]}x{resized[1]})")
                         return
                     except Exception as e:
                         logger.debug(f"Vision frame attach failed (falling back to text): {e}")
