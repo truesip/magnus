@@ -5980,6 +5980,7 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl,
   // Optional: attach participant camera frames to the LLM as image input
   const akoolVisionLlmEnabled = process.env.AKOOL_VISION_LLM_ENABLED || '';
   const akoolVisionLlmMaxAgeS = process.env.AKOOL_VISION_LLM_MAX_AGE_S;
+  const akoolVisionLlmModel = process.env.AKOOL_VISION_LLM_MODEL;
 
   // Platform-owned keys are required.
   assertConfiguredOrThrow('DEEPGRAM_API_KEY', deepgram);
@@ -6026,6 +6027,7 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl,
 
   if (akoolVisionLlmEnabled && String(akoolVisionLlmEnabled).trim()) secrets.AKOOL_VISION_LLM_ENABLED = String(akoolVisionLlmEnabled).trim();
   if (akoolVisionLlmMaxAgeS != null && String(akoolVisionLlmMaxAgeS).trim()) secrets.AKOOL_VISION_LLM_MAX_AGE_S = String(akoolVisionLlmMaxAgeS).trim();
+  if (akoolVisionLlmModel != null && String(akoolVisionLlmModel).trim()) secrets.AKOOL_VISION_LLM_MODEL = String(akoolVisionLlmModel).trim();
 
   const portalBase = String(portalBaseUrl || process.env.PORTAL_BASE_URL || process.env.PUBLIC_BASE_URL || '').trim();
   if (portalBase) secrets.PORTAL_BASE_URL = portalBase;

@@ -302,6 +302,7 @@ async def bot(session_args: Any):
       - AGENT_PROMPT
       - XAI_MODEL (default: grok-3)
       - XAI_BASE_URL (default: https://api.x.ai/v1)
+      - AKOOL_VISION_LLM_MODEL (default: grok-4; used only when AKOOL_VISION_LLM_ENABLED=1)
       - DEEPGRAM_MODEL (default: nova-3-general)
       - CARTESIA_MODEL (default: sonic-3)
       - AUDIO_SAMPLE_RATE (default: 16000)
@@ -652,10 +653,18 @@ async def bot(session_args: Any):
         live_options=stt_live_options,
     )
 
+    xai_model = _env("XAI_MODEL", "grok-3").strip() or "grok-3"
+
+    # If we are attaching image inputs, switch to a vision-capable model.
+    # xAI supports image inputs for certain models (e.g. grok-4). If you send images
+    # to a text-only model (e.g. grok-3), the API returns a 400 error.
+    if is_video_meeting and video_avatar_provider == "akool" and akool_vision_llm_enabled:
+        xai_model = _env("AKOOL_VISION_LLM_MODEL", "grok-4").strip() or "grok-4"
+
     llm = OpenAILLMService(
         api_key=xai_key,
-        # grok-beta was deprecated; default to grok-3.
-        model=_env("XAI_MODEL", "grok-3").strip() or "grok-3",
+        # grok-beta was deprecated; default to grok-3 (unless vision is enabled above).
+        model=xai_model,
         base_url=_env("XAI_BASE_URL", "https://api.x.ai/v1").strip() or "https://api.x.ai/v1",
     )
 
