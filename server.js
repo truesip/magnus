@@ -2307,7 +2307,7 @@ async function sendWelcomeEmail(toEmail, username, sipDomain, portalUrl, passwor
 
 function buildRefillDescription(invoiceNumber) {
   const inv = String(invoiceNumber ?? '').trim();
-  const line = `(A.I Service Credit + TalkUSA + Invoice Number ${inv})`.trim();
+  const line = `A.I Service Credit TalkUSA Invoice Number ${inv}`.trim();
   return line.substring(0, 255);
 }
 
@@ -9162,7 +9162,19 @@ app.get('/api/me/billing-history', requireAuth, async (req, res) => {
       [userId]
     );
 
-    if (DEBUG) console.log('[billing.history.rows]', { userId, count: rows.length, sample: rows[0] || null });
+    // Normalize legacy refill descriptions (remove older parentheses/+ formatting) for display.
+    const normalizedRows = Array.isArray(rows) ? rows.map((row) => {
+      const desc = row && row.description != null ? String(row.description) : '';
+      const lower = desc.toLowerCase();
+      const isLegacyRefill = !!desc && (desc.includes('+') || desc.startsWith('(') || desc.endsWith(')')) &&
+        lower.includes('a.i service credit') && lower.includes('talkusa') && lower.includes('invoice number');
+      if (isLegacyRefill) {
+        return { ...row, description: buildRefillDescription(row.id) };
+      }
+      return row;
+    }) : rows;
+
+    if (DEBUG) console.log('[billing.history.rows]', { userId, count: normalizedRows.length, sample: normalizedRows[0] || null });
 
     // Also fetch current balance from MagnusBilling
     let balance = null;
@@ -9180,7 +9192,7 @@ app.get('/api/me/billing-history', requireAuth, async (req, res) => {
       }
     } catch (e) { if (DEBUG) console.warn('[billing.balance] fetch failed:', e.message); }
 
-    return res.json({ success: true, data: rows, total, page, pageSize, balance });
+    return res.json({ success: true, data: normalizedRows, total, page, pageSize, balance });
   } catch (e) {
     if (DEBUG) console.error('[billing.history] error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to fetch billing history' });
@@ -10584,6 +10596,14 @@ async function applyMagnusRefill({ userId, magnusUserId, amountNum, desc, displa
   if (!pool) throw new Error('Database not configured');
   if (!magnusUserId) throw new Error('Missing MagnusBilling user id');
 
+  // Always use our standardized invoice-style description (and keep it in sync with billing_history).
+  const refillDesc = billingId != null ? buildRefillDescription(billingId) : String(desc || '').substring(0, 255);
+  if (billingId != null) {
+    try {
+      await pool.execute('UPDATE billing_history SET description = ? WHERE id = ?', [refillDesc, billingId]);
+    } catch {}
+  }
+
   try {
     if (DEBUG) console.log('[refill] Attempting to add credit:', { magnusUserId, amount: amountNum, billingId });
 
@@ -10597,7 +10617,7 @@ async function applyMagnusRefill({ userId, magnusUserId, amountNum, desc, displa
       refillParams.append('action', 'save');
       refillParams.append('id_user', String(magnusUserId));
       refillParams.append('credit', String(amountNum));
-      refillParams.append('description', desc);
+      refillParams.append('description', refillDesc);
       refillParams.append('payment', '1'); // 1 = Yes (payment confirmed)
       refillParams.append('refill_type', '0'); // 0 = Bank transfer/manual (releases credit immediately)
 
@@ -10655,7 +10675,7 @@ async function applyMagnusRefill({ userId, magnusUserId, amountNum, desc, displa
         refillParams.append('action', 'save');
         refillParams.append('id_user', String(magnusUserId));
         refillParams.append('credit', String(amountNum));
-        refillParams.append('description', desc);
+        refillParams.append('description', refillDesc);
 
         const refillResp = await mbSignedCall({ relPath: '/index.php/refillcredit/save', params: refillParams, httpsAgent, hostHeader });
         magnusResponse = JSON.stringify(refillResp?.data || refillResp);
@@ -10684,7 +10704,7 @@ async function applyMagnusRefill({ userId, magnusUserId, amountNum, desc, displa
             toEmail: userEmail,
             username: displayName,
             amount: amountNum,
-            description: desc,
+            description: refillDesc,
             invoiceNumber: billingId,
             paymentMethod,
             processorTransactionId
