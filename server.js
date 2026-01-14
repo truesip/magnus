@@ -135,6 +135,22 @@ function digitsOnly(s) {
   return String(s || '').replace(/[^0-9]/g, '');
 }
 
+function normalizeAiMessageId(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+
+  // Accept UUIDs by stripping hyphens.
+  const noHyphen = s.replace(/-/g, '');
+  if (/^[a-f0-9]{32}$/i.test(noHyphen)) return noHyphen.toLowerCase();
+
+  // Fallback: hash any other identifier into a stable 32-hex id.
+  try {
+    return crypto.createHash('sha256').update(s).digest('hex').slice(0, 32);
+  } catch {
+    return null;
+  }
+}
+
 function normalizeIpString(ip) {
   const s = String(ip || '').trim();
   if (!s) return null;
@@ -6142,7 +6158,9 @@ app.post('/api/ai/agent/log-message', async (req, res) => {
 
     const callId = String(req.body?.call_id || req.body?.callId || '').trim();
     const callDomain = String(req.body?.call_domain || req.body?.callDomain || '').trim();
-    const messageId = String(req.body?.message_id || req.body?.messageId || '').trim();
+
+    const messageIdRaw = String(req.body?.message_id || req.body?.messageId || '').trim();
+    const messageId = normalizeAiMessageId(messageIdRaw);
 
     const roleRaw = String(req.body?.role || '').trim().toLowerCase();
     const role = (roleRaw === 'assistant') ? 'assistant' : (roleRaw === 'user' ? 'user' : '');
@@ -6155,8 +6173,8 @@ app.post('/api/ai/agent/log-message', async (req, res) => {
     if (callId.length > 64 || callDomain.length > 64) {
       return res.status(400).json({ success: false, message: 'call_id/call_domain are too long' });
     }
-    if (!messageId || !/^[a-f0-9]{32}$/i.test(messageId)) {
-      return res.status(400).json({ success: false, message: 'message_id must be a 32-char hex string' });
+    if (!messageId) {
+      return res.status(400).json({ success: false, message: 'message_id is required' });
     }
     if (!role) {
       return res.status(400).json({ success: false, message: 'role must be user or assistant' });
@@ -6172,7 +6190,7 @@ app.post('/api/ai/agent/log-message', async (req, res) => {
     try {
       const [ins] = await pool.execute(
         'INSERT IGNORE INTO ai_call_messages (message_id, user_id, agent_id, call_id, call_domain, role, content) VALUES (?,?,?,?,?,?,?)',
-        [messageId.toLowerCase(), userId, agentId, callId, callDomain, role, content]
+        [messageId, userId, agentId, callId, callDomain, role, content]
       );
       inserted = !!(ins && ins.affectedRows > 0);
     } catch (e) {
