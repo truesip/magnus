@@ -6004,16 +6004,12 @@ async function syncUserAiTransferDestinationToAgents({ userId, transferToNumber,
 
   const [agents] = await pool.execute('SELECT * FROM ai_agents WHERE user_id = ? ORDER BY created_at DESC', [userId]);
   for (const agent of agents || []) {
-    // Preserve portal token if present (document emailing).
-    let portalToken = '';
-    try {
-      if (agent.agent_action_token_enc && agent.agent_action_token_iv && agent.agent_action_token_tag) {
-        const key = getUserSmtpEncryptionKey();
-        if (key) {
-          portalToken = decryptAes256Gcm(agent.agent_action_token_enc, agent.agent_action_token_iv, agent.agent_action_token_tag, key);
-        }
-      }
-    } catch {}
+    // Ensure token exists so we don't accidentally overwrite the secret set with a blank token.
+    const portalToken = await getOrCreateAgentActionTokenPlain({
+      agentRow: agent,
+      userId,
+      label: 'ai.transfer.sync'
+    });
 
     const bgUrlResolved = await resolveAgentBackgroundAudioUrl({
       userId,
@@ -6184,6 +6180,67 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl,
   if (token) secrets.PORTAL_AGENT_ACTION_TOKEN = token;
 
   return secrets;
+}
+
+// Ensure we can safely include PORTAL_AGENT_ACTION_TOKEN in Pipecat secret set updates.
+// - If token is present, decrypt and return it.
+// - If token is missing, generate + persist a new one and return it.
+// This prevents older agents (created before USER_SMTP_ENCRYPTION_KEY was configured) from
+// having broken transcript logging and other portal callbacks.
+async function getOrCreateAgentActionTokenPlain({ agentRow, userId, label }) {
+  const agent = (agentRow && typeof agentRow === 'object') ? agentRow : null;
+  const uid = userId != null ? Number(userId) : null;
+  const agentId = agent && agent.id != null ? Number(agent.id) : null;
+  const tag = String(label || 'ai.agent.token');
+
+  if (!pool) return '';
+  if (!agentId || !uid) return '';
+
+  const hasEnc = !!(agent.agent_action_token_enc && agent.agent_action_token_iv && agent.agent_action_token_tag);
+
+  // If a token exists but we can't decrypt it, do NOT proceed with secret set updates
+  // (we'd overwrite the existing token with an empty value).
+  if (hasEnc) {
+    const key = getUserSmtpEncryptionKey();
+    if (!key) {
+      throw new Error('USER_SMTP_ENCRYPTION_KEY not configured');
+    }
+    try {
+      const tok = decryptAes256Gcm(agent.agent_action_token_enc, agent.agent_action_token_iv, agent.agent_action_token_tag, key);
+      const trimmed = String(tok || '').trim();
+      if (trimmed) return trimmed;
+    } catch (e) {
+      if (DEBUG) console.warn(`[${tag}] Failed to decrypt agent action token; rotating:`, e?.message || e);
+      // Fallthrough to rotate
+    }
+  }
+
+  const key = getUserSmtpEncryptionKey();
+  if (!key) {
+    if (DEBUG) console.warn(`[${tag}] USER_SMTP_ENCRYPTION_KEY not configured; agent action token will not be set`);
+    return '';
+  }
+
+  const tokenPlain = crypto.randomBytes(32).toString('base64url');
+  const tokenHash = sha256(tokenPlain);
+  const enc = encryptAes256Gcm(tokenPlain, key);
+
+  await pool.execute(
+    'UPDATE ai_agents SET agent_action_token_hash = ?, agent_action_token_enc = ?, agent_action_token_iv = ?, agent_action_token_tag = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? LIMIT 1',
+    [tokenHash, enc.enc, enc.iv, enc.tag, agentId, uid]
+  );
+
+  // Mutate the passed object so callers in the same request can use the updated fields.
+  try {
+    agentRow.agent_action_token_hash = tokenHash;
+    agentRow.agent_action_token_enc = enc.enc;
+    agentRow.agent_action_token_iv = enc.iv;
+    agentRow.agent_action_token_tag = enc.tag;
+  } catch {}
+
+  if (DEBUG) console.log(`[${tag}] Generated new agent action token`, { agentId, userId: uid });
+
+  return tokenPlain;
 }
 
 function normalizeAiTransferDestination(s) {
@@ -8743,12 +8800,11 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
 
     // Update secret set + redeploy
     try {
-      let portalToken = '';
-      if (agent.agent_action_token_enc && agent.agent_action_token_iv && agent.agent_action_token_tag) {
-        const key = getUserSmtpEncryptionKey();
-        if (!key) throw new Error('USER_SMTP_ENCRYPTION_KEY not configured');
-        portalToken = decryptAes256Gcm(agent.agent_action_token_enc, agent.agent_action_token_iv, agent.agent_action_token_tag, key);
-      }
+      const portalToken = await getOrCreateAgentActionTokenPlain({
+        agentRow: agent,
+        userId,
+        label: 'ai.agents.update'
+      });
 
       const operatorNumber = await getUserAiTransferDestination(userId);
       const publicBaseUrl = getPublicBaseUrlFromReq(req);
@@ -8827,12 +8883,11 @@ app.post('/api/me/ai/agents/:id/background-audio', requireAuth, aiAgentBackgroun
 
     // Update secret set + redeploy so the agent starts using the uploaded WAV
     try {
-      let portalToken = '';
-      if (agent.agent_action_token_enc && agent.agent_action_token_iv && agent.agent_action_token_tag) {
-        const key = getUserSmtpEncryptionKey();
-        if (!key) throw new Error('USER_SMTP_ENCRYPTION_KEY not configured');
-        portalToken = decryptAes256Gcm(agent.agent_action_token_enc, agent.agent_action_token_iv, agent.agent_action_token_tag, key);
-      }
+      const portalToken = await getOrCreateAgentActionTokenPlain({
+        agentRow: agent,
+        userId,
+        label: 'ai.agents.background-audio.upload'
+      });
 
       const operatorNumber = await getUserAiTransferDestination(userId);
       const publicBaseUrl = getPublicBaseUrlFromReq(req);
@@ -8882,12 +8937,11 @@ app.delete('/api/me/ai/agents/:id/background-audio', requireAuth, async (req, re
 
     // Update secret set + redeploy so the agent stops using the uploaded WAV
     try {
-      let portalToken = '';
-      if (agent.agent_action_token_enc && agent.agent_action_token_iv && agent.agent_action_token_tag) {
-        const key = getUserSmtpEncryptionKey();
-        if (!key) throw new Error('USER_SMTP_ENCRYPTION_KEY not configured');
-        portalToken = decryptAes256Gcm(agent.agent_action_token_enc, agent.agent_action_token_iv, agent.agent_action_token_tag, key);
-      }
+      const portalToken = await getOrCreateAgentActionTokenPlain({
+        agentRow: agent,
+        userId,
+        label: 'ai.agents.background-audio.delete'
+      });
 
       const operatorNumber = await getUserAiTransferDestination(userId);
       const publicBaseUrl = getPublicBaseUrlFromReq(req);
@@ -8978,12 +9032,11 @@ app.post('/api/me/ai/agents/:id/redeploy', requireAuth, async (req, res) => {
     }
 
     try {
-      let portalToken = '';
-      if (agent.agent_action_token_enc && agent.agent_action_token_iv && agent.agent_action_token_tag) {
-        const key = getUserSmtpEncryptionKey();
-        if (!key) throw new Error('USER_SMTP_ENCRYPTION_KEY not configured');
-        portalToken = decryptAes256Gcm(agent.agent_action_token_enc, agent.agent_action_token_iv, agent.agent_action_token_tag, key);
-      }
+      const portalToken = await getOrCreateAgentActionTokenPlain({
+        agentRow: agent,
+        userId,
+        label: 'ai.agents.redeploy'
+      });
 
       const operatorNumber = await getUserAiTransferDestination(userId);
       const publicBaseUrl = getPublicBaseUrlFromReq(req);
@@ -9210,12 +9263,11 @@ app.post('/api/me/ai/numbers/:id/assign', requireAuth, async (req, res) => {
     // Ensure the Pipecat agent has the latest platform keys (including DAILY_API_KEY)
     // before routing real PSTN traffic to it.
     try {
-      let portalToken = '';
-      if (agent.agent_action_token_enc && agent.agent_action_token_iv && agent.agent_action_token_tag) {
-        const key = getUserSmtpEncryptionKey();
-        if (!key) throw new Error('USER_SMTP_ENCRYPTION_KEY not configured');
-        portalToken = decryptAes256Gcm(agent.agent_action_token_enc, agent.agent_action_token_iv, agent.agent_action_token_tag, key);
-      }
+      const portalToken = await getOrCreateAgentActionTokenPlain({
+        agentRow: agent,
+        userId,
+        label: 'ai.numbers.assign'
+      });
 
       const operatorNumber = await getUserAiTransferDestination(userId);
       const publicBaseUrl = getPublicBaseUrlFromReq(req);
