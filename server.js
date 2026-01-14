@@ -135,6 +135,34 @@ function digitsOnly(s) {
   return String(s || '').replace(/[^0-9]/g, '');
 }
 
+function normalizeIpString(ip) {
+  const s = String(ip || '').trim();
+  if (!s) return null;
+  const m = s.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (m) return m[1];
+  return s;
+}
+
+function getClientIp(req) {
+  try {
+    const ip = normalizeIpString(req?.ip);
+    if (ip) return ip;
+
+    // Fallbacks if trust proxy isn't effective (should be rare)
+    const xff = req?.headers?.['x-forwarded-for'];
+    if (xff) {
+      const first = String(xff).split(',')[0].trim();
+      const xip = normalizeIpString(first);
+      if (xip) return xip;
+    }
+
+    const ra = req?.socket?.remoteAddress || req?.connection?.remoteAddress;
+    return normalizeIpString(ra);
+  } catch {
+    return null;
+  }
+}
+
 // ========== Log sanitization ==========
 // Prevent secrets (tokens/passwords/etc.) from leaking into application logs.
 const LOG_REDACT_VALUE = '***REDACTED***';
@@ -1114,6 +1142,12 @@ async function initDb() {
     firstname VARCHAR(80) NOT NULL,
     lastname VARCHAR(80) NOT NULL,
     phone VARCHAR(40) NULL,
+    address1 VARCHAR(255) NULL,
+    city VARCHAR(100) NULL,
+    state VARCHAR(100) NULL,
+    postal_code VARCHAR(32) NULL,
+    country CHAR(2) NULL,
+    signup_ip VARCHAR(64) NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`);
   // Ensure email_verifications.password is large enough for bcrypt hashes and attempts column exists
@@ -1144,6 +1178,29 @@ async function initDb() {
     } catch (e) {
       if (DEBUG) console.warn('[schema] email_verifications.attempts check failed', e.message || e);
     }
+
+    // Ensure address + signup IP columns exist
+    for (const colDef of [
+      { name: 'address1', ddl: "ALTER TABLE email_verifications ADD COLUMN address1 VARCHAR(255) NULL AFTER phone" },
+      { name: 'city', ddl: "ALTER TABLE email_verifications ADD COLUMN city VARCHAR(100) NULL AFTER address1" },
+      { name: 'state', ddl: "ALTER TABLE email_verifications ADD COLUMN state VARCHAR(100) NULL AFTER city" },
+      { name: 'postal_code', ddl: "ALTER TABLE email_verifications ADD COLUMN postal_code VARCHAR(32) NULL AFTER state" },
+      { name: 'country', ddl: "ALTER TABLE email_verifications ADD COLUMN country CHAR(2) NULL AFTER postal_code" },
+      { name: 'signup_ip', ddl: "ALTER TABLE email_verifications ADD COLUMN signup_ip VARCHAR(64) NULL AFTER country" }
+    ]) {
+      try {
+        const [hasCol] = await pool.query(
+          'SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name=\'email_verifications\' AND column_name=? LIMIT 1',
+          [dbName, colDef.name]
+        );
+        if (!hasCol || !hasCol.length) {
+          await pool.query(colDef.ddl);
+          if (DEBUG) console.log('[schema] Added email_verifications column:', colDef.name);
+        }
+      } catch (e) {
+        if (DEBUG) console.warn('[schema] email_verifications column check failed:', colDef.name, e.message || e);
+      }
+    }
   } catch (e) {
     if (DEBUG) console.warn('[schema] email_verifications.password length check failed', e.message || e);
   }
@@ -1155,11 +1212,41 @@ async function initDb() {
     firstname VARCHAR(80) NULL,
     lastname VARCHAR(80) NULL,
     phone VARCHAR(40) NULL,
+    address1 VARCHAR(255) NULL,
+    city VARCHAR(100) NULL,
+    state VARCHAR(100) NULL,
+    postal_code VARCHAR(32) NULL,
+    country CHAR(2) NULL,
+    signup_ip VARCHAR(64) NULL,
     password_hash VARCHAR(255) NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uniq_username (username),
     UNIQUE KEY uniq_email (email)
   )`);
+
+  // Ensure signup_users address + signup IP columns exist
+  for (const colDef of [
+    { name: 'address1', ddl: "ALTER TABLE signup_users ADD COLUMN address1 VARCHAR(255) NULL AFTER phone" },
+    { name: 'city', ddl: "ALTER TABLE signup_users ADD COLUMN city VARCHAR(100) NULL AFTER address1" },
+    { name: 'state', ddl: "ALTER TABLE signup_users ADD COLUMN state VARCHAR(100) NULL AFTER city" },
+    { name: 'postal_code', ddl: "ALTER TABLE signup_users ADD COLUMN postal_code VARCHAR(32) NULL AFTER state" },
+    { name: 'country', ddl: "ALTER TABLE signup_users ADD COLUMN country CHAR(2) NULL AFTER postal_code" },
+    { name: 'signup_ip', ddl: "ALTER TABLE signup_users ADD COLUMN signup_ip VARCHAR(64) NULL AFTER country" }
+  ]) {
+    try {
+      const [hasCol] = await pool.query(
+        'SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name=\'signup_users\' AND column_name=? LIMIT 1',
+        [dbName, colDef.name]
+      );
+      if (!hasCol || !hasCol.length) {
+        await pool.query(colDef.ddl);
+        if (DEBUG) console.log('[schema] Added signup_users column:', colDef.name);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] signup_users column check failed:', colDef.name, e.message || e);
+    }
+  }
+
   // User trunks table - stores DIDWW trunk ownership per user
   await pool.query(`CREATE TABLE IF NOT EXISTS user_trunks (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -2233,8 +2320,31 @@ async function storeVerification({ token, codeHash, email, expiresAt, fields }) 
   if (!pool) throw new Error('Database not configured');
   // Store plaintext password (legacy behavior). NOTE: less secure; consider encrypting in future.
   const plainPassword = String(fields.password || '');
-  const sql = `INSERT INTO email_verifications (token,email,code_hash,expires_at,used,username,password,firstname,lastname,phone) VALUES (?,?,?,?,0,?,?,?,?,?)`;
-  await pool.execute(sql, [token, email, codeHash, expiresAt, fields.username, plainPassword, fields.firstname, fields.lastname, fields.phone || null]);
+  const address1 = fields.address1 != null ? String(fields.address1).trim() : '';
+  const city = fields.city != null ? String(fields.city).trim() : '';
+  const state = fields.state != null ? String(fields.state).trim() : '';
+  const postalCode = fields.postal_code != null ? String(fields.postal_code).trim() : (fields.postalCode != null ? String(fields.postalCode).trim() : '');
+  const country = fields.country != null ? String(fields.country).trim().toUpperCase() : '';
+  const signupIp = fields.signup_ip != null ? String(fields.signup_ip).trim() : (fields.signupIp != null ? String(fields.signupIp).trim() : '');
+
+  const sql = `INSERT INTO email_verifications (token,email,code_hash,expires_at,used,username,password,firstname,lastname,phone,address1,city,state,postal_code,country,signup_ip) VALUES (?,?,?,?,0,?,?,?,?,?,?,?,?,?,?,?)`;
+  await pool.execute(sql, [
+    token,
+    email,
+    codeHash,
+    expiresAt,
+    fields.username,
+    plainPassword,
+    fields.firstname,
+    fields.lastname,
+    fields.phone || null,
+    address1 || null,
+    city || null,
+    state || null,
+    postalCode || null,
+    country || null,
+    signupIp || null
+  ]);
 }
 async function fetchVerification(token) {
   if (!pool) throw new Error('Database not configured');
@@ -2253,12 +2363,37 @@ async function markVerificationUsed(token) {
 async function purgeExpired() {
   if (!pool) return; try { await pool.execute('DELETE FROM email_verifications WHERE expires_at < ? OR used=1', [Date.now()]); } catch {}
 }
-async function saveUserRow({ magnusUserId, username, email, firstname, lastname, phone, passwordHash = null }) {
+async function saveUserRow({ magnusUserId, username, email, firstname, lastname, phone, address1, city, state, postalCode, country, signupIp, passwordHash = null }) {
   if (!pool) return;
-  const sql = `INSERT INTO signup_users (magnus_user_id, username, email, firstname, lastname, phone, password_hash)
-               VALUES (?,?,?,?,?,?,?)
-               ON DUPLICATE KEY UPDATE magnus_user_id=VALUES(magnus_user_id), firstname=VALUES(firstname), lastname=VALUES(lastname), phone=VALUES(phone), password_hash=COALESCE(VALUES(password_hash), password_hash)`;
-  await pool.execute(sql, [String(magnusUserId || ''), username, email, firstname || null, lastname || null, phone || null, passwordHash]);
+  const sql = `INSERT INTO signup_users (magnus_user_id, username, email, firstname, lastname, phone, address1, city, state, postal_code, country, signup_ip, password_hash)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON DUPLICATE KEY UPDATE
+                 magnus_user_id=VALUES(magnus_user_id),
+                 firstname=VALUES(firstname),
+                 lastname=VALUES(lastname),
+                 phone=VALUES(phone),
+                 address1=COALESCE(VALUES(address1), address1),
+                 city=COALESCE(VALUES(city), city),
+                 state=COALESCE(VALUES(state), state),
+                 postal_code=COALESCE(VALUES(postal_code), postal_code),
+                 country=COALESCE(VALUES(country), country),
+                 signup_ip=COALESCE(VALUES(signup_ip), signup_ip),
+                 password_hash=COALESCE(VALUES(password_hash), password_hash)`;
+  await pool.execute(sql, [
+    String(magnusUserId || ''),
+    username,
+    email,
+    firstname || null,
+    lastname || null,
+    phone || null,
+    address1 || null,
+    city || null,
+    state || null,
+    postalCode || null,
+    country || null,
+    signupIp || null,
+    passwordHash
+  ]);
 }
 async function checkAvailability({ username, email }) {
   if (!pool) return { usernameAvailable: true, emailAvailable: true };
@@ -2381,6 +2516,102 @@ async function sendWelcomeEmail(toEmail, username, sipDomain, portalUrl, passwor
     html_body: html
   };
   await smtp2goSendEmail(payload, { kind: 'welcome', to: toEmail, subject });
+}
+
+function normalizeSignupCountry(country) {
+  const c = String(country || '').trim().toUpperCase();
+  if (c === 'US' || c === 'USA') return 'US';
+  if (c === 'CA' || c === 'CAN') return 'CA';
+  return null;
+}
+
+function normalizePostalCode(raw, { country } = {}) {
+  const s = String(raw || '').trim().toUpperCase();
+  if (!s) return '';
+  const c = String(country || '').trim().toUpperCase();
+  if (c === 'CA') return s.replace(/[^A-Z0-9]/g, '');
+  return s.replace(/\s+/g, '').replace(/[^A-Z0-9-]/g, '');
+}
+
+function formatSignupAddressLine({ address1, city, state, postalCode, country }) {
+  const parts = [address1, city, state].map(v => String(v || '').trim()).filter(Boolean);
+  const zip = String(postalCode || '').trim();
+  const c = String(country || '').trim();
+  let line = parts.join(', ');
+  if (zip) line = line ? `${line} ${zip}` : zip;
+  if (c) line = line ? `${line}, ${c}` : c;
+  return line;
+}
+
+async function sendAdminSignupCopyEmail({
+  email,
+  username,
+  firstname,
+  lastname,
+  phone,
+  address1,
+  city,
+  state,
+  postalCode,
+  country,
+  signupIp,
+  magnusUserId
+} = {}) {
+  const apiKey = process.env.SMTP2GO_API_KEY;
+  const sender = process.env.SMTP2GO_SENDER || `no-reply@${(process.env.SENDER_DOMAIN || 'talkusa.net')}`;
+  const adminEmail = process.env.ADMIN_SIGNUP_NOTIFY_EMAIL || process.env.ADMIN_NOTIFY_EMAIL;
+  if (!apiKey || !adminEmail) return;
+
+  const esc = (v) => String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+  const name = [firstname, lastname].filter(Boolean).join(' ').trim();
+  const addrLine = formatSignupAddressLine({ address1, city, state, postalCode, country });
+  const subject = `New TalkUSA signup: ${String(username || '').trim() || '-'} (${String(email || '').trim() || '-'})`;
+
+  const lines = [
+    'New TalkUSA signup',
+    '',
+    name ? `Name: ${name}` : null,
+    username ? `Username: ${username}` : null,
+    email ? `Email: ${email}` : null,
+    phone ? `Phone: ${phone}` : null,
+    addrLine ? `Address: ${addrLine}` : null,
+    signupIp ? `Signup IP: ${signupIp}` : null,
+    magnusUserId ? `Magnus User ID: ${magnusUserId}` : null,
+    '',
+    `Time: ${new Date().toISOString()}`
+  ].filter(Boolean);
+
+  const text = lines.join('\n');
+
+  const htmlRows = [
+    name ? `<tr><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;"><b>Name</b></td><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;">${esc(name)}</td></tr>` : '',
+    username ? `<tr><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;"><b>Username</b></td><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;">${esc(username)}</td></tr>` : '',
+    email ? `<tr><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;"><b>Email</b></td><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;">${esc(email)}</td></tr>` : '',
+    phone ? `<tr><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;"><b>Phone</b></td><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;">${esc(phone)}</td></tr>` : '',
+    addrLine ? `<tr><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;"><b>Address</b></td><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;">${esc(addrLine)}</td></tr>` : '',
+    signupIp ? `<tr><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;"><b>Signup IP</b></td><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;">${esc(signupIp)}</td></tr>` : '',
+    magnusUserId ? `<tr><td style="padding:6px 10px;"><b>Magnus User ID</b></td><td style="padding:6px 10px;">${esc(magnusUserId)}</td></tr>` : ''
+  ].filter(Boolean).join('');
+
+  const html = `
+  <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">\r
+    <h2>New TalkUSA signup</h2>\r
+    <table style="border:1px solid #e5e7eb;border-radius:10px;border-collapse:separate;border-spacing:0;overflow:hidden;max-width:680px;background:#ffffff">\r
+      <tbody>\r
+        ${htmlRows}\r
+      </tbody>\r
+    </table>\r
+    <p style="color:#6b7280;margin-top:12px;font-size:12px">Time: ${esc(new Date().toISOString())}</p>\r
+  </div>`;
+
+  const payload = { api_key: apiKey, to: [adminEmail], sender, subject, text_body: text, html_body: html };
+  await smtp2goSendEmail(payload, { kind: 'admin-signup-copy', to: adminEmail, subject });
 }
 
 function buildRefillDescription(invoiceNumber) {
@@ -2764,6 +2995,12 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'healthy' });
 });
 
+// Used by signup flow to show the detected client IP (server-derived)
+app.get('/api/client-ip', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  return res.json({ success: true, ip: getClientIp(req) });
+});
+
 // Optional debug endpoint (disabled in production)
 if (DEBUG) {
   app.get('/debug/env', (req, res) => {
@@ -2899,7 +3136,7 @@ app.get('/api/me/profile', requireAuth, async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     const userId = req.session.userId;
-    const [rows] = await pool.execute('SELECT username, firstname, lastname, email, phone FROM signup_users WHERE id=? LIMIT 1', [userId]);
+    const [rows] = await pool.execute('SELECT username, firstname, lastname, email, phone, address1, city, state, postal_code, country, signup_ip FROM signup_users WHERE id=? LIMIT 1', [userId]);
     const row = rows && rows[0] ? rows[0] : {};
     const name = [row.firstname, row.lastname].filter(Boolean).join(' ').trim();
     const sipDomain = process.env.SIP_DOMAIN || process.env.MAGNUSBILLING_TLS_SERVERNAME || process.env.MAGNUSBILLING_HOST_HEADER || '';
@@ -2953,7 +3190,25 @@ app.get('/api/me/profile', requireAuth, async (req, res) => {
     
     const callLimit = req.session.callLimit || 0;
     const cpsLimit = req.session.cpsLimit || 0;
-    return res.json({ success: true, data: { name, email: row.email || '', phone: row.phone || '', username: row.username || '', sipDomain, balance, callLimit, cpsLimit } });
+    return res.json({
+      success: true,
+      data: {
+        name,
+        email: row.email || '',
+        phone: row.phone || '',
+        username: row.username || '',
+        address1: row.address1 || '',
+        city: row.city || '',
+        state: row.state || '',
+        postalCode: row.postal_code || '',
+        country: row.country || '',
+        signupIp: row.signup_ip || '',
+        sipDomain,
+        balance,
+        callLimit,
+        cpsLimit
+      }
+    });
   } catch (e) { return res.status(500).json({ success: false, message: 'Profile fetch failed' }); }
 });
 
@@ -17216,30 +17471,85 @@ app.delete('/api/me/didww/dids/:id', requireAuth, async (req, res) => {
 app.post('/api/verify-email', otpSendLimiter, async (req, res) => {
   try {
     const { username, password, firstname, lastname, email, phone } = req.body || {};
+    const address1 = req.body?.address1;
+    const city = req.body?.city;
+    const state = req.body?.state;
+    const postalRaw = req.body?.postal_code ?? req.body?.postalCode ?? req.body?.zip ?? req.body?.zipcode;
+    const countryRaw = req.body?.country;
+
     if (!username || !password || !firstname || !lastname || !email) {
       return res.status(400).json({ success: false, message: 'All fields are required: username, password, firstname, lastname, email' });
     }
     if (!phone || !/^\d{11}$/.test(String(phone))) {
       return res.status(400).json({ success: false, message: 'Phone number is required and must be 11 digits (numbers only).' });
     }
+
+    // New required signup fields
+    if (!address1 || !city || !state || !postalRaw || !countryRaw) {
+      return res.status(400).json({ success: false, message: 'Address fields are required: address1, city, state, postal_code, country' });
+    }
+
+    const country = normalizeSignupCountry(countryRaw);
+    if (!country) {
+      return res.status(400).json({ success: false, message: 'Country must be US or CA' });
+    }
+
+    const postalCode = normalizePostalCode(postalRaw, { country });
+    if (!postalCode) {
+      return res.status(400).json({ success: false, message: 'Postal code is required' });
+    }
+
+    const address1Trim = String(address1 || '').trim();
+    const cityTrim = String(city || '').trim();
+    const stateTrim = String(state || '').trim();
+
+    if (!address1Trim || address1Trim.length > 255) {
+      return res.status(400).json({ success: false, message: 'Street address is required (max 255 characters).' });
+    }
+    if (!cityTrim || cityTrim.length > 100) {
+      return res.status(400).json({ success: false, message: 'City is required (max 100 characters).' });
+    }
+    if (!stateTrim || stateTrim.length > 100) {
+      return res.status(400).json({ success: false, message: 'State is required (max 100 characters).' });
+    }
+    if (postalCode.length > 32) {
+      return res.status(400).json({ success: false, message: 'Postal code is too long.' });
+    }
+
     if (!usernameIsAlnumMax10(username)) {
       return res.status(400).json({ success: false, message: 'Username must be letters and numbers only, maximum 10 characters.' });
     }
     if (!passwordIsAlnumMax10(password)) {
       return res.status(400).json({ success: false, message: 'Password must be letters and numbers only, maximum 10 characters.' });
     }
+
     const availability = await checkAvailability({ username, email });
     if (!availability.usernameAvailable || !availability.emailAvailable) {
       return res.status(409).json({ success: false, message: 'Username or email already exists', availability });
     }
+
     const token = crypto.randomBytes(16).toString('hex');
     const code = otp();
     const record = {
       codeHash: sha256(code),
       email,
       expiresAt: Date.now() + OTP_TTL_MS,
-      fields: { username, password, firstname, lastname, email, phone }
+      fields: {
+        username,
+        password,
+        firstname,
+        lastname,
+        email,
+        phone,
+        address1: address1Trim,
+        city: cityTrim,
+        state: stateTrim,
+        postal_code: postalCode,
+        country,
+        signup_ip: getClientIp(req)
+      }
     };
+
     await storeVerification({ token, codeHash: record.codeHash, email, expiresAt: record.expiresAt, fields: record.fields });
     await sendVerificationEmail(email, code);
     if (DEBUG) console.debug('Verification code sent', { email, token });
@@ -17295,6 +17605,13 @@ app.post('/api/complete-signup', otpVerifyLimiter, async (req, res) => {
 
   // proceed to create account using the same logic as /api/signup
   const { username, firstname, lastname, email, phone } = rec;
+  const address1 = rec?.address1 != null ? String(rec.address1).trim() : '';
+  const city = rec?.city != null ? String(rec.city).trim() : '';
+  const state = rec?.state != null ? String(rec.state).trim() : '';
+  const country = rec?.country != null ? String(rec.country).trim().toUpperCase() : '';
+  const postalCode = rec?.postal_code != null ? String(rec.postal_code).trim() : '';
+  const signupIp = (rec?.signup_ip != null ? String(rec.signup_ip).trim() : '') || getClientIp(req) || null;
+
   if (DEBUG) console.log('[complete-signup] Creating account for:', { username, email });
   if (!usernameIsAlnumMax10(username)) {
     if (DEBUG) console.log('[complete-signup] Username validation failed');
@@ -17382,8 +17699,44 @@ if (response.status >= 200 && response.status < 300) {
         try { await purgeExpired(); } catch {}
         // Save to local DB for future availability checks (store password hash for app login)
         let passwordHash = null; try { passwordHash = await bcrypt.hash(plainPassword, 12); } catch {}
-        try { await saveUserRow({ magnusUserId: createdId, username, email, firstname, lastname, phone, passwordHash }); } catch (e) { if (DEBUG) console.warn('Save user failed', e.message || e); }
+        try {
+          await saveUserRow({
+            magnusUserId: createdId,
+            username,
+            email,
+            firstname,
+            lastname,
+            phone,
+            address1: address1 || null,
+            city: city || null,
+            state: state || null,
+            postalCode: postalCode || null,
+            country: country || null,
+            signupIp,
+            passwordHash
+          });
+        } catch (e) {
+          if (DEBUG) console.warn('Save user failed', e.message || e);
+        }
         try { await sendWelcomeEmail(email, username, sipDomain, process.env.MAGNUSBILLING_URL, plainPassword); } catch (e) { if (DEBUG) console.warn('Welcome email failed', e.message || e); }
+        try {
+          await sendAdminSignupCopyEmail({
+            email,
+            username,
+            firstname,
+            lastname,
+            phone,
+            address1,
+            city,
+            state,
+            postalCode,
+            country,
+            signupIp,
+            magnusUserId: createdId
+          });
+        } catch (e) {
+          if (DEBUG) console.warn('Admin signup copy email failed', e.message || e);
+        }
         if (DEBUG) console.log('[complete-signup] Signup complete! Returning success.');
         return res.status(200).json({ success: true, message: 'Account created successfully!', data: { username, userId: createdId, sipDomain, portalUrl: process.env.MAGNUSBILLING_URL, password: plainPassword } });
       }
@@ -17431,7 +17784,15 @@ app.get('/api/check-availability', async (req, res) => {
 // Signup API endpoint (legacy direct)
 app.post('/api/signup', async (req, res) => {
   try {
-    const { username, password, firstname, lastname, email, phone } = req.body;
+    const { username, password, firstname, lastname, email, phone } = req.body || {};
+    const address1 = req.body?.address1;
+    const city = req.body?.city;
+    const state = req.body?.state;
+    const postalRaw = req.body?.postal_code ?? req.body?.postalCode ?? req.body?.zip ?? req.body?.zipcode;
+    const countryRaw = req.body?.country;
+    const country = normalizeSignupCountry(countryRaw);
+    const postalCode = normalizePostalCode(postalRaw, { country: country || undefined });
+    const signupIp = getClientIp(req);
 
 // Validate required fields
     if (!username || !password || !firstname || !lastname || !email) {
@@ -17542,7 +17903,43 @@ app.post('/api/signup', async (req, res) => {
         try { await sendWelcomeEmail(email, createdUsername, sipDomain, process.env.MAGNUSBILLING_URL, password); } catch (e) { if (DEBUG) console.warn('Welcome email failed', e.message || e); }
         // Save to local DB (store password hash for app login)
         let passwordHash = null; try { passwordHash = await bcrypt.hash(password, 12); } catch {}
-        try { await saveUserRow({ magnusUserId: createdId, username: createdUsername, email, firstname, lastname, phone, passwordHash }); } catch (e) { if (DEBUG) console.warn('Save user failed', e.message || e); }
+        try {
+          await saveUserRow({
+            magnusUserId: createdId,
+            username: createdUsername,
+            email,
+            firstname,
+            lastname,
+            phone,
+            address1: address1 != null ? String(address1).trim() : null,
+            city: city != null ? String(city).trim() : null,
+            state: state != null ? String(state).trim() : null,
+            postalCode: postalCode || null,
+            country: country || null,
+            signupIp,
+            passwordHash
+          });
+        } catch (e) {
+          if (DEBUG) console.warn('Save user failed', e.message || e);
+        }
+        try {
+          await sendAdminSignupCopyEmail({
+            email,
+            username: createdUsername,
+            firstname,
+            lastname,
+            phone,
+            address1: address1 != null ? String(address1).trim() : null,
+            city: city != null ? String(city).trim() : null,
+            state: state != null ? String(state).trim() : null,
+            postalCode: postalCode || null,
+            country: country || null,
+            signupIp,
+            magnusUserId: createdId
+          });
+        } catch (e) {
+          if (DEBUG) console.warn('Admin signup copy email failed', e.message || e);
+        }
         return res.status(200).json({
           success: true,
           message: 'Account created successfully!',

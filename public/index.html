@@ -129,11 +129,11 @@
             padding: 20px;
         }
 
-        .container {
+.container {
             background: white;
             border-radius: 12px;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
-            max-width: 360px;
+            max-width: 440px;
             width: calc(100% - 24px);
             padding: 20px;
         }
@@ -166,16 +166,19 @@
             margin-bottom: 5px;
         }
 
-        input {
+        input,
+        select {
             width: 100%;
             padding: 8px 12px;
             border: 2px solid #e0e0e0;
             border-radius: 6px;
             font-size: 13px;
             transition: all 0.3s;
+            background: #fff;
         }
 
-        input:focus {
+        input:focus,
+        select:focus {
             outline: none;
             border-color: #667eea;
             box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
@@ -404,7 +407,7 @@
 
             // Disable submit button
             submitBtn.disabled = true;
-            submitBtn.innerHTML = '<span class="loading"></span>Creating account...';
+            submitBtn.innerHTML = '<span class="loading"></span>Continuing...';
 
             // Get form data
             const formData = {
@@ -434,21 +437,7 @@
                     emailHelp.textContent = 'Email available'; emailHelp.className = 'help help-ok';
                 }
 
-                const response = await fetch('/api/verify-email', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(formData)
-                });
-
-const result = await response.json();
-
-                if (result.success) {
-                    renderVerifyStep({ token: result.token, email: formData.email, original: formData });
-                } else {
-                    showAlert(result.message || 'Failed to send verification code.', 'error');
-                }
+                renderAddressStep({ original: formData });
             } catch (error) {
                 showAlert('Network error. Please check your connection and try again.', 'error');
                 console.error('Error:', error);
@@ -458,6 +447,102 @@ const result = await response.json();
                 submitBtn.textContent = 'Sign Up';
             }
         });
+
+        function renderAddressStep(data){
+            const c = document.querySelector('.container');
+            const email = (data && data.original && data.original.email) ? data.original.email : '';
+            c.innerHTML = `
+                <div class="header" style="margin-bottom:12px;">
+                    <h1>Billing Address</h1>
+                    <p>Please enter your address. Detected IP: <b id="detectedIp">Loading…</b></p>
+                </div>
+                <div id="alert" class="alert"></div>
+                <form id="addressForm">
+                    <div class="form-group">
+                        <label for="address1">Street Address <span class="required">*</span></label>
+                        <input type="text" id="address1" name="address1" placeholder="1209 Mountain Road PL NE" autocomplete="address-line1" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="city">City <span class="required">*</span></label>
+                        <input type="text" id="city" name="city" placeholder="Albuquerque" autocomplete="address-level2" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="state">State / Province <span class="required">*</span></label>
+                        <input type="text" id="state" name="state" placeholder="NM" autocomplete="address-level1" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="postal_code">ZIP / Postal Code <span class="required">*</span></label>
+                        <input type="text" id="postal_code" name="postal_code" placeholder="87110" autocomplete="postal-code" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="country">Country <span class="required">*</span></label>
+                        <select id="country" name="country" required>
+                            <option value="US">United States</option>
+                            <option value="CA">Canada</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="btn" id="addressContinueBtn">Send Verification Code</button>
+                </form>
+                <div class="footer" style="margin-top:12px;">
+                    <p>Signing up as <b>${email}</b>. <a href="/signup">Edit</a></p>
+                </div>`;
+
+            // Show server-derived client IP
+            (async () => {
+                const el = document.getElementById('detectedIp');
+                try {
+                    const r = await fetch('/api/client-ip', { cache: 'no-store' });
+                    const j = await r.json();
+                    if (el) el.textContent = (j && j.ip) ? String(j.ip) : 'Unknown';
+                } catch {
+                    if (el) el.textContent = 'Unknown';
+                }
+            })();
+
+            const addressForm = document.getElementById('addressForm');
+            addressForm.addEventListener('submit', async (ev) => {
+                ev.preventDefault();
+
+                const payload = {
+                    ...(data.original || {}),
+                    address1: document.getElementById('address1').value,
+                    city: document.getElementById('city').value,
+                    state: document.getElementById('state').value,
+                    postal_code: document.getElementById('postal_code').value,
+                    country: document.getElementById('country').value
+                };
+
+                // Basic client-side validation (server will enforce too)
+                if (!payload.address1 || !payload.city || !payload.state || !payload.postal_code || !payload.country) {
+                    showAlert('Please complete your address fields.', 'error');
+                    return;
+                }
+
+                const btn = document.getElementById('addressContinueBtn');
+                btn.disabled = true;
+                const old = btn.textContent;
+                btn.innerHTML = '<span class="loading"></span>Sending code...';
+
+                try {
+                    const response = await fetch('/api/verify-email', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    const result = await response.json();
+                    if (result.success) {
+                        renderVerifyStep({ token: result.token, email: payload.email, original: payload });
+                    } else {
+                        showAlert(result.message || 'Failed to send verification code.', 'error');
+                    }
+                } catch (e) {
+                    showAlert('Network error. Please check your connection and try again.', 'error');
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = old;
+                }
+            });
+        }
 
         function renderVerifyStep(data){
             const c = document.querySelector('.container');
