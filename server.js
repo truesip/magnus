@@ -753,6 +753,84 @@ function sipBelongsToUser(row, idUser){
   const idStr = String(idUser || '');
   return Boolean(idStr && [row?.id_user, row?.idUser, row?.userid, row?.user_id].some(v => String(v||'') === idStr));
 }
+
+function sipLineStatusText(row) {
+  return String(row?.lineStatus || row?.linestatus || row?.line_status || row?.status || '').trim();
+}
+
+function sipIsOnlineFromLineStatus(lineStatus) {
+  const s = String(lineStatus || '').trim().toUpperCase();
+  if (!s) return false;
+  if (s.startsWith('OK')) return true;
+  if (s.includes('REGISTERED')) return true;
+  if (s.includes('ONLINE')) return true;
+  return false;
+}
+
+function sipRowId(row) {
+  const v = row?.id ?? row?.id_sip ?? row?.idsip ?? row?.sip_id ?? row?.sipId;
+  const s = String(v || '').trim();
+  return s || null;
+}
+
+async function fetchSipUsersForUserAll({ idUser, httpsAgent, hostHeader, maxPages = 10, pageSize = 500 }) {
+  const uid = String(idUser || '').trim();
+  if (!uid) return [];
+
+  const safePageSize = Math.max(50, Math.min(2000, parseInt(String(pageSize || '500'), 10) || 500));
+  const safeMaxPages = Math.max(1, Math.min(50, parseInt(String(maxPages || '10'), 10) || 10));
+
+  const path = `/index.php/${MB_SIP_MODULE}/read`;
+  const out = [];
+  const seen = new Set();
+
+  for (let page = 0; page < safeMaxPages; page += 1) {
+    const start = page * safePageSize;
+
+    const params = new URLSearchParams();
+    params.append('module', MB_SIP_MODULE);
+    params.append('action', 'read');
+    params.append('start', String(start));
+    params.append('limit', String(safePageSize));
+
+    // Try to filter server-side (some installs ignore these for admin creds)
+    params.append('id_user', uid);
+    params.append('idUser', uid);
+    params.append('userid', uid);
+
+    const resp = await mbSignedCall({ relPath: path, params, httpsAgent, hostHeader });
+    const data = resp?.data;
+
+    const rawRows = (data && typeof data === 'object')
+      ? (data.rows || data.data || [])
+      : [];
+
+    const rows = Array.isArray(rawRows) ? rawRows : [];
+
+    if (!rows.length) break;
+
+    const userRows = rows.filter(r => sipBelongsToUser(r, uid));
+
+    for (const r of userRows) {
+      const sid = sipRowId(r) || JSON.stringify(r);
+      if (seen.has(sid)) continue;
+      seen.add(sid);
+      out.push(r);
+    }
+
+    // If this page came back short, we've reached the end of the dataset.
+    if (rows.length < safePageSize) break;
+
+    // If response includes a numeric total and we've reached it, stop.
+    const totalRaw = (data && typeof data === 'object')
+      ? (data.total ?? data.recordsTotal ?? data.count ?? data.totalCount ?? data.total_count)
+      : null;
+    const total = (totalRaw != null) ? Number(totalRaw) : null;
+    if (Number.isFinite(total) && total > 0 && (start + rows.length) >= total) break;
+  }
+
+  return out;
+}
 // Redact sensitive SIP fields for logging
 function redactSipRow(row){
   if (!row || typeof row !== 'object') return row;
@@ -10400,28 +10478,20 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
       if (DEBUG) console.warn('[me.stats.outbound] failed:', e.message || e);
     }
 
-    // SIP users: count total + online (lineStatus starts with OK)
-    let totalSip = null;
-    let onlineSip = null;
+// SIP users: count total + online
+    let totalSip = 0;
+    let onlineSip = 0;
     try {
-      const httpsAgent = new https.Agent({
-        rejectUnauthorized: process.env.MAGNUSBILLING_TLS_INSECURE !== '1',
-        ...(process.env.MAGNUSBILLING_TLS_SERVERNAME ? { servername: process.env.MAGNUSBILLING_TLS_SERVERNAME } : {})
-      });
+      const httpsAgent = magnusBillingAgent;
       const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
       const idUser = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
       if (idUser) {
-        const sipData = await fetchSipUsers({ idUser, httpsAgent, hostHeader });
-        const rawRows = sipData?.rows || sipData?.data || [];
-        const sipRows = rawRows.filter(r => sipBelongsToUser(r, idUser));
+        const sipRows = await fetchSipUsersForUserAll({ idUser, httpsAgent, hostHeader, maxPages: 10, pageSize: 500 });
         totalSip = sipRows.length;
-        onlineSip = sipRows.filter(r => {
-          const status = String(r.lineStatus || r.linestatus || r.status || '').toUpperCase();
-          return status.startsWith('OK');
-        }).length;
+        onlineSip = sipRows.filter(r => sipIsOnlineFromLineStatus(sipLineStatusText(r))).length;
       }
     } catch (e) {
-      if (DEBUG) console.warn('[me.stats.sip] failed:', e.message || e);
+      if (DEBUG) console.warn('[me.stats.sip] failed:', e?.message || e);
     }
 
     // Merge daily inbound/outbound into a single series
@@ -14034,42 +14104,42 @@ app.post(
 
 app.get('/api/me/sip-users', requireAuth, async (req, res) => {
   try {
-    const httpsAgent = new https.Agent({ rejectUnauthorized: process.env.MAGNUSBILLING_TLS_INSECURE !== '1', ...(process.env.MAGNUSBILLING_TLS_SERVERNAME ? { servername: process.env.MAGNUSBILLING_TLS_SERVERNAME } : {}) });
+    const httpsAgent = magnusBillingAgent;
     const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
-    let idUser = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
+    const idUser = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
     const username = req.session.username;
-    
+
     if (!idUser) {
       console.warn('[me.sip] No Magnus user ID found for session user', { username, sessionUserId: req.session.userId });
-      return res.json({ success: true, data: { rows: [], page: 0, pageSize: 0 }, message: 'User ID not found' });
+      return res.json({ success: true, data: { rows: [], page: 0, pageSize: 0, total: 0 }, message: 'User ID not found' });
     }
-    
+
     const page = Math.max(0, parseInt(req.query.page || '0', 10));
     const pageSize = Math.max(1, parseInt(req.query.pageSize || String(MB_PAGE_SIZE), 10));
     const start = page * pageSize;
-    const params = new URLSearchParams();
-    params.append('module', MB_SIP_MODULE);
-    params.append('action', 'read');
-    params.append('start', '0'); // Fetch all, then filter client-side
-    params.append('limit', '200'); // Increased limit to catch all potential accounts
-    params.append('id_user', String(idUser));
-    params.append('idUser', String(idUser));
-    params.append('userid', String(idUser));
-    const path = `/index.php/${MB_SIP_MODULE}/read`;
-    const resp = await mbSignedCall({ relPath: path, params, httpsAgent, hostHeader });
-    const rawRows = resp?.data?.rows || resp?.data?.data || [];
-    if (DEBUG) console.log('[me.sip.raw]', { queryUserId: idUser, totalRows: rawRows.length, userIds: rawRows.map(r => r.id_user || r.idUser || r.userid).filter((v,i,a) => a.indexOf(v) === i) });
-    // Strict filtering: only show SIP accounts that belong to this Magnus user ID
-    const allFilteredRows = rawRows.filter(r => sipBelongsToUser(r, idUser));
-    // Apply client-side pagination
+
+    // Fetch enough SIP rows to correctly filter for this user.
+    // Some Magnus installs ignore id_user filtering when using admin credentials.
+    const allFilteredRows = await fetchSipUsersForUserAll({ idUser, httpsAgent, hostHeader, maxPages: 10, pageSize: 500 });
+
     const paginatedRows = allFilteredRows.slice(start, start + pageSize);
-    console.log('[me.sip]', { userId: idUser, username, in: rawRows.length, filtered: allFilteredRows.length, out: paginatedRows.length, page, pageSize });
-    if (DEBUG && paginatedRows.length > 0) console.log('[me.sip.sample]', JSON.stringify(redactSipRow(paginatedRows[0])));
-    if (DEBUG && rawRows.length > 0 && allFilteredRows.length === 0) console.warn('[me.sip] All rows filtered out. Sample raw row:', JSON.stringify(redactSipRow(rawRows[0])));
+
+    if (DEBUG) {
+      console.log('[me.sip]', {
+        userId: String(idUser),
+        username,
+        filtered: allFilteredRows.length,
+        out: paginatedRows.length,
+        page,
+        pageSize
+      });
+      if (paginatedRows.length > 0) console.log('[me.sip.sample]', JSON.stringify(redactSipRow(paginatedRows[0])));
+    }
+
     return res.json({ success: true, data: { rows: paginatedRows, page, pageSize, total: allFilteredRows.length } });
-  } catch (e) { 
+  } catch (e) {
     console.error('[me.sip.error]', e.message || e, e.stack);
-    return res.status(500).json({ success: false, message: 'SIP users fetch failed' }); 
+    return res.status(500).json({ success: false, message: 'SIP users fetch failed' });
   }
 });
 
