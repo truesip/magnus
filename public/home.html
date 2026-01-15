@@ -1,566 +1,629 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TalkUSA - Enterprise-Grade Connectivity. Small Business Pricing.</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TalkUSA — AI Voice & Video Agents</title>
+  <meta name="description" content="AI voice and video agents that answer calls, run meetings, and send follow‑ups via email and physical mail." />
+  <style>
+    :root{
+      --bg:#050816;
+      --bg2:#0b1024;
+      --card:rgba(255,255,255,.06);
+      --card2:rgba(255,255,255,.08);
+      --border:rgba(255,255,255,.12);
+      --text:rgba(255,255,255,.92);
+      --muted:rgba(255,255,255,.70);
+      --muted2:rgba(255,255,255,.55);
+      --primary:#4f46e5;
+      --accent:#22d3ee;
+      --accent2:#a78bfa;
+      --ok:#22c55e;
+      --warn:#f59e0b;
+      --shadow:0 24px 80px rgba(0,0,0,.55);
+      --radius:16px;
+      --radius2:22px;
+      --max:1200px;
+    }
 
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            color: #1f2937;
-            line-height: 1.6;
-        }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;
+      font-family: ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
+      background: radial-gradient(1200px 600px at 20% 10%, rgba(79,70,229,.18) 0%, transparent 55%),
+                  radial-gradient(900px 520px at 85% 35%, rgba(34,211,238,.14) 0%, transparent 60%),
+                  radial-gradient(900px 520px at 55% 90%, rgba(167,139,250,.10) 0%, transparent 60%),
+                  linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
+      color:var(--text);
+      overflow-x:hidden;
+    }
 
-        /* Navigation */
-        nav {
-            background: #fff;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            position: sticky;
-            top: 0;
-            z-index: 1000;
-        }
+    a{color:inherit}
 
-        .nav-container {
-            max-width: 1200px;
-            margin: 0 auto;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 16px 20px;
-        }
+    /* Top nav */
+    .nav{
+      position:fixed;
+      top:0;left:0;right:0;
+      z-index:50;
+      background: rgba(5,8,22,.72);
+      border-bottom:1px solid rgba(255,255,255,.08);
+      backdrop-filter: blur(14px);
+    }
+    .nav__inner{
+      max-width:var(--max);
+      margin:0 auto;
+      padding:16px 20px;
+      display:flex;
+      align-items:center;
+      gap:18px;
+    }
+    .brand{
+      font-weight:800;
+      letter-spacing:.2px;
+      font-size:18px;
+      display:flex;
+      align-items:center;
+      gap:10px;
+      text-decoration:none;
+    }
+    .brand__mark{
+      width:34px;height:34px;
+      border-radius:10px;
+      background: linear-gradient(135deg, rgba(79,70,229,1) 0%, rgba(34,211,238,1) 100%);
+      box-shadow: 0 14px 30px rgba(79,70,229,.25);
+    }
+    .brand__text{display:flex;flex-direction:column;line-height:1.1}
+    .brand__text small{font-weight:600;color:var(--muted2);font-size:11px}
 
-        .logo {
-            font-size: 24px;
-            font-weight: 700;
-            color: #4f46e5;
-        }
+    .nav__links{
+      margin-left:auto;
+      display:flex;
+      gap:18px;
+      align-items:center;
+    }
+    .nav__links a{
+      text-decoration:none;
+      color:var(--muted);
+      font-weight:600;
+      font-size:14px;
+      padding:10px 10px;
+      border-radius:10px;
+      transition: background .15s ease, color .15s ease;
+    }
+    .nav__links a:hover{color:var(--text);background:rgba(255,255,255,.06)}
 
-        .nav-links {
-            display: flex;
-            gap: 32px;
-            list-style: none;
-        }
+    .nav__cta{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      margin-left:6px;
+    }
 
-        .nav-links a {
-            color: #4b5563;
-            text-decoration: none;
-            font-weight: 500;
-            transition: color 0.2s;
-        }
+    .btn{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:10px;
+      text-decoration:none;
+      border-radius:12px;
+      padding:11px 14px;
+      font-weight:700;
+      font-size:14px;
+      border:1px solid rgba(255,255,255,.12);
+      background: rgba(255,255,255,.06);
+      transition: transform .15s ease, background .15s ease, border-color .15s ease;
+      white-space:nowrap;
+    }
+    .btn:hover{transform: translateY(-1px); background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.18)}
 
-        .nav-links a:hover {
-            color: #4f46e5;
-        }
+    .btn--primary{
+      border-color: rgba(79,70,229,.45);
+      background: linear-gradient(135deg, rgba(79,70,229,1) 0%, rgba(34,211,238,1) 100%);
+      color:#071024;
+    }
+    .btn--primary:hover{border-color: rgba(34,211,238,.75)}
 
-        .nav-cta {
-            background: #4f46e5;
-            color: #fff;
-            padding: 10px 24px;
-            border-radius: 8px;
-            text-decoration: none;
-            font-weight: 600;
-            transition: background 0.2s;
-        }
+    /* Hero */
+    .hero{padding:120px 20px 70px}
+    .hero__inner{max-width:var(--max);margin:0 auto;display:grid;grid-template-columns: 1.05fr .95fr;gap:42px;align-items:center}
 
-        .nav-cta:hover {
-            background: #4338ca;
-        }
+    .eyebrow{
+      display:inline-flex;
+      align-items:center;
+      gap:10px;
+      padding:8px 12px;
+      border-radius:999px;
+      border:1px solid rgba(255,255,255,.12);
+      background: rgba(255,255,255,.05);
+      color:var(--muted);
+      font-weight:700;
+      font-size:12px;
+      letter-spacing:.6px;
+      text-transform:uppercase;
+    }
+    .eyebrow .dot{width:8px;height:8px;border-radius:999px;background: var(--accent)}
 
-        /* Hero Section */
-        .hero {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: #fff;
-            padding: 80px 20px;
-            text-align: center;
-        }
+    h1{
+      margin:18px 0 14px;
+      font-size:52px;
+      line-height:1.05;
+      letter-spacing:-.02em;
+    }
+    .grad{
+      background: linear-gradient(135deg, rgba(79,70,229,1) 0%, rgba(34,211,238,1) 55%, rgba(167,139,250,1) 100%);
+      -webkit-background-clip:text;
+      background-clip:text;
+      color:transparent;
+    }
+    .lead{
+      color:var(--muted);
+      font-size:18px;
+      line-height:1.7;
+      margin:0 0 22px;
+      max-width:58ch;
+    }
 
-        .hero-container {
-            max-width: 900px;
-            margin: 0 auto;
-        }
+    .hero__actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px}
 
-        .hero h1 {
-            font-size: 48px;
-            margin-bottom: 16px;
-            font-weight: 700;
-        }
+    .badgeRow{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}
+    .badge{
+      display:inline-flex;
+      gap:10px;
+      align-items:center;
+      padding:9px 12px;
+      border-radius:999px;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.04);
+      color:var(--muted);
+      font-weight:650;
+      font-size:13px;
+    }
+    .badge svg{width:16px;height:16px;opacity:.9}
 
-        .hero p {
-            font-size: 20px;
-            margin-bottom: 32px;
-            opacity: 0.95;
-        }
+    /* Mock panel */
+    .panel{
+      border-radius: var(--radius2);
+      border:1px solid rgba(255,255,255,.12);
+      background: linear-gradient(180deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.05) 100%);
+      box-shadow: var(--shadow);
+      overflow:hidden;
+      position:relative;
+    }
+    .panel::before{
+      content:"";
+      position:absolute;
+      inset:-2px;
+      background: radial-gradient(600px 220px at 10% 10%, rgba(34,211,238,.18) 0%, transparent 55%),
+                  radial-gradient(520px 240px at 85% 20%, rgba(79,70,229,.22) 0%, transparent 55%);
+      pointer-events:none;
+    }
 
-        .hero-cta {
-            display: flex;
-            gap: 16px;
-            justify-content: center;
-            flex-wrap: wrap;
-        }
+    .panel__top{
+      position:relative;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      padding:14px 14px 12px;
+      border-bottom:1px solid rgba(255,255,255,.10);
+      background: rgba(5,8,22,.35);
+    }
+    .panel__title{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      font-weight:800;
+      font-size:13px;
+      color:rgba(255,255,255,.88);
+    }
+    .pills{display:flex;gap:8px}
+    .pill{
+      font-size:11px;
+      font-weight:800;
+      padding:6px 10px;
+      border-radius:999px;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.05);
+      color: rgba(255,255,255,.78);
+    }
 
-        .btn-primary {
-            background: #fff;
-            color: #4f46e5;
-            padding: 14px 32px;
-            border-radius: 8px;
-            text-decoration: none;
-            font-weight: 600;
-            font-size: 16px;
-            transition: transform 0.2s, box-shadow 0.2s;
-            display: inline-block;
-        }
+    .panel__body{position:relative;padding:18px}
 
-        .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 16px rgba(0,0,0,0.2);
-        }
+    .timeline{display:flex;flex-direction:column;gap:10px}
+    .msg{
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+    }
+    .msg__dot{
+      width:10px;height:10px;border-radius:999px;margin-top:6px;
+      background: rgba(255,255,255,.28);
+    }
+    .msg--ai .msg__dot{background: rgba(34,211,238,.9)}
+    .msg--action .msg__dot{background: rgba(79,70,229,.95)}
 
-        .btn-secondary {
-            background: transparent;
-            color: #fff;
-            border: 2px solid #fff;
-            padding: 14px 32px;
-            border-radius: 8px;
-            text-decoration: none;
-            font-weight: 600;
-            font-size: 16px;
-            transition: background 0.2s;
-            display: inline-block;
-        }
+    .msg__card{
+      flex:1;
+      border-radius: 14px;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.05);
+      padding:12px 12px;
+    }
+    .msg__meta{display:flex;align-items:center;justify-content:space-between;gap:10px}
+    .msg__who{font-weight:800;font-size:12px;color:rgba(255,255,255,.85)}
+    .msg__time{font-size:12px;color:rgba(255,255,255,.50)}
+    .msg__txt{margin-top:6px;color:rgba(255,255,255,.74);font-size:13px;line-height:1.55}
 
-        .btn-secondary:hover {
-            background: rgba(255,255,255,0.1);
-        }
+    .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+    .chip{
+      font-size:12px;
+      font-weight:800;
+      padding:8px 10px;
+      border-radius:12px;
+      background: rgba(0,0,0,.18);
+      border:1px solid rgba(255,255,255,.10);
+      color: rgba(255,255,255,.78);
+    }
+    .chip strong{color:rgba(255,255,255,.92)}
 
-        /* Section Styles */
-        section {
-            padding: 80px 20px;
-        }
+    /* Sections */
+    .section{padding:90px 20px}
+    .section--alt{background: rgba(255,255,255,.02); border-top: 1px solid rgba(255,255,255,.06); border-bottom: 1px solid rgba(255,255,255,.06)}
+    .section__inner{max-width:var(--max);margin:0 auto}
 
-        .section-light {
-            background: #f9fafb;
-        }
+    .section__head{max-width:860px}
+    .kicker{color:var(--accent);font-weight:900;font-size:12px;letter-spacing:.7px;text-transform:uppercase}
+    .section h2{margin:12px 0 10px;font-size:36px;line-height:1.15;letter-spacing:-.02em}
+    .section p{margin:0;color:var(--muted);font-size:16px;line-height:1.75}
 
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-        }
+    .grid{display:grid;grid-template-columns: repeat(12, 1fr);gap:16px;margin-top:38px}
 
-        .section-title {
-            text-align: center;
-            font-size: 36px;
-            font-weight: 700;
-            margin-bottom: 48px;
-            color: #1f2937;
-        }
+    .card{
+      grid-column: span 4;
+      border-radius: var(--radius);
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.05);
+      padding:18px 18px;
+      position:relative;
+      overflow:hidden;
+    }
+    .card:hover{background: rgba(255,255,255,.07)}
+    .card__icon{
+      width:44px;height:44px;border-radius:14px;
+      background: linear-gradient(135deg, rgba(79,70,229,.95) 0%, rgba(34,211,238,.95) 100%);
+      display:flex;align-items:center;justify-content:center;
+      color:#06101c;
+      box-shadow: 0 18px 40px rgba(79,70,229,.18);
+    }
+    .card__icon svg{width:22px;height:22px}
+    .card h3{margin:14px 0 8px;font-size:18px;letter-spacing:-.01em}
+    .card p{font-size:14px;color:rgba(255,255,255,.70)}
 
-        /* Value Proposition Grid */
-        .value-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 32px;
-        }
+    .span6{grid-column: span 6}
 
-        .value-card {
-            background: #fff;
-            padding: 32px;
-            border-radius: 12px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-            text-align: center;
-        }
+    /* Steps */
+    .steps{display:grid;grid-template-columns: repeat(3, 1fr);gap:16px;margin-top:30px}
+    .step{border:1px solid rgba(255,255,255,.10);background: rgba(255,255,255,.05);border-radius: var(--radius);padding:18px}
+    .step__n{font-weight:950;color:rgba(255,255,255,.70);font-size:12px;letter-spacing:.6px;text-transform:uppercase}
+    .step h3{margin:10px 0 8px;font-size:18px}
+    .step p{margin:0;color:rgba(255,255,255,.70);font-size:14px}
 
-        .value-icon {
-            font-size: 48px;
-            margin-bottom: 16px;
-        }
+    /* CTA */
+    .cta{
+      padding:70px 20px;
+      background: radial-gradient(1100px 500px at 20% 20%, rgba(34,211,238,.20) 0%, transparent 60%),
+                  radial-gradient(900px 460px at 85% 20%, rgba(79,70,229,.26) 0%, transparent 60%),
+                  linear-gradient(135deg, rgba(79,70,229,.20) 0%, rgba(34,211,238,.14) 100%);
+      border-top:1px solid rgba(255,255,255,.08);
+    }
+    .cta__inner{max-width:var(--max);margin:0 auto;border-radius:24px;border:1px solid rgba(255,255,255,.12);background: rgba(255,255,255,.06);box-shadow: var(--shadow);padding:34px}
+    .cta h2{margin:0 0 10px;font-size:34px}
+    .cta p{margin:0;color:rgba(255,255,255,.72)}
+    .cta__row{display:flex;gap:14px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-top:18px}
 
-        .value-card h3 {
-            font-size: 22px;
-            margin-bottom: 12px;
-            color: #4f46e5;
-        }
+    /* Footer */
+    footer{
+      background: rgba(0,0,0,.22);
+      border-top: 1px solid rgba(255,255,255,.08);
+      padding:52px 20px 26px;
+    }
+    .footer__inner{max-width:var(--max);margin:0 auto;text-align:center}
+    .footer__brand{font-weight:900;font-size:20px;letter-spacing:.2px}
+    .footer__tagline{color:rgba(255,255,255,.60);margin-top:6px}
+    .footer__contact{margin-top:24px;color:rgba(255,255,255,.72);font-size:14px;line-height:1.8}
+    .footer__links{margin-top:18px;font-size:13px;color:rgba(255,255,255,.62)}
+    .footer__links a{color:rgba(255,255,255,.62);text-decoration:none;margin:0 8px}
+    .footer__links a:hover{color:#fff;text-decoration:underline}
+    .footer__copy{margin-top:20px;padding-top:18px;border-top:1px solid rgba(255,255,255,.08);color:rgba(255,255,255,.52);font-size:13px}
 
-        .value-card p {
-            color: #6b7280;
-            font-size: 15px;
-        }
-
-        /* Services Section */
-        .service-item {
-            margin-bottom: 48px;
-        }
-
-        .service-item h3 {
-            font-size: 28px;
-            color: #4f46e5;
-            margin-bottom: 16px;
-        }
-
-        .service-features {
-            display: grid;
-            gap: 16px;
-            margin-top: 16px;
-        }
-
-        .service-feature {
-            display: flex;
-            align-items: flex-start;
-            gap: 12px;
-        }
-
-        .service-feature strong {
-            color: #1f2937;
-            min-width: 180px;
-        }
-
-        .service-feature span {
-            color: #6b7280;
-        }
-
-        /* Pricing Table */
-        .pricing-table {
-            background: #fff;
-            border-radius: 12px;
-            overflow: hidden;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-            margin: 32px 0;
-        }
-
-        .pricing-table table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-
-        .pricing-table thead {
-            background: #4f46e5;
-            color: #fff;
-        }
-
-        .pricing-table th {
-            padding: 16px;
-            text-align: left;
-            font-weight: 600;
-            font-size: 15px;
-        }
-
-        .pricing-table td {
-            padding: 16px;
-            border-bottom: 1px solid #e5e7eb;
-        }
-
-        .pricing-table tbody tr:hover {
-            background: #f9fafb;
-        }
-
-        .pricing-note {
-            background: #eef2ff;
-            border-left: 4px solid #4f46e5;
-            padding: 16px;
-            margin-top: 16px;
-            border-radius: 4px;
-            font-size: 14px;
-            color: #4b5563;
-        }
-
-        /* About Section */
-        .about-content {
-            max-width: 800px;
-            margin: 0 auto;
-            text-align: center;
-            font-size: 18px;
-            color: #4b5563;
-            line-height: 1.8;
-        }
-
-        /* Footer */
-        footer {
-            background: #1f2937;
-            color: #e5e7eb;
-            padding: 48px 20px;
-        }
-
-        .footer-container {
-            max-width: 1200px;
-            margin: 0 auto;
-            text-align: center;
-        }
-
-        .footer-brand {
-            font-size: 24px;
-            font-weight: 700;
-            color: #fff;
-            margin-bottom: 8px;
-        }
-
-        .footer-tagline {
-            color: #9ca3af;
-            margin-bottom: 32px;
-        }
-
-        .footer-contact {
-            margin-top: 24px;
-        }
-
-        .footer-contact h3 {
-            color: #fff;
-            margin-bottom: 16px;
-            font-size: 20px;
-        }
-
-        .footer-contact p {
-            margin: 8px 0;
-            color: #d1d5db;
-        }
-
-        .footer-links {
-            margin-top: 20px;
-            font-size: 14px;
-        }
-
-        .footer-links a {
-            color: #9ca3af;
-            margin: 0 8px;
-            text-decoration: none;
-        }
-
-        .footer-links a:hover {
-            color: #ffffff;
-            text-decoration: underline;
-        }
-
-        .footer-copyright {
-            margin-top: 20px;
-            font-size: 13px;
-            color: #9ca3af;
-        }
-
-        /* Responsive */
-        @media (max-width: 768px) {
-            .nav-links {
-                display: none;
-            }
-
-            .hero h1 {
-                font-size: 32px;
-            }
-
-            .hero p {
-                font-size: 16px;
-            }
-
-            .section-title {
-                font-size: 28px;
-            }
-
-            .pricing-table {
-                overflow-x: auto;
-            }
-        }
-    </style>
+    /* Responsive */
+    @media (max-width: 980px){
+      .hero__inner{grid-template-columns: 1fr;gap:26px}
+      h1{font-size:40px}
+      .panel{max-width:720px}
+      .card{grid-column: span 6}
+      .steps{grid-template-columns:1fr}
+      .nav__links{display:none}
+    }
+    @media (max-width: 620px){
+      .hero{padding-top:108px}
+      h1{font-size:34px}
+      .lead{font-size:16px}
+      .card{grid-column: span 12}
+      .cta__inner{padding:22px}
+      .cta h2{font-size:28px}
+    }
+  </style>
 </head>
 <body>
-    <!-- Navigation -->
-    <nav>
-        <div class="nav-container">
-            <div class="logo">TalkUSA.NET</div>
-            <ul class="nav-links">
-                <li><a href="#home">Home</a></li>
-                <li><a href="#services">Services</a></li>
-                <li><a href="#pricing">Pricing</a></li>
-                <li><a href="#about">About Us</a></li>
-                <li><a href="#contact">Contact</a></li>
-            </ul>
-            <div style="display:flex;gap:12px;align-items:center">
-                <a href="/login" style="color:#4b5563;text-decoration:none;font-weight:500">Login</a>
-                <a href="/signup" class="nav-cta">Get Started</a>
-            </div>
-        </div>
-    </nav>
+  <header class="nav">
+    <div class="nav__inner">
+      <a class="brand" href="#top" aria-label="TalkUSA home">
+        <span class="brand__mark" aria-hidden="true"></span>
+        <span class="brand__text">TalkUSA <small>AI Voice + Video</small></span>
+      </a>
 
-    <!-- Hero Section -->
-    <section class="hero" id="home">
-        <div class="hero-container">
-            <h1>Enterprise-Grade Connectivity. Small Business Pricing.</h1>
-            <p>The simplified SIP Trunking and Virtual Number solution for modern businesses. Connect globally with crystal-clear voice quality starting at just $0.01 per minute.</p>
-            <div class="hero-cta">
-                <a href="#pricing" class="btn-primary">View Our Plans</a>
-                <a href="#contact" class="btn-secondary">Talk to Sales</a>
+      <nav class="nav__links" aria-label="Primary">
+        <a href="#capabilities">Capabilities</a>
+        <a href="#workflow">Workflow</a>
+        <a href="#platform">Platform</a>
+        <a href="#contact">Contact</a>
+      </nav>
+
+      <div class="nav__cta">
+        <a class="btn" href="/login">Login</a>
+        <a class="btn btn--primary" href="/signup">Get started</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="hero__inner">
+        <div>
+          <div class="eyebrow"><span class="dot" aria-hidden="true"></span> AI voice + video agents</div>
+          <h1>Put <span class="grad">AI</span> on the phone—and in meetings.</h1>
+          <p class="lead">TalkUSA helps you automate real customer interactions: answer inbound calls, run video meetings, and send follow‑ups via email or physical mail. Configure it from one dashboard.</p>
+
+          <div class="hero__actions">
+            <a class="btn btn--primary" href="/signup">Create account</a>
+            <a class="btn" href="#capabilities">See capabilities</a>
+          </div>
+
+          <div class="badgeRow" aria-label="Highlights">
+            <div class="badge">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 1v22"/><path d="M17 6a5 5 0 0 0-10 0v6a5 5 0 0 0 10 0V6z"/><path d="M5 11a7 7 0 0 0 14 0"/></svg>
+              AI voice agent
             </div>
+            <div class="badge">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+              Video meeting links
+            </div>
+            <div class="badge">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M22 6l-10 7L2 6"/></svg>
+              Email follow‑ups
+            </div>
+            <div class="badge">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
+              Physical mail
+            </div>
+          </div>
         </div>
+
+        <aside class="panel" aria-label="Example workflow">
+          <div class="panel__top">
+            <div class="panel__title">
+              <span style="width:10px;height:10px;border-radius:999px;background:rgba(34,211,238,.9)"></span>
+              Live interaction
+            </div>
+            <div class="pills" aria-hidden="true">
+              <div class="pill">Voice</div>
+              <div class="pill">Video</div>
+              <div class="pill">Send</div>
+            </div>
+          </div>
+          <div class="panel__body">
+            <div class="timeline">
+              <div class="msg msg--ai">
+                <div class="msg__dot" aria-hidden="true"></div>
+                <div class="msg__card">
+                  <div class="msg__meta">
+                    <div class="msg__who">AI Agent</div>
+                    <div class="msg__time">00:03</div>
+                  </div>
+                  <div class="msg__txt">Thanks for calling. What are you trying to accomplish today?</div>
+                </div>
+              </div>
+
+              <div class="msg">
+                <div class="msg__dot" aria-hidden="true"></div>
+                <div class="msg__card">
+                  <div class="msg__meta">
+                    <div class="msg__who">Caller</div>
+                    <div class="msg__time">00:08</div>
+                  </div>
+                  <div class="msg__txt">I need a meeting link and a confirmation sent to my email.</div>
+                </div>
+              </div>
+
+              <div class="msg msg--action">
+                <div class="msg__dot" aria-hidden="true"></div>
+                <div class="msg__card">
+                  <div class="msg__meta">
+                    <div class="msg__who">Automation</div>
+                    <div class="msg__time">00:12</div>
+                  </div>
+                  <div class="msg__txt">Sent a video meeting link and a document email. (Optional: also send a physical letter.)</div>
+                  <div class="chips">
+                    <div class="chip"><strong>Email</strong> meeting link</div>
+                    <div class="chip"><strong>Email</strong> document</div>
+                    <div class="chip"><strong>Mail</strong> letter</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
     </section>
 
-    <!-- Value Proposition -->
-    <section class="section-light">
-        <div class="container">
-            <h2 class="section-title">Why Choose TalkUSA?</h2>
-            <div class="value-grid">
-                <div class="value-card">
-                    <div class="value-icon">📞</div>
-                    <h3>Crystal Clear Quality</h3>
-                    <p>Premium Tier-1 routes ensure your business calls are always crisp and reliable.</p>
-                </div>
-                <div class="value-card">
-                    <div class="value-icon">💰</div>
-                    <h3>No Hidden Fees</h3>
-                    <p>What you see is what you get. Simple per-minute billing and transparent monthly rates.</p>
-                </div>
-                <div class="value-card">
-                    <div class="value-icon">📈</div>
-                    <h3>Instant Scalability</h3>
-                    <p>Add SIP channels or virtual numbers instantly as your business grows.</p>
-                </div>
-            </div>
+    <section class="section section--alt" id="capabilities">
+      <div class="section__inner">
+        <div class="section__head">
+          <div class="kicker">Capabilities</div>
+          <h2>AI that doesn’t stop at “chat”.</h2>
+          <p>TalkUSA connects voice + video with the actions your business needs: email, document templates, transfer, and physical mail—built into the same portal.</p>
         </div>
+
+        <div class="grid" role="list">
+          <div class="card" role="listitem">
+            <div class="card__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1v22"/><path d="M17 6a5 5 0 0 0-10 0v6a5 5 0 0 0 10 0V6z"/><path d="M5 11a7 7 0 0 0 14 0"/></svg>
+            </div>
+            <h3>AI Voice Agent</h3>
+            <p>Answer inbound calls, ask qualifying questions, capture intent, and transfer to your team when needed.</p>
+          </div>
+
+          <div class="card" role="listitem">
+            <div class="card__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            </div>
+            <h3>Video Meetings</h3>
+            <p>Send meeting links instantly and track meeting history—ideal for onboarding, support, and demos.</p>
+          </div>
+
+          <div class="card" role="listitem">
+            <div class="card__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M22 6l-10 7L2 6"/></svg>
+            </div>
+            <h3>Email + Documents</h3>
+            <p>Send follow‑ups with generated documents using your own .docx templates and placeholders.</p>
+          </div>
+
+          <div class="card" role="listitem">
+            <div class="card__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
+            </div>
+            <h3>Physical Mail</h3>
+            <p>Send USPS mail from the platform when a workflow needs a physical letter or document.</p>
+          </div>
+
+          <div class="card" role="listitem">
+            <div class="card__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 1 7 0l3 3"/><path d="M8 13a7 7 0 0 0 10 0"/><path d="M15 7a3 3 0 0 0-6 0v4a3 3 0 0 0 6 0V7z"/></svg>
+            </div>
+            <h3>Transfer + Routing</h3>
+            <p>Set default transfer destinations and agent‑level overrides for clean handoffs to humans.</p>
+          </div>
+
+          <div class="card" role="listitem">
+            <div class="card__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 14l3-3 3 3 6-6"/></svg>
+            </div>
+            <h3>History + Review</h3>
+            <p>Review calls, meetings, and outbound actions in your dashboard with searchable records.</p>
+          </div>
+        </div>
+      </div>
     </section>
 
-    <!-- Services Section -->
-    <section id="services">
-        <div class="container">
-            <h2 class="section-title">Our Services</h2>
-            
-            <div class="service-item">
-                <h3>SIP Trunking</h3>
-                <div class="service-features">
-                    <div class="service-feature">
-                        <strong>Seamless Integration:</strong>
-                        <span>Connect your existing IP-PBX to the world. TalkUSA provides a robust SIP trunking solution compatible with major phone systems (3CX, Asterisk, Avaya, and more).</span>
-                    </div>
-                    <div class="service-feature">
-                        <strong>Pay-As-You-Go Efficiency:</strong>
-                        <span>Stop paying for channels you don't use. Our elastic SIP trunks allow for unlimited concurrent calls while you only pay for the minutes you talk.</span>
-                    </div>
-                    <div class="service-feature">
-                        <strong>Reliability:</strong>
-                        <span>Redundant network architecture ensures your business stays online.</span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="service-item">
-                <h3>Virtual Numbers (DID)</h3>
-                <div class="service-features">
-                    <div class="service-feature">
-                        <strong>Local Presence, Everywhere:</strong>
-                        <span>Establish a local footprint in cities across the USA without opening a physical office. Local numbers start at just $4.99/mo.</span>
-                    </div>
-                    <div class="service-feature">
-                        <strong>Toll-Free Credibility:</strong>
-                        <span>Give your customers a free way to reach you and boost your brand's professional image. USA/CA Toll-free numbers start at $8.99/mo.</span>
-                    </div>
-                    <div class="service-feature">
-                        <strong>Inbound & Outbound:</strong>
-                        <span>Full two-way voice capabilities for all your virtual numbers.</span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="service-item">
-                <h3>AI Agents (Voice &amp; Video)</h3>
-                <div class="service-features">
-                    <div class="service-feature">
-                        <strong>AI Voice Agent:</strong>
-                        <span>Deploy an AI-powered phone agent that answers inbound calls 24/7, captures caller intent, and can transfer calls to your team.</span>
-                    </div>
-                    <div class="service-feature">
-                        <strong>AI Video Meetings:</strong>
-                        <span>Send a meeting link with an interactive avatar for demos, onboarding, and support.</span>
-                    </div>
-                    <div class="service-feature">
-                        <strong>Automations:</strong>
-                        <span>Send follow-ups, email documents, and keep a searchable conversation history in your portal.</span>
-                    </div>
-                </div>
-            </div>
+    <section class="section" id="workflow">
+      <div class="section__inner">
+        <div class="section__head">
+          <div class="kicker">Workflow</div>
+          <h2>A simple loop: receive, assist, deliver.</h2>
+          <p>Use your number, meeting links, and outbound sending tools as one connected system.</p>
         </div>
+
+        <div class="steps">
+          <div class="step">
+            <div class="step__n">Step 1</div>
+            <h3>Receive</h3>
+            <p>Customers call your number or request a meeting link. You route traffic to the right agent.</p>
+          </div>
+          <div class="step">
+            <div class="step__n">Step 2</div>
+            <h3>Assist</h3>
+            <p>The AI agent handles the conversation and escalates to humans when appropriate.</p>
+          </div>
+          <div class="step">
+            <div class="step__n">Step 3</div>
+            <h3>Deliver</h3>
+            <p>Send follow‑ups: email documents, meeting links, or physical mail—automatically.</p>
+          </div>
+        </div>
+      </div>
     </section>
 
-    <!-- Pricing Section -->
-    <section class="section-light" id="pricing">
-        <div class="container">
-            <h2 class="section-title">Transparent Pricing</h2>
-            <div class="pricing-table">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Service</th>
-                            <th>Rate</th>
-                            <th>Details</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr>
-                            <td><strong>Outbound Calling</strong></td>
-                            <td><strong>$0.01 / min</strong></td>
-                            <td>Flat rate across USA & Canada. High-quality termination.</td>
-                        </tr>
-                        <tr>
-                            <td><strong>Inbound Calling</strong></td>
-                            <td><strong>$0.01 / min</strong></td>
-                            <td>Reliable inbound routing for your support and sales teams.</td>
-                        </tr>
-                        <tr>
-                            <td><strong>Local Numbers</strong></td>
-                            <td><strong>From $4.99 / mo</strong></td>
-                            <td>Choose from thousands of area codes. Instant activation.</td>
-                        </tr>
-                        <tr>
-                            <td><strong>Toll-Free Numbers</strong></td>
-                            <td><strong>From $8.99 / mo</strong></td>
-                            <td>800, 888, 877 and more. Covers USA & Canada.</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-            <div class="pricing-note">
-                <strong>Note:</strong> Volume discounts available for high-traffic call centers. Contact support for a custom quote.
-            </div>
+    <section class="section section--alt" id="platform">
+      <div class="section__inner">
+        <div class="section__head">
+          <div class="kicker">Platform</div>
+          <h2>Voice + numbers + AI, in one place.</h2>
+          <p>TalkUSA still supports SIP trunking, virtual numbers, and call forwarding—now paired with AI voice + video and built‑in sending tools.</p>
         </div>
+
+        <div class="grid">
+          <div class="card span6">
+            <div class="card__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92V21a2 2 0 0 1-2.18 2A19.86 19.86 0 0 1 3 5.18 2 2 0 0 1 5 3h4.09a2 2 0 0 1 2 1.72c.12.9.32 1.77.59 2.6a2 2 0 0 1-.45 2.11L9.91 10.91a16 16 0 0 0 3.18 3.18l1.48-1.32a2 2 0 0 1 2.11-.45c.83.27 1.7.47 2.6.59a2 2 0 0 1 1.72 2z"/></svg>
+            </div>
+            <h3>Bring your own workflow</h3>
+            <p>Configure agents, assign numbers, set transfer rules, upload document templates, and choose how follow‑ups are delivered.</p>
+          </div>
+
+          <div class="card span6">
+            <div class="card__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            </div>
+            <h3>Fast onboarding</h3>
+            <p>Create an account, buy or assign a number, and deploy an AI agent. Use email and mail tools for follow‑ups right away.</p>
+          </div>
+        </div>
+      </div>
     </section>
 
-    <!-- About Section -->
-    <section id="about">
-        <div class="container">
-            <h2 class="section-title">About TalkUSA</h2>
-            <div class="about-content">
-                <p>TalkUSA is a TrueSIP USA LLC platform based in Albuquerque, New Mexico. We help businesses simplify communications with SIP trunking, virtual numbers (DIDs), and new AI Agents that can answer calls, send follow-ups, and host video meetings with interactive avatars. Manage numbers, routing, billing, and AI workflows in one place.</p>
-            </div>
+    <section class="cta" aria-label="Call to action">
+      <div class="cta__inner">
+        <h2>Ready to make AI your front line?</h2>
+        <p>Start with one number and one agent. Add voice, video, email, and mail as your workflows grow.</p>
+        <div class="cta__row">
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <a class="btn btn--primary" href="/signup">Get started</a>
+            <a class="btn" href="/login">Login</a>
+          </div>
+          <div style="color:rgba(255,255,255,.60);font-weight:700;font-size:13px">Need help? <a href="#contact" style="text-decoration:underline">Contact support</a></div>
         </div>
+      </div>
     </section>
+  </main>
 
-    <!-- Footer -->
-    <footer id="contact">
-        <div class="footer-container">
-            <div class="footer-brand">TalkUSA.NET</div>
-            <div class="footer-tagline">Connecting your business to the world.</div>
-            
-            <div class="footer-contact">
-                <h3>Contact Us</h3>
-                <p>📍 1209 Mountain Road PL NE, Albuquerque, NM 87110, USA</p>
-                <p>📧 support@talkusa.net</p>
-                <p>📧 noc@truesip.net</p>
-            </div>
+  <footer id="contact">
+    <div class="footer__inner">
+      <div class="footer__brand">TalkUSA</div>
+      <div class="footer__tagline">AI Voice + Video, plus email and mail sending—on a telecom foundation.</div>
 
-            <div class="footer-links">
-                <a href="/terms.html">Terms of Service</a>
-                <span>•</span>
-                <a href="/privacy.html">Privacy Policy</a>
-                <span>•</span>
-                <a href="/acceptable-use.html">Acceptable Use</a>
-                <span>•</span>
-                <a href="/cookie-policy.html">Cookie Policy</a>
-                <span>•</span>
-                <a href="/billing-refund.html">Billing &amp; Refund Policy</a>
-            </div>
-            <div class="footer-copyright">Copyright © 2026 TrueSIP USA LLC — TalkUSA</div>
-        </div>
-    </footer>
+      <div class="footer__contact">
+        <div>1209 Mountain Road PL NE, Albuquerque, NM 87110, USA</div>
+        <div>support@talkusa.net</div>
+        <div>noc@truesip.net</div>
+      </div>
 
+      <div class="footer__links">
+        <a href="/terms.html">Terms</a>
+        <span>•</span>
+        <a href="/privacy.html">Privacy</a>
+        <span>•</span>
+        <a href="/acceptable-use.html">Acceptable Use</a>
+        <span>•</span>
+        <a href="/cookie-policy.html">Cookie Policy</a>
+        <span>•</span>
+        <a href="/billing-refund.html">Billing &amp; Refund</a>
+      </div>
+
+      <div class="footer__copy">Copyright © 2026 TrueSIP USA LLC — TalkUSA</div>
+    </div>
+  </footer>
 
 <!-- Start of LiveChat (www.livechat.com) code -->
 <script>
