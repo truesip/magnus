@@ -4776,6 +4776,7 @@ app.post('/api/ai/agent/send-custom-physical-mail', async (req, res) => {
       const returnCity = String(returnAddrRow.city || '').trim();
       const returnState = String(returnAddrRow.state || '').trim();
       const returnPostal = String(returnAddrRow.postal_code || '').trim();
+      const returnCountry = normalizeClick2MailCountry(returnAddrRow.country || 'US');
 
       const batchXml =
         `<?xml version="1.0" encoding="UTF-8"?>` +
@@ -4797,12 +4798,13 @@ app.post('/api/ai/agent/send-custom-physical-mail', async (req, res) => {
             `</printProductionOptions>` +
             `<returnAddress>` +
               (returnName ? `<name>${xmlEscape(returnName)}</name>` : '') +
-              (returnOrg ? `<organization>${xmlEscape(returnOrg)}</organization>` : '') +
+              `<organization>${xmlEscape(returnOrg)}</organization>` +
               `<address1>${xmlEscape(returnAddress1)}</address1>` +
               (returnAddress2 ? `<address2>${xmlEscape(returnAddress2)}</address2>` : '<address2></address2>') +
               `<city>${xmlEscape(returnCity)}</city>` +
               `<state>${xmlEscape(returnState)}</state>` +
               `<postalCode>${xmlEscape(returnPostal)}</postalCode>` +
+              `<country>${xmlEscape(returnCountry)}</country>` +
             `</returnAddress>` +
             `<recipients>` +
               `<address>` +
@@ -5577,6 +5579,7 @@ app.post('/api/ai/agent/send-physical-mail', async (req, res) => {
       const returnCity = String(returnAddrRow.city || '').trim();
       const returnState = String(returnAddrRow.state || '').trim();
       const returnPostal = String(returnAddrRow.postal_code || '').trim();
+      const returnCountry = normalizeClick2MailCountry(returnAddrRow.country || 'US');
 
       const batchXml =
         `<?xml version="1.0" encoding="UTF-8"?>` +
@@ -5598,12 +5601,13 @@ app.post('/api/ai/agent/send-physical-mail', async (req, res) => {
             `</printProductionOptions>` +
             `<returnAddress>` +
               (returnName ? `<name>${xmlEscape(returnName)}</name>` : '') +
-              (returnOrg ? `<organization>${xmlEscape(returnOrg)}</organization>` : '') +
+              `<organization>${xmlEscape(returnOrg)}</organization>` +
               `<address1>${xmlEscape(returnAddress1)}</address1>` +
               (returnAddress2 ? `<address2>${xmlEscape(returnAddress2)}</address2>` : '<address2></address2>') +
               `<city>${xmlEscape(returnCity)}</city>` +
               `<state>${xmlEscape(returnState)}</state>` +
               `<postalCode>${xmlEscape(returnPostal)}</postalCode>` +
+              `<country>${xmlEscape(returnCountry)}</country>` +
             `</returnAddress>` +
             `<recipients>` +
               `<address>` +
