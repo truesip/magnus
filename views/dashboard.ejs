@@ -6,14 +6,6 @@
   <title>Dashboard</title>
   <style>
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#f8fafc;color:#0f172a;min-height:100vh;display:flex;flex-direction:column}
-    .site-footer{background:#1f2937;color:#e5e7eb;padding:24px 20px;text-align:center}
-    .footer-brand{font-size:18px;font-weight:700;color:#fff;margin-bottom:4px}
-    .footer-tagline{color:#9ca3af;font-size:12px;margin-bottom:16px}
-    .footer-contact p{margin:4px 0;color:#d1d5db;font-size:12px}
-    .footer-links{margin-top:10px;font-size:12px}
-    .footer-links a{color:#9ca3af;margin:0 6px;text-decoration:none}
-    .footer-links a:hover{color:#ffffff;text-decoration:underline}
-    .footer-copyright{margin-top:12px;font-size:12px;color:#9ca3af}
     header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:#4f46e5;border-bottom:1px solid #4338ca;color:#fff}
     .brand{font-weight:700}
     .header-right{display:flex;align-items:center;gap:12px;font-size:14px}
@@ -93,6 +85,13 @@
       box-sizing:border-box;
     }
     #ai-pane-tools input[type="file"]{width:100%}
+
+    /* Document templates table: prevent content from overflowing the card */
+    #ai-doc-templates-table{table-layout:fixed}
+    #ai-doc-templates-table th,
+    #ai-doc-templates-table td{overflow-wrap:anywhere}
+    #ai-doc-templates-table th:last-child,
+    #ai-doc-templates-table td:last-child{white-space:nowrap;padding-right:12px;width:96px}
 
     /* Mobile optimizations */
     @media (max-width: 768px) {
@@ -4576,31 +4575,6 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       }
     });
   </script>
-
-  <!-- Footer -->
-  <footer class="site-footer">
-    <div class="footer-brand">TalkUSA.NET</div>
-    <div class="footer-tagline">Connecting your business to the world.</div>
-    <div class="footer-contact">
-      <p>📍 1209 Mountain Road PL NE, Albuquerque, NM 87110, USA</p>
-      <p>📧 support@talkusa.net</p>
-      <p>📧 noc@truesip.net</p>
-    </div>
-    <div class="footer-links">
-      <a href="/terms.html">Terms of Service</a>
-      <span>•</span>
-      <a href="/privacy.html">Privacy Policy</a>
-      <span>•</span>
-      <a href="/acceptable-use.html">Acceptable Use</a>
-      <span>•</span>
-      <a href="/cookie-policy.html">Cookie Policy</a>
-      <span>•</span>
-      <a href="/billing-refund.html">Billing &amp; Refund Policy</a>
-    </div>
-    <div class="footer-copyright">Copyright © 2026 TrueSIP USA LLC — TalkUSA</div>
-  </footer>
-
-
 <!-- Start of LiveChat (www.livechat.com) code -->
 <script>
     window.__lc = window.__lc || {};
