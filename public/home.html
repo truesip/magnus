@@ -308,6 +308,78 @@
     .step h3{margin:10px 0 8px;font-size:18px}
     .step p{margin:0;color:rgba(255,255,255,.70);font-size:14px}
 
+    /* Pricing */
+    .pricingGrid{display:grid;grid-template-columns: repeat(12, 1fr);gap:16px;margin-top:38px}
+    .priceCard{
+      grid-column: span 4;
+      border-radius: var(--radius);
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.05);
+      padding:18px 18px;
+      position:relative;
+      overflow:hidden;
+    }
+    .priceCard:hover{background: rgba(255,255,255,.07)}
+    .priceCard::before{
+      content:"";
+      position:absolute;
+      inset:-2px;
+      background: radial-gradient(520px 220px at 10% 10%, rgba(34,211,238,.12) 0%, transparent 55%),
+                  radial-gradient(520px 240px at 85% 20%, rgba(79,70,229,.16) 0%, transparent 55%);
+      pointer-events:none;
+      opacity:.55;
+    }
+    .priceCard > *{position:relative}
+
+    .priceCard--featured{
+      border-color: rgba(34,211,238,.30);
+      background: linear-gradient(180deg, rgba(34,211,238,.10) 0%, rgba(255,255,255,.05) 100%);
+    }
+
+    .priceBadge{
+      position:absolute;
+      top:14px;right:14px;
+      font-size:11px;
+      font-weight:900;
+      letter-spacing:.6px;
+      text-transform:uppercase;
+      padding:7px 10px;
+      border-radius:999px;
+      color:rgba(255,255,255,.88);
+      background: rgba(34,211,238,.12);
+      border:1px solid rgba(34,211,238,.30);
+    }
+
+    .priceName{font-weight:950;font-size:18px;letter-spacing:-.01em}
+    .priceMeta{margin-top:8px;color:rgba(255,255,255,.70);font-size:13px;line-height:1.6}
+    .price{display:flex;align-items:baseline;gap:8px;margin-top:14px}
+    .price strong{font-size:36px;letter-spacing:-.02em;line-height:1}
+    .price span{color:rgba(255,255,255,.60);font-weight:800}
+    .priceNote{margin-top:8px;color:rgba(255,255,255,.60);font-size:12px}
+
+    .priceList{list-style:none;margin:16px 0 0;padding:0;display:flex;flex-direction:column;gap:10px}
+    .priceList li{display:flex;gap:10px;align-items:flex-start;color:rgba(255,255,255,.72);font-size:14px;line-height:1.5}
+    .priceList li::before{
+      content:"✓";
+      width:18px;height:18px;
+      border-radius:999px;
+      display:grid;
+      place-items:center;
+      font-weight:950;
+      color:rgba(34,211,238,.95);
+      background: rgba(34,211,238,.10);
+      border:1px solid rgba(34,211,238,.30);
+      margin-top:2px;
+      flex:none;
+    }
+    .priceList strong{color:rgba(255,255,255,.90)}
+
+    .priceActions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+    .priceActions .btn{flex:1;min-width:150px}
+
+    .priceFine{margin-top:16px;color:rgba(255,255,255,.60);font-size:13px;line-height:1.7;max-width:90ch}
+    .priceFine a{color:rgba(255,255,255,.86);text-decoration:underline;text-underline-offset:3px}
+
     /* CTA */
     .cta{
       padding:70px 20px;
@@ -342,6 +414,7 @@
       h1{font-size:40px}
       .panel{max-width:720px}
       .card{grid-column: span 6}
+      .priceCard{grid-column: span 6}
       .steps{grid-template-columns:1fr}
       .nav__links{display:none}
     }
@@ -350,6 +423,7 @@
       h1{font-size:34px}
       .lead{font-size:16px}
       .card{grid-column: span 12}
+      .priceCard{grid-column: span 12}
       .cta__inner{padding:22px}
       .cta h2{font-size:28px}
     }
@@ -366,6 +440,7 @@
       <nav class="nav__links" aria-label="Primary">
         <a href="#capabilities">Capabilities</a>
         <a href="#workflow">Workflow</a>
+        <a href="#pricing">Pricing</a>
         <a href="#platform">Platform</a>
         <a href="#contact">Contact</a>
       </nav>
@@ -580,6 +655,75 @@
             <p>Create an account, buy or assign a number, and deploy an AI agent. Use email and mail tools for follow‑ups right away.</p>
           </div>
         </div>
+      </div>
+    </section>
+
+    <section class="section" id="pricing">
+      <div class="section__inner">
+        <div class="section__head">
+          <div class="kicker">Pricing</div>
+          <h2>AI‑first pricing that scales with real conversations.</h2>
+          <p>Choose a platform plan, then scale with what you actually use: AI voice + video minutes and sending volume (email + physical mail). No “seat tax”.</p>
+        </div>
+
+        <div class="pricingGrid" role="list" aria-label="Pricing plans">
+          <div class="priceCard" role="listitem">
+            <div class="priceName">Starter</div>
+            <div class="priceMeta">For solo operators and small teams getting to production fast.</div>
+            <div class="price"><strong>From $99</strong><span>/mo</span></div>
+            <div class="priceNote">Plus usage for AI minutes, email, and physical mail.</div>
+            <ul class="priceList">
+              <li><strong>AI Voice</strong> inbound call handling</li>
+              <li><strong>Video links</strong> + meeting follow‑ups</li>
+              <li><strong>Email</strong> documents from templates</li>
+              <li><strong>Transfer</strong> to a human or department</li>
+              <li><strong>History</strong> for calls, meetings, and sends</li>
+            </ul>
+            <div class="priceActions">
+              <a class="btn btn--primary" href="/signup">Get started</a>
+              <a class="btn" href="#contact">Questions?</a>
+            </div>
+          </div>
+
+          <div class="priceCard priceCard--featured" role="listitem">
+            <div class="priceBadge">Most popular</div>
+            <div class="priceName">Growth</div>
+            <div class="priceMeta">For teams automating support, lead intake, and appointment flows.</div>
+            <div class="price"><strong>From $299</strong><span>/mo</span></div>
+            <div class="priceNote">Higher included limits + priority routing options.</div>
+            <ul class="priceList">
+              <li><strong>AI Voice + Video</strong> workflows</li>
+              <li><strong>Smart routing</strong> + transfer rules</li>
+              <li><strong>Document templates</strong> for consistent follow‑ups</li>
+              <li><strong>Physical mail</strong> for letters and notices</li>
+              <li><strong>Reporting</strong> and searchable history</li>
+            </ul>
+            <div class="priceActions">
+              <a class="btn btn--primary" href="/signup">Start Growth</a>
+              <a class="btn" href="#contact">Talk to sales</a>
+            </div>
+          </div>
+
+          <div class="priceCard" role="listitem">
+            <div class="priceName">Enterprise</div>
+            <div class="priceMeta">For regulated industries, high volume, and custom integrations.</div>
+            <div class="price"><strong>Custom</strong><span>pricing</span></div>
+            <div class="priceNote">SLA, security review, and negotiated usage rates.</div>
+            <ul class="priceList">
+              <li><strong>Dedicated</strong> support + onboarding</li>
+              <li><strong>Custom</strong> routing + compliance workflows</li>
+              <li><strong>Volume</strong> pricing on AI minutes and sending</li>
+              <li><strong>Multi‑location</strong> numbers and departments</li>
+              <li><strong>Integrations</strong> (CRM, webhooks, API)</li>
+            </ul>
+            <div class="priceActions">
+              <a class="btn btn--primary" href="#contact">Contact us</a>
+              <a class="btn" href="/signup">Create account</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="priceFine">AI usage is billed on actual consumption: voice + video minutes, email sends, and physical mail pieces. You can track everything in your dashboard.</div>
       </div>
     </section>
 
