@@ -5,91 +5,193 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>TalkUSA – Privacy Policy</title>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-        "Helvetica Neue", Arial, sans-serif;
-      background: #f9fafb;
-      color: #111827;
-      line-height: 1.6;
+    :root{
+      --bg:#050816;
+      --bg2:#0b1024;
+      --card:rgba(255,255,255,.06);
+      --card2:rgba(255,255,255,.08);
+      --border:rgba(255,255,255,.12);
+      --text:rgba(255,255,255,.92);
+      --muted:rgba(255,255,255,.70);
+      --muted2:rgba(255,255,255,.55);
+      --primary:#4f46e5;
+      --accent:#22d3ee;
+      --accent2:#a78bfa;
+      --shadow:0 24px 80px rgba(0,0,0,.55);
+      --radius:16px;
+      --radius2:22px;
+      --max:1200px;
     }
-    a { color: #4f46e5; text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    nav {
-      background: #ffffff;
-      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+
+    *{box-sizing:border-box;margin:0;padding:0}
+    html,body{height:100%}
+    body{
+      font-family: ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
+      background: radial-gradient(1200px 600px at 20% 10%, rgba(79,70,229,.18) 0%, transparent 55%),
+                  radial-gradient(900px 520px at 85% 35%, rgba(34,211,238,.14) 0%, transparent 60%),
+                  radial-gradient(900px 520px at 55% 90%, rgba(167,139,250,.10) 0%, transparent 60%),
+                  linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
+      color:var(--text);
+      line-height:1.65;
+      overflow-x:hidden;
+      min-height:100vh;
+    }
+
+    a{color:var(--accent);text-decoration:none}
+    a:hover{color:#fff;text-decoration:underline;text-underline-offset:3px}
+
+    /* Navigation */
+    nav{
+      background: rgba(5,8,22,.72);
+      border-bottom:1px solid rgba(255,255,255,.08);
+      backdrop-filter: blur(14px);
       position: sticky;
       top: 0;
       z-index: 20;
     }
-    .nav-container {
-      max-width: 1100px;
-      margin: 0 auto;
-      padding: 14px 20px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
+    .nav-container{
+      max-width:var(--max);
+      margin:0 auto;
+      padding:16px 20px;
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:18px;
     }
-    .logo {
-      font-size: 22px;
-      font-weight: 700;
-      color: #4f46e5;
-    }
-    .nav-links { display: flex; gap: 24px; list-style: none; }
-    .nav-links a { color: #4b5563; font-weight: 500; }
-    .nav-links a:hover { color: #111827; }
-    .nav-cta {
-      padding: 8px 18px;
-      border-radius: 999px;
-      background: #4f46e5;
-      color: #ffffff;
-      font-weight: 600;
-      text-decoration: none;
-    }
-    .nav-cta:hover { background: #4338ca; text-decoration: none; }
 
-    main {
-      max-width: 900px;
-      margin: 40px auto 80px auto;
-      padding: 24px 20px 40px 20px;
-      background: #ffffff;
-      border-radius: 12px;
-      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+    .logo{
+      font-weight:800;
+      letter-spacing:.2px;
+      font-size:18px;
+      display:flex;
+      align-items:center;
+      gap:10px;
+      text-decoration:none;
+      color:var(--text);
+      white-space:nowrap;
     }
-    h1 {
-      font-size: 32px;
-      font-weight: 700;
-      margin-bottom: 12px;
-      color: #111827;
+    .brand__mark{
+      width:34px;height:34px;
+      border-radius:10px;
+      background: linear-gradient(135deg, rgba(79,70,229,1) 0%, rgba(34,211,238,1) 100%);
+      box-shadow: 0 14px 30px rgba(79,70,229,.25);
+      display:inline-block;
+      flex:none;
     }
-    .meta {
-      font-size: 14px;
-      color: #6b7280;
-      margin-bottom: 24px;
+    .brand__text{display:flex;flex-direction:column;line-height:1.1}
+    .brand__text small{font-weight:600;color:var(--muted2);font-size:11px}
+
+    .nav-links{display:flex;gap:18px;list-style:none;align-items:center;margin-left:auto}
+    .nav-links a{
+      text-decoration:none;
+      color:var(--muted);
+      font-weight:600;
+      font-size:14px;
+      padding:10px 10px;
+      border-radius:10px;
+      transition: background .15s ease, color .15s ease;
     }
-    h2 {
-      font-size: 22px;
-      margin-top: 28px;
+    .nav-links a:hover{color:var(--text);background:rgba(255,255,255,.06)}
+
+    .nav-login{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:10px;
+      text-decoration:none;
+      border-radius:12px;
+      padding:11px 14px;
+      font-weight:800;
+      font-size:14px;
+      border:1px solid rgba(255,255,255,.12);
+      background: rgba(255,255,255,.06);
+      transition: transform .15s ease, background .15s ease, border-color .15s ease;
+      white-space:nowrap;
+      color:var(--muted);
+    }
+    .nav-login:hover{transform: translateY(-1px); background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.18); color:var(--text)}
+
+    .nav-cta{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:10px;
+      text-decoration:none;
+      border-radius:12px;
+      padding:11px 14px;
+      font-weight:900;
+      font-size:14px;
+      border:1px solid rgba(79,70,229,.45);
+      background: linear-gradient(135deg, rgba(79,70,229,1) 0%, rgba(34,211,238,1) 100%);
+      color:#071024 !important;
+      transition: transform .15s ease, border-color .15s ease;
+      white-space:nowrap;
+    }
+    .nav-cta:hover{transform: translateY(-1px); border-color: rgba(34,211,238,.75); text-decoration:none}
+
+    /* Main */
+    main{
+      max-width: 960px;
+      margin: 36px auto 64px auto;
+      padding: 28px 24px 34px 24px;
+      background: linear-gradient(180deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.05) 100%);
+      border-radius: var(--radius2);
+      border:1px solid rgba(255,255,255,.12);
+      box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+    }
+    main::before{
+      content:"";
+      position:absolute;
+      inset:-2px;
+      background: radial-gradient(700px 260px at 10% 10%, rgba(34,211,238,.14) 0%, transparent 55%),
+                  radial-gradient(620px 280px at 90% 15%, rgba(79,70,229,.18) 0%, transparent 55%);
+      pointer-events:none;
+      opacity:.9;
+    }
+    main > *{position:relative}
+
+    h1{
+      font-size: 34px;
+      font-weight: 900;
       margin-bottom: 10px;
-      color: #111827;
+      letter-spacing: -0.02em;
+      color: rgba(255,255,255,.95);
     }
-    h3 {
-      font-size: 18px;
-      margin-top: 20px;
-      margin-bottom: 8px;
-      color: #111827;
-    }
-    p { margin-bottom: 12px; color: #4b5563; }
-    ul { margin: 8px 0 16px 20px; color: #4b5563; }
-    li { margin-bottom: 6px; }
+    .meta{font-size: 14px;color: rgba(255,255,255,.55);margin-bottom: 22px;}
+    h2{font-size: 22px;margin-top: 26px;margin-bottom: 10px;color: rgba(255,255,255,.92);letter-spacing: -0.01em;}
+    h3{font-size: 18px;margin-top: 18px;margin-bottom: 8px;color: rgba(255,255,255,.90);}
+    p{margin-bottom:12px;color:rgba(255,255,255,.72)}
+    ul{margin:8px 0 16px 20px;color:rgba(255,255,255,.72)}
+    li{margin-bottom:6px}
+    strong{color:rgba(255,255,255,.92)}
 
+    code{
+      font-family: ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+      background: rgba(0,0,0,.22);
+      border: 1px solid rgba(255,255,255,.10);
+      border-radius: 8px;
+      padding: 2px 6px;
+      color: rgba(255,255,255,.88);
+    }
+    pre{
+      background: rgba(0,0,0,.22);
+      border: 1px solid rgba(255,255,255,.10);
+      border-radius: 14px;
+      padding: 14px;
+      overflow:auto;
+      margin: 14px 0;
+    }
+
+    /* Footer */
     footer {
-      background: linear-gradient(180deg, rgba(5,8,22,.98) 0%, rgba(11,16,36,.98) 100%);
+      background: rgba(0,0,0,.22);
       border-top: 1px solid rgba(255,255,255,.08);
       color: rgba(255,255,255,.92);
       padding: 52px 20px 26px;
     }
-    .footer-container { max-width: 1200px; margin: 0 auto; text-align: center; }
+    .footer-container { max-width: var(--max); margin: 0 auto; text-align: center; }
     .footer-brand { font-weight: 900; font-size: 20px; letter-spacing: .2px; color: #fff; margin-bottom: 6px; }
     .footer-tagline { color: rgba(255,255,255,.60); margin-top: 6px; }
     .footer-links { margin-top: 18px; font-size: 13px; color: rgba(255,255,255,.62); }
@@ -97,9 +199,11 @@
     .footer-links a:hover { color: #ffffff; text-decoration: underline; }
     .footer-copy { margin-top: 20px; padding-top: 18px; border-top: 1px solid rgba(255,255,255,.08); color: rgba(255,255,255,.52); font-size: 13px; }
 
-    @media (max-width: 640px) {
+    @media (max-width: 980px) {
       .nav-links { display: none; }
-      main { margin: 24px 12px 60px 12px; padding: 20px 16px 32px 16px; }
+    }
+    @media (max-width: 640px) {
+      main { margin: 24px 12px 60px 12px; padding: 22px 18px 28px 18px; }
       h1 { font-size: 26px; }
     }
   </style>
@@ -107,13 +211,22 @@
 <body>
   <nav>
     <div class="nav-container">
-      <a class="logo" href="/">TalkUSA.NET</a>
+      <a class="logo" href="/" aria-label="TalkUSA home">
+        <span class="brand__mark" aria-hidden="true"></span>
+        <span class="brand__text">TalkUSA <small>AI Voice + Video</small></span>
+      </a>
       <ul class="nav-links">
         <li><a href="/">Home</a></li>
-        <li><a href="/signup">Sign Up</a></li>
-        <li><a href="/login">Login</a></li>
+        <li><a href="/#capabilities">Capabilities</a></li>
+        <li><a href="/#workflow">Workflow</a></li>
+        <li><a href="/#pricing">Pricing</a></li>
+        <li><a href="/#platform">Platform</a></li>
+        <li><a href="/#contact">Contact</a></li>
       </ul>
-      <a class="nav-cta" href="/signup">Get Started</a>
+      <div style="display:flex;gap:12px;align-items:center">
+        <a href="/login" class="nav-login">Login</a>
+        <a href="/signup" class="nav-cta">Get Started</a>
+      </div>
     </div>
   </nav>
 
@@ -299,7 +412,7 @@
       Email: <a href="mailto:support@talkusa.net">support@talkusa.net</a>
     </p>
 
-    <p style="margin-top:24px; font-size:13px; color:#6b7280;">
+    <p style="margin-top:24px; font-size:13px; color:rgba(255,255,255,.60);">
       This Privacy Policy is provided for informational purposes and does not
       constitute legal advice. You should consult with your own legal counsel
       to ensure compliance with all applicable privacy and data protection
