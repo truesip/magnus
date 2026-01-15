@@ -69,14 +69,16 @@
       color:var(--text);
       white-space:nowrap;
     }
-    .logo::before{
-      content:"";
+    .brand__mark{
       width:34px;height:34px;
       border-radius:10px;
       background: linear-gradient(135deg, rgba(79,70,229,1) 0%, rgba(34,211,238,1) 100%);
       box-shadow: 0 14px 30px rgba(79,70,229,.25);
       display:inline-block;
+      flex:none;
     }
+    .brand__text{display:flex;flex-direction:column;line-height:1.1}
+    .brand__text small{font-weight:600;color:var(--muted2);font-size:11px}
 
     .nav-links{display:flex;gap:18px;list-style:none;align-items:center;margin-left:auto}
     .nav-links a{
@@ -187,7 +189,10 @@
   <!-- Navigation -->
   <nav>
     <div class="nav-container">
-      <a href="/" class="logo">TalkUSA.NET</a>
+      <a href="/" class="logo" aria-label="TalkUSA home">
+        <span class="brand__mark" aria-hidden="true"></span>
+        <span class="brand__text">TalkUSA <small>AI Voice + Video</small></span>
+      </a>
       <ul class="nav-links">
         <li><a href="/">Home</a></li>
         <li><a href="/#capabilities">Capabilities</a></li>
