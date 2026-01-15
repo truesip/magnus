@@ -5118,8 +5118,19 @@ app.post('/api/ai/agent/send-physical-mail', async (req, res) => {
       templateId = Number(agent.default_doc_template_id);
     }
 
+    // Fallback: if this user only has one template and none was specified, auto-select it.
     if (!templateId) {
-      return res.status(400).json({ success: false, message: 'No template selected (set a default template for this agent or pass template_id)' });
+      const [cand] = await pool.execute(
+        'SELECT id FROM ai_doc_templates WHERE user_id = ? ORDER BY created_at DESC LIMIT 2',
+        [userId]
+      );
+      if (cand && cand.length === 1) {
+        templateId = Number(cand[0].id);
+      } else if (!cand || !cand.length) {
+        return res.status(400).json({ success: false, message: 'No document templates are available. Upload a .docx template in the dashboard first.' });
+      } else {
+        return res.status(400).json({ success: false, message: 'No template selected (set a default template for this agent or pass template_id)' });
+      }
     }
 
     // Default product options (can be overridden per-call if needed)
