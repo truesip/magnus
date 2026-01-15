@@ -339,6 +339,34 @@
       color: rgba(255,255,255,.80) !important;
     }
 
+    /* AI Conversation message cards */
+    .ai-chat-card{
+      margin:0 0 10px 0;
+      padding:10px 12px;
+      border:1px solid rgba(255,255,255,.12);
+      border-radius:14px;
+      background: rgba(255,255,255,.06);
+      box-shadow: 0 10px 24px rgba(0,0,0,.25);
+    }
+    .ai-chat-card--user{
+      background: linear-gradient(135deg, rgba(79,70,229,.22) 0%, rgba(34,211,238,.12) 100%);
+      border-color: rgba(34,211,238,.22);
+    }
+    .ai-chat-meta{
+      font-size:12px;
+      color: rgba(255,255,255,.62);
+      margin-bottom:6px;
+      font-weight:700;
+    }
+    .ai-chat-body{
+      white-space:pre-wrap;
+      font-size:13px;
+      color: rgba(255,255,255,.90);
+      line-height:1.6;
+      overflow-wrap:anywhere;
+      word-break:break-word;
+    }
+
     /* Modals */
     #addFundModal > div,
     #sipModal > div,
@@ -2261,7 +2289,7 @@
         const isSelected = aiConvSelected && String(aiConvSelected.call_id || '') === callId && String(aiConvSelected.call_domain || '') === callDomain;
 
         const tr = document.createElement('tr');
-        if (isSelected) tr.style.background = '#eef2ff';
+        if (isSelected) tr.style.background = 'rgba(79,70,229,.18)';
         tr.innerHTML =
           `<td>${escapeHtml(start)}</td>`+
           `<td>${escapeHtml(from)}</td>`+
@@ -2341,27 +2369,20 @@
       empty.style.display = 'none';
 
       for (const m of arr) {
-        const role = String(m.role || '');
+        const role = String(m.role || '').toLowerCase();
         const isUser = role === 'user';
         const who = isUser ? 'Caller' : 'AI';
         const ts = m.created_at ? fmtDateTime(m.created_at) : '';
 
         const card = document.createElement('div');
-        card.style.margin = '0 0 10px 0';
-        card.style.padding = '8px 10px';
-        card.style.border = '1px solid #e5e7eb';
-        card.style.borderRadius = '12px';
-        card.style.background = isUser ? '#ffffff' : '#f3f4f6';
+        card.className = `ai-chat-card ${isUser ? 'ai-chat-card--user' : 'ai-chat-card--ai'}`;
 
         const header = document.createElement('div');
-        header.style.fontSize = '12px';
-        header.style.color = '#6b7280';
-        header.style.marginBottom = '4px';
+        header.className = 'ai-chat-meta';
         header.textContent = ts ? `${who} • ${ts}` : who;
 
         const body = document.createElement('div');
-        body.style.whiteSpace = 'pre-wrap';
-        body.style.fontSize = '13px';
+        body.className = 'ai-chat-body';
         body.textContent = String(m.content || '');
 
         card.appendChild(header);
