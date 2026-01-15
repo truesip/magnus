@@ -5,40 +5,182 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Login - TalkUSA</title>
   <style>
+    :root{
+      --bg:#050816;
+      --bg2:#0b1024;
+      --card:rgba(255,255,255,.06);
+      --card2:rgba(255,255,255,.08);
+      --border:rgba(255,255,255,.12);
+      --text:rgba(255,255,255,.92);
+      --muted:rgba(255,255,255,.70);
+      --muted2:rgba(255,255,255,.55);
+      --primary:#4f46e5;
+      --accent:#22d3ee;
+      --accent2:#a78bfa;
+      --shadow:0 24px 80px rgba(0,0,0,.55);
+      --radius:16px;
+      --radius2:22px;
+      --max:1200px;
+    }
+
     *{margin:0;padding:0;box-sizing:border-box}
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f6f7fb;min-height:100vh;display:flex;flex-direction:column}
+    html,body{height:100%}
+    body{
+      font-family: ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
+      background: radial-gradient(1200px 600px at 20% 10%, rgba(79,70,229,.18) 0%, transparent 55%),
+                  radial-gradient(900px 520px at 85% 35%, rgba(34,211,238,.14) 0%, transparent 60%),
+                  radial-gradient(900px 520px at 55% 90%, rgba(167,139,250,.10) 0%, transparent 60%),
+                  linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
+      color:var(--text);
+      overflow-x:hidden;
+      min-height:100vh;
+      display:flex;
+      flex-direction:column;
+    }
+
+    a{color:inherit}
+
     /* Navigation */
-    nav{background:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.1);position:sticky;top:0;z-index:1000}
-    .nav-container{max-width:1200px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;padding:16px 20px}
-    .logo{font-size:24px;font-weight:700;color:#4f46e5;text-decoration:none}
-    .nav-links{display:flex;gap:32px;list-style:none}
-    .nav-links a{color:#4b5563;text-decoration:none;font-weight:500;transition:color 0.2s}
-    .nav-links a:hover{color:#4f46e5}
-    .nav-cta{background:#4f46e5;color:#fff !important;padding:10px 24px;border-radius:8px;text-decoration:none;font-weight:600;transition:background 0.2s}
-    .nav-cta:hover{background:#4338ca}
+    nav{
+      position:sticky;
+      top:0;
+      z-index:50;
+      background: rgba(5,8,22,.72);
+      border-bottom:1px solid rgba(255,255,255,.08);
+      backdrop-filter: blur(14px);
+    }
+    .nav-container{
+      max-width:var(--max);
+      margin:0 auto;
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      padding:16px 20px;
+      gap:18px;
+    }
+    .logo{
+      font-weight:800;
+      letter-spacing:.2px;
+      font-size:18px;
+      display:flex;
+      align-items:center;
+      gap:10px;
+      text-decoration:none;
+      color:var(--text);
+      white-space:nowrap;
+    }
+    .logo::before{
+      content:"";
+      width:34px;height:34px;
+      border-radius:10px;
+      background: linear-gradient(135deg, rgba(79,70,229,1) 0%, rgba(34,211,238,1) 100%);
+      box-shadow: 0 14px 30px rgba(79,70,229,.25);
+      display:inline-block;
+    }
+
+    .nav-links{display:flex;gap:18px;list-style:none;align-items:center;margin-left:auto}
+    .nav-links a{
+      text-decoration:none;
+      color:var(--muted);
+      font-weight:600;
+      font-size:14px;
+      padding:10px 10px;
+      border-radius:10px;
+      transition: background .15s ease, color .15s ease;
+    }
+    .nav-links a:hover{color:var(--text);background:rgba(255,255,255,.06)}
+
+    .nav-login{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:10px;
+      text-decoration:none;
+      border-radius:12px;
+      padding:11px 14px;
+      font-weight:800;
+      font-size:14px;
+      border:1px solid rgba(255,255,255,.12);
+      background: rgba(255,255,255,.06);
+      transition: transform .15s ease, background .15s ease, border-color .15s ease;
+      white-space:nowrap;
+      color:var(--muted);
+    }
+    .nav-login:hover{transform: translateY(-1px); background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.18); color:var(--text)}
+    .nav-login[aria-current="page"]{border-color: rgba(34,211,238,.45); background: rgba(34,211,238,.10); color:var(--text)}
+
+    .nav-cta{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:10px;
+      text-decoration:none;
+      border-radius:12px;
+      padding:11px 14px;
+      font-weight:900;
+      font-size:14px;
+      border:1px solid rgba(79,70,229,.45);
+      background: linear-gradient(135deg, rgba(79,70,229,1) 0%, rgba(34,211,238,1) 100%);
+      color:#071024 !important;
+      transition: transform .15s ease, border-color .15s ease;
+      white-space:nowrap;
+    }
+    .nav-cta:hover{transform: translateY(-1px); border-color: rgba(34,211,238,.75)}
+
     @media (max-width:768px){.nav-links{display:none}}
-    /* Footer */
-    .site-footer{background:#1f2937;color:#e5e7eb;padding:48px 20px;text-align:center;margin-top:auto}
-    .footer-brand{font-size:24px;font-weight:700;color:#fff;margin-bottom:8px}
-    .footer-tagline{color:#9ca3af;margin-bottom:32px}
-    .footer-contact{margin-top:24px}
-    .footer-contact h3{color:#fff;margin-bottom:16px;font-size:20px}
-    .footer-contact p{margin:8px 0;color:#d1d5db}
-    .footer-links{margin-top:20px;font-size:13px}
-    .footer-links a{color:#9ca3af;margin:0 6px;text-decoration:none}
-    .footer-links a:hover{color:#ffffff;text-decoration:underline}
-    .footer-copyright{margin-top:18px;font-size:12px;color:#9ca3af}
+
     /* Main */
-    .main-content{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px}
-    .card{background:#fff;border:1px solid #e5e7ef;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.06);padding:24px;max-width:380px;width:calc(100% - 24px)}
-    h1{margin:0 0 8px 0;font-size:20px;text-align:center}
-    .field{margin:10px auto;max-width:85%}
-    label{display:block;font-size:12px;color:#555;margin-bottom:6px}
-    input{width:100%;padding:12px 14px;border:1px solid #d7d9e5;border-radius:8px;font-size:14px;box-sizing:border-box}
-    .btn{width:85%;margin:12px auto 0 auto;padding:12px 14px;background:#4f46e5;color:#fff;border:none;border-radius:8px;font-weight:600;display:block;cursor:pointer}
-    .btn:hover{background:#4338ca}
-    .error{background:#fde8e8;border:1px solid #f7baba;color:#7a1d1d;border-radius:8px;padding:10px 12px;font-size:13px;margin-bottom:10px}
-    .hint{font-size:12px;color:#666;margin-top:8px;text-align:center}
+    .main-content{flex:1;display:grid;place-items:center;padding:70px 20px 40px}
+    .card{
+      border-radius: var(--radius2);
+      border:1px solid rgba(255,255,255,.12);
+      background: linear-gradient(180deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.05) 100%);
+      box-shadow: var(--shadow);
+      padding:26px 22px;
+      max-width:460px;
+      width:calc(100% - 24px);
+      position:relative;
+      overflow:hidden;
+    }
+    .card::before{
+      content:"";
+      position:absolute;
+      inset:-2px;
+      background: radial-gradient(600px 220px at 10% 10%, rgba(34,211,238,.14) 0%, transparent 55%),
+                  radial-gradient(520px 240px at 85% 20%, rgba(79,70,229,.18) 0%, transparent 55%);
+      pointer-events:none;
+    }
+    .card > *{position:relative}
+
+    h1{margin:0 0 6px 0;font-size:22px;text-align:center;letter-spacing:-.01em}
+    .card-sub{margin:0 0 16px 0;text-align:center;color:var(--muted);font-size:14px;line-height:1.5}
+
+    .field{margin:14px 0}
+    label{display:block;font-size:13px;color:rgba(255,255,255,.82);font-weight:800;margin-bottom:8px}
+    input{width:100%;padding:14px 14px;border:1px solid rgba(255,255,255,.12);border-radius:12px;font-size:14px;background: rgba(255,255,255,.05);color:var(--text)}
+    input::placeholder{color:rgba(255,255,255,.45)}
+    input:focus{outline:none;border-color: rgba(34,211,238,.55);box-shadow:0 0 0 4px rgba(34,211,238,.10);background: rgba(255,255,255,.07)}
+
+    .btn{width:100%;margin:18px 0 0;padding:14px 16px;background: linear-gradient(135deg, rgba(79,70,229,1) 0%, rgba(34,211,238,1) 100%);color:#071024;border:none;border-radius:12px;font-weight:950;letter-spacing:.2px;display:block;cursor:pointer;box-shadow: 0 10px 30px rgba(79,70,229,.20);transition: transform .15s ease, box-shadow .15s ease}
+    .btn:hover{transform: translateY(-1px);box-shadow: 0 14px 40px rgba(79,70,229,.25)}
+
+    .error{background: rgba(239,68,68,.10);border:1px solid rgba(239,68,68,.35);color:rgba(255,255,255,.88);border-left:4px solid #ef4444;border-radius:14px;padding:12px 12px;font-size:13px;margin-bottom:14px}
+
+    .hint{font-size:13px;color:var(--muted2);margin-top:14px;text-align:center}
+    .hint a{color:rgba(255,255,255,.86);text-decoration:underline;text-decoration-color: rgba(34,211,238,.65);text-underline-offset:3px}
+    .hint a:hover{color:#fff;text-decoration-color: rgba(167,139,250,.85)}
+
+    /* Footer */
+    .site-footer{background: rgba(0,0,0,.22);border-top: 1px solid rgba(255,255,255,.08);padding:52px 20px 26px;text-align:center;margin-top:auto}
+    .footer-brand{font-weight:900;font-size:20px;letter-spacing:.2px;color:#fff;margin-bottom:6px}
+    .footer-tagline{color:rgba(255,255,255,.60);margin-bottom:26px}
+    .footer-contact{margin-top:10px;color:rgba(255,255,255,.72);font-size:14px;line-height:1.8}
+    .footer-contact h3{color:#fff;margin-bottom:12px;font-size:18px}
+    .footer-contact p{margin:6px 0;color:rgba(255,255,255,.72)}
+    .footer-links{margin-top:18px;font-size:13px;color:rgba(255,255,255,.62)}
+    .footer-links a{color:rgba(255,255,255,.62);margin:0 6px;text-decoration:none}
+    .footer-links a:hover{color:#fff;text-decoration:underline}
+    .footer-copyright{margin-top:20px;padding-top:18px;border-top:1px solid rgba(255,255,255,.08);color:rgba(255,255,255,.52);font-size:13px}
   </style>
 </head>
 <body>
@@ -47,14 +189,14 @@
     <div class="nav-container">
       <a href="/" class="logo">TalkUSA.NET</a>
       <ul class="nav-links">
-        <li><a href="/#home">Home</a></li>
-        <li><a href="/#services">Services</a></li>
-        <li><a href="/#pricing">Pricing</a></li>
-        <li><a href="/#about">About Us</a></li>
+        <li><a href="/">Home</a></li>
+        <li><a href="/#capabilities">Capabilities</a></li>
+        <li><a href="/#workflow">Workflow</a></li>
+        <li><a href="/#platform">Platform</a></li>
         <li><a href="/#contact">Contact</a></li>
       </ul>
       <div style="display:flex;gap:12px;align-items:center">
-        <a href="/login" style="color:#4b5563;text-decoration:none;font-weight:500">Login</a>
+        <a href="/login" class="nav-login" aria-current="page">Login</a>
         <a href="/signup" class="nav-cta">Get Started</a>
       </div>
     </div>
@@ -62,7 +204,8 @@
 
   <div class="main-content">
   <div class="card">
-    <h1>Login</h1>
+    <h1>Sign in</h1>
+    <div class="card-sub">Access your dashboard and AI agents.</div>
     <% if (error) { %>
       <div class="error"><%= error %></div>
     <% } %>
@@ -84,12 +227,12 @@
   <!-- Footer -->
   <footer class="site-footer">
     <div class="footer-brand">TalkUSA.NET</div>
-    <div class="footer-tagline">Connecting your business to the world.</div>
+    <div class="footer-tagline">AI Voice + Video, plus email and mail sending—on a telecom foundation.</div>
     <div class="footer-contact">
       <h3>Contact Us</h3>
-      <p>📍 1209 Mountain Road PL NE, Albuquerque, NM 87110, USA</p>
-      <p>📧 support@talkusa.net</p>
-      <p>📧 noc@truesip.net</p>
+      <p>1209 Mountain Road PL NE, Albuquerque, NM 87110, USA</p>
+      <p>support@talkusa.net</p>
+      <p>noc@truesip.net</p>
     </div>
     <div class="footer-links">
       <a href="/terms.html">Terms of Service</a>
