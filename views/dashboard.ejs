@@ -325,12 +325,24 @@
     #ai-doc-templates-table th:last-child,
     #ai-doc-templates-table td:last-child{white-space:nowrap;padding-right:12px;width:96px}
 
+    /* AI Agents: keep action buttons inside the table/card */
+    #ai-agents-table{table-layout:fixed}
+    #ai-agents-table th:last-child,
+    #ai-agents-table td:last-child{width:140px;padding-right:12px}
+    #ai-agents-table td:last-child button{display:block;width:100%;max-width:100%;margin:0 0 8px 0}
+    #ai-agents-table td:last-child button:last-child{margin-bottom:0}
+
+    /* AI Numbers: don't let the assignment dropdown force horizontal overflow */
+    #ai-numbers-table{table-layout:fixed}
+    #ai-numbers-table td:nth-child(2) select{width:100% !important;min-width:0;max-width:100%}
+
     /* Make the white inline cards in the AI panes match the dashboard theme */
     #view-ai div[style*="background:#ffffff"],
     #view-ai div[style*="background:#fff"]{
       background: linear-gradient(180deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.05) 100%) !important;
       border:1px solid rgba(255,255,255,.12) !important;
       box-shadow: 0 10px 28px rgba(0,0,0,.35) !important;
+      overflow:hidden;
     }
     #view-ai div[style*="border:1px solid #e5e7eb"]{border-color:rgba(255,255,255,.12) !important}
     #aiConvMessages{
