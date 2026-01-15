@@ -84,19 +84,22 @@
     li { margin-bottom: 6px; }
 
     footer {
-      background: #111827;
-      color: #e5e7eb;
-      padding: 32px 20px;
+      background: linear-gradient(180deg, rgba(5,8,22,.98) 0%, rgba(11,16,36,.98) 100%);
+      border-top: 1px solid rgba(255,255,255,.08);
+      color: rgba(255,255,255,.92);
+      padding: 52px 20px 26px;
     }
-    .footer-container { max-width: 1100px; margin: 0 auto; text-align: center; }
-    .footer-brand { font-weight: 700; font-size: 20px; margin-bottom: 6px; }
-    .footer-links { margin-top: 12px; font-size: 14px; }
-    .footer-links a { color: #9ca3af; margin: 0 8px; }
-    .footer-links a:hover { color: #ffffff; }
+    .footer-container { max-width: 1200px; margin: 0 auto; text-align: center; }
+    .footer-brand { font-weight: 900; font-size: 20px; letter-spacing: .2px; color: #fff; margin-bottom: 6px; }
+    .footer-tagline { color: rgba(255,255,255,.60); margin-top: 6px; }
+    .footer-links { margin-top: 18px; font-size: 13px; color: rgba(255,255,255,.62); }
+    .footer-links a { color: rgba(255,255,255,.62); margin: 0 8px; text-decoration: none; }
+    .footer-links a:hover { color: #ffffff; text-decoration: underline; }
+    .footer-copy { margin-top: 20px; padding-top: 18px; border-top: 1px solid rgba(255,255,255,.08); color: rgba(255,255,255,.52); font-size: 13px; }
 
     @media (max-width: 640px) {
       .nav-links { display: none; }
-      main { margin: 24px 12px 60px 12px; padding: 20px 16px 32px 16; }
+      main { margin: 24px 12px 60px 12px; padding: 20px 16px 32px 16px; }
       h1 { font-size: 26px; }
     }
   </style>
@@ -258,8 +261,8 @@
 
   <footer>
     <div class="footer-container">
-      <div class="footer-brand">TalkUSA.NET</div>
-      <p>Connecting your business to the world.</p>
+      <div class="footer-brand">TalkUSA</div>
+      <div class="footer-tagline">AI Voice + Video, plus email and mail sending—on a telecom foundation.</div>
       <div class="footer-links">
         <a href="/terms.html">Terms of Service</a>
         <span>•</span>
@@ -271,6 +274,7 @@
         <span>•</span>
         <a href="/billing-refund.html">Billing &amp; Refund Policy</a>
       </div>
+      <div class="footer-copy">Copyright © 2026 TrueSIP USA LLC — TalkUSA</div>
     </div>
   </footer>
 
