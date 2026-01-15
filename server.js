@@ -1596,6 +1596,7 @@ async function initDb() {
     agent_action_token_enc BLOB NULL,
     agent_action_token_iv VARBINARY(16) NULL,
     agent_action_token_tag VARBINARY(16) NULL,
+    transfer_to_number VARCHAR(64) NULL,
     default_doc_template_id BIGINT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -2107,6 +2108,20 @@ async function initDb() {
       }
     } catch (e) {
       if (DEBUG) console.warn('[schema] ai_agents.default_doc_template_id check failed', e.message || e);
+    }
+
+    // Ensure ai_agents.transfer_to_number exists (per-agent call transfer destination override)
+    try {
+      const [hasTransferTo] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_agents' AND column_name='transfer_to_number' LIMIT 1",
+        [dbName]
+      );
+      if (!hasTransferTo || !hasTransferTo.length) {
+        await pool.query('ALTER TABLE ai_agents ADD COLUMN transfer_to_number VARCHAR(64) NULL AFTER agent_action_token_tag');
+        if (DEBUG) console.log('[schema] Added ai_agents.transfer_to_number column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_agents.transfer_to_number check failed', e.message || e);
     }
 
     try {
@@ -6291,12 +6306,16 @@ async function syncUserAiTransferDestinationToAgents({ userId, transferToNumber,
       publicBaseUrl
     });
 
+    // Per-agent override (falls back to user's default transfer setting)
+    const agentTransfer = normalizeAiTransferDestination(agent.transfer_to_number);
+    const operatorNumber = agentTransfer || transferVal;
+
     const secrets = buildPipecatSecrets({
       greeting: agent.greeting,
       prompt: agent.prompt,
       cartesiaVoiceId: agent.cartesia_voice_id,
       portalAgentActionToken: portalToken,
-      operatorNumber: transferVal,
+      operatorNumber,
       backgroundAudioUrl: bgUrlResolved,
       backgroundAudioGain: agent.background_audio_gain
     });
@@ -8071,7 +8090,7 @@ app.get('/api/me/ai/agents', requireAuth, async (req, res) => {
     const userId = req.session.userId;
     const [rows] = await pool.execute(
       `SELECT a.id, a.display_name, a.greeting, a.prompt, a.cartesia_voice_id,
-              a.background_audio_url, a.background_audio_gain,
+              a.background_audio_url, a.background_audio_gain, a.transfer_to_number,
               CASE WHEN ba.agent_id IS NULL THEN 0 ELSE 1 END AS background_audio_uploaded,
               ba.original_filename AS background_audio_upload_filename,
               ba.size_bytes AS background_audio_upload_size_bytes,
@@ -8809,12 +8828,27 @@ app.post('/api/me/ai/agents', requireAuth, async (req, res) => {
       background_audio_url,
       backgroundAudioUrl,
       background_audio_gain,
-      backgroundAudioGain
+      backgroundAudioGain,
+      transfer_to_number,
+      transferToNumber
     } = req.body || {};
 
     const name = String(display_name || '').trim();
     const voiceIdRaw = (cartesia_voice_id != null ? cartesia_voice_id : cartesiaVoiceId);
     const cartesiaVoiceIdClean = (voiceIdRaw != null ? String(voiceIdRaw) : '').trim();
+
+    // Optional: per-agent transfer destination (override). If empty, falls back to user default.
+    const transferRaw = (transfer_to_number !== undefined) ? transfer_to_number : transferToNumber;
+    const transferNorm = normalizeAiTransferDestination(transferRaw);
+    if (transferNorm && !isValidAiTransferDestination(transferNorm)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid transfer destination. Use E.164 phone format like +18005551234 or a SIP URI like sip:agent@domain.'
+      });
+    }
+    if (transferNorm && transferNorm.length > 64) {
+      return res.status(400).json({ success: false, message: 'Transfer destination is too long' });
+    }
 
     // Optional: per-agent background ambience
     const bgUrlRaw = (background_audio_url != null ? background_audio_url : backgroundAudioUrl);
@@ -8904,7 +8938,8 @@ app.post('/api/me/ai/agents', requireAuth, async (req, res) => {
 
     // Provision Pipecat secret set + agent
     try {
-      const operatorNumber = await getUserAiTransferDestination(userId);
+      const userTransfer = await getUserAiTransferDestination(userId);
+      const operatorNumber = transferNorm || normalizeAiTransferDestination(userTransfer);
       const secrets = buildPipecatSecrets({
         greeting,
         prompt,
@@ -8925,7 +8960,7 @@ app.post('/api/me/ai/agents', requireAuth, async (req, res) => {
 
     // Persist
     const [ins] = await pool.execute(
-      'INSERT INTO ai_agents (user_id, display_name, greeting, prompt, cartesia_voice_id, background_audio_url, background_audio_gain, pipecat_agent_name, pipecat_secret_set, pipecat_region, agent_action_token_hash, agent_action_token_enc, agent_action_token_iv, agent_action_token_tag, default_doc_template_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      'INSERT INTO ai_agents (user_id, display_name, greeting, prompt, cartesia_voice_id, background_audio_url, background_audio_gain, pipecat_agent_name, pipecat_secret_set, pipecat_region, agent_action_token_hash, agent_action_token_enc, agent_action_token_iv, agent_action_token_tag, transfer_to_number, default_doc_template_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
       [
         userId,
         name,
@@ -8941,6 +8976,7 @@ app.post('/api/me/ai/agents', requireAuth, async (req, res) => {
         actionTokenEnc,
         actionTokenIv,
         actionTokenTag,
+        transferNorm ? String(transferNorm) : null,
         defaultTplId
       ]
     );
@@ -8981,7 +9017,9 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
       background_audio_url,
       backgroundAudioUrl,
       background_audio_gain,
-      backgroundAudioGain
+      backgroundAudioGain,
+      transfer_to_number,
+      transferToNumber
     } = req.body || {};
 
     const [rows] = await pool.execute('SELECT * FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1', [agentId, userId]);
@@ -8991,6 +9029,24 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
     const nextName = display_name != null ? String(display_name || '').trim() : agent.display_name;
     const nextGreeting = greeting != null ? String(greeting || '') : (agent.greeting || '');
     const nextPrompt = prompt != null ? String(prompt || '') : (agent.prompt || '');
+
+    // Optional: per-agent transfer destination (override)
+    const transferRaw = (transfer_to_number !== undefined) ? transfer_to_number : transferToNumber;
+    const hasTransferUpdate = transferRaw !== undefined;
+    let nextTransfer = agent.transfer_to_number != null ? String(agent.transfer_to_number) : '';
+    if (hasTransferUpdate) {
+      const norm = normalizeAiTransferDestination(transferRaw);
+      if (norm && !isValidAiTransferDestination(norm)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid transfer destination. Use E.164 phone format like +18005551234 or a SIP URI like sip:agent@domain.'
+        });
+      }
+      if (norm && norm.length > 64) {
+        return res.status(400).json({ success: false, message: 'Transfer destination is too long' });
+      }
+      nextTransfer = norm;
+    }
     const voiceIdRaw = (cartesia_voice_id != null ? cartesia_voice_id : cartesiaVoiceId);
     const nextVoiceId = voiceIdRaw != null ? String(voiceIdRaw).trim() : (agent.cartesia_voice_id || '');
     const nextVoiceIdClean = nextVoiceId ? String(nextVoiceId).trim() : '';
@@ -9067,8 +9123,8 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
     }
 
     await pool.execute(
-      'UPDATE ai_agents SET display_name = ?, greeting = ?, prompt = ?, cartesia_voice_id = ?, background_audio_url = ?, background_audio_gain = ?, default_doc_template_id = ? WHERE id = ? AND user_id = ?',
-      [nextName, nextGreeting, nextPrompt, nextVoiceIdClean || null, nextBgUrl || null, nextBgGain, nextDefaultTpl, agentId, userId]
+      'UPDATE ai_agents SET display_name = ?, greeting = ?, prompt = ?, cartesia_voice_id = ?, background_audio_url = ?, background_audio_gain = ?, transfer_to_number = ?, default_doc_template_id = ? WHERE id = ? AND user_id = ?',
+      [nextName, nextGreeting, nextPrompt, nextVoiceIdClean || null, nextBgUrl || null, nextBgGain, nextTransfer ? String(nextTransfer) : null, nextDefaultTpl, agentId, userId]
     );
 
     // Update secret set + redeploy
@@ -9079,7 +9135,8 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
         label: 'ai.agents.update'
       });
 
-      const operatorNumber = await getUserAiTransferDestination(userId);
+      const userTransfer = await getUserAiTransferDestination(userId);
+      const operatorNumber = normalizeAiTransferDestination(nextTransfer) || normalizeAiTransferDestination(userTransfer);
       const publicBaseUrl = getPublicBaseUrlFromReq(req);
       const bgUrlResolved = await resolveAgentBackgroundAudioUrl({
         userId,
@@ -9162,7 +9219,8 @@ app.post('/api/me/ai/agents/:id/background-audio', requireAuth, aiAgentBackgroun
         label: 'ai.agents.background-audio.upload'
       });
 
-      const operatorNumber = await getUserAiTransferDestination(userId);
+      const userTransfer = await getUserAiTransferDestination(userId);
+      const operatorNumber = normalizeAiTransferDestination(agent.transfer_to_number) || normalizeAiTransferDestination(userTransfer);
       const publicBaseUrl = getPublicBaseUrlFromReq(req);
       const audioUrl = buildAgentBackgroundAudioPublicUrl({ baseUrl: publicBaseUrl, agentId, token });
 
@@ -9216,7 +9274,8 @@ app.delete('/api/me/ai/agents/:id/background-audio', requireAuth, async (req, re
         label: 'ai.agents.background-audio.delete'
       });
 
-      const operatorNumber = await getUserAiTransferDestination(userId);
+      const userTransfer = await getUserAiTransferDestination(userId);
+      const operatorNumber = normalizeAiTransferDestination(agent.transfer_to_number) || normalizeAiTransferDestination(userTransfer);
       const publicBaseUrl = getPublicBaseUrlFromReq(req);
       const bgUrlResolved = await resolveAgentBackgroundAudioUrl({
         userId,
@@ -9311,7 +9370,8 @@ app.post('/api/me/ai/agents/:id/redeploy', requireAuth, async (req, res) => {
         label: 'ai.agents.redeploy'
       });
 
-      const operatorNumber = await getUserAiTransferDestination(userId);
+      const userTransfer = await getUserAiTransferDestination(userId);
+      const operatorNumber = normalizeAiTransferDestination(agent.transfer_to_number) || normalizeAiTransferDestination(userTransfer);
       const publicBaseUrl = getPublicBaseUrlFromReq(req);
       const bgUrlResolved = await resolveAgentBackgroundAudioUrl({
         userId,
@@ -9542,7 +9602,8 @@ app.post('/api/me/ai/numbers/:id/assign', requireAuth, async (req, res) => {
         label: 'ai.numbers.assign'
       });
 
-      const operatorNumber = await getUserAiTransferDestination(userId);
+      const userTransfer = await getUserAiTransferDestination(userId);
+      const operatorNumber = normalizeAiTransferDestination(agent.transfer_to_number) || normalizeAiTransferDestination(userTransfer);
       const publicBaseUrl = getPublicBaseUrlFromReq(req);
       const bgUrlResolved = await resolveAgentBackgroundAudioUrl({
         userId,

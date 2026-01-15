@@ -428,7 +428,7 @@
 
             <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
               <h3 style="margin:0 0 10px 0">Call Transfer</h3>
-              <div class="muted" style="margin-bottom:10px">When a caller asks to be transferred, your AI agent can cold-transfer the call to this destination and then leave the call.</div>
+              <div class="muted" style="margin-bottom:10px">Default transfer destination used by agents without an override. You can set a different transfer destination per agent in the agent editor.</div>
               <div style="display:grid;grid-template-columns:1fr;gap:8px">
                 <input id="aiTransferNumber" type="text" placeholder="Transfer destination (E.164 like +18005551234 or sip:agent@domain)">
               </div>
@@ -736,6 +736,11 @@
         <div style="margin-bottom:10px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Custom Prompt</label>
           <textarea id="aiAgentPrompt" rows="4" placeholder="Instructions for the agent..." style="width:100%;box-sizing:border-box"></textarea>
+        </div>
+        <div style="margin-bottom:10px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Transfer Destination (optional)</label>
+          <input id="aiAgentTransferNumber" type="text" placeholder="Leave blank to use default (Tools → Call Transfer)" style="width:100%;box-sizing:border-box">
+          <div class="muted" style="margin-top:4px">Overrides the default transfer destination for this agent only.</div>
         </div>
         <div style="margin-bottom:10px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Default Document Template</label>
@@ -2635,6 +2640,7 @@
       $('#aiAgentName').value = agent ? String(agent.display_name || '') : '';
       $('#aiAgentGreeting').value = agent ? String(agent.greeting || '') : '';
       $('#aiAgentPrompt').value = agent ? String(agent.prompt || '') : '';
+      try { $('#aiAgentTransferNumber').value = agent ? String(agent.transfer_to_number || '') : ''; } catch {}
 
       // Background ambience
       const bgUrl = agent ? String(agent.background_audio_url || '') : '';
@@ -2761,6 +2767,7 @@
       const prompt = ($('#aiAgentPrompt').value || '');
       const cartesia_voice_id = getSelectedCartesiaVoiceId();
       const defaultTpl = ($('#aiAgentDefaultTemplateSelect').value || '').trim();
+      const transfer_to_number = ($('#aiAgentTransferNumber').value || '').trim();
 
       const background_audio_url = ($('#aiAgentBackgroundAudioUrl').value || '').trim();
       const bgGainRaw = ($('#aiAgentBackgroundAudioGain').value || '').trim();
@@ -2793,6 +2800,7 @@
             greeting,
             prompt,
             cartesia_voice_id: (cartesia_voice_id || null),
+            transfer_to_number,
             default_doc_template_id: defaultTpl ? defaultTpl : null,
             background_audio_url: background_audio_url ? background_audio_url : null,
             background_audio_gain
