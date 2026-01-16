@@ -4809,7 +4809,7 @@ app.post('/api/ai/agent/send-custom-physical-mail', async (req, res) => {
             `<recipients>` +
               `<address>` +
                 (corrected.name ? `<name>${xmlEscape(corrected.name)}</name>` : '') +
-                (corrected.organization ? `<organization>${xmlEscape(corrected.organization)}</organization>` : '') +
+                `<organization>${xmlEscape(String(corrected.organization || '').trim())}</organization>` +
                 `<address1>${xmlEscape(corrected.address1)}</address1>` +
                 (corrected.address2 ? `<address2>${xmlEscape(corrected.address2)}</address2>` : '<address2></address2>') +
                 (corrected.address3 ? `<address3>${xmlEscape(corrected.address3)}</address3>` : '<address3></address3>') +
@@ -4896,11 +4896,29 @@ app.post('/api/ai/agent/send-custom-physical-mail', async (req, res) => {
       } catch {}
 
       let msg = detail || (e?.message || 'Click2Mail send failed');
+
+      const responseSnippet = respText ? respText.slice(0, 2000) : '';
+      const cleanedSnippet = responseSnippet
+        ? responseSnippet
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 500)
+        : '';
+
+      if (!detail && cleanedSnippet) {
+        // axios's generic message isn't very helpful; prefer provider response if available.
+        if (/request failed with status code/i.test(msg) || msg === 'Click2Mail send failed') {
+          msg = cleanedSnippet;
+        } else if (!msg.includes(cleanedSnippet)) {
+          msg = `${msg}: ${cleanedSnippet}`;
+        }
+      }
+
       if (httpStatus && !/\(HTTP\s*\d+\)/i.test(msg) && !/status code\s*\d+/i.test(msg)) {
         msg = `${msg} (HTTP ${httpStatus})`;
       }
 
-      const responseSnippet = respText ? respText.slice(0, 2000) : '';
       if (responseSnippet) {
         payloadLog.click2mail_error = { status: httpStatus || null, body: responseSnippet };
       } else if (httpStatus) {
@@ -5612,7 +5630,7 @@ app.post('/api/ai/agent/send-physical-mail', async (req, res) => {
             `<recipients>` +
               `<address>` +
                 (corrected.name ? `<name>${xmlEscape(corrected.name)}</name>` : '') +
-                (corrected.organization ? `<organization>${xmlEscape(corrected.organization)}</organization>` : '') +
+                `<organization>${xmlEscape(String(corrected.organization || '').trim())}</organization>` +
                 `<address1>${xmlEscape(corrected.address1)}</address1>` +
                 (corrected.address2 ? `<address2>${xmlEscape(corrected.address2)}</address2>` : '<address2></address2>') +
                 (corrected.address3 ? `<address3>${xmlEscape(corrected.address3)}</address3>` : '<address3></address3>') +
@@ -5699,11 +5717,29 @@ app.post('/api/ai/agent/send-physical-mail', async (req, res) => {
       } catch {}
 
       let msg = detail || (e?.message || 'Click2Mail send failed');
+
+      const responseSnippet = respText ? respText.slice(0, 2000) : '';
+      const cleanedSnippet = responseSnippet
+        ? responseSnippet
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 500)
+        : '';
+
+      if (!detail && cleanedSnippet) {
+        // axios's generic message isn't very helpful; prefer provider response if available.
+        if (/request failed with status code/i.test(msg) || msg === 'Click2Mail send failed') {
+          msg = cleanedSnippet;
+        } else if (!msg.includes(cleanedSnippet)) {
+          msg = `${msg}: ${cleanedSnippet}`;
+        }
+      }
+
       if (httpStatus && !/\(HTTP\s*\d+\)/i.test(msg) && !/status code\s*\d+/i.test(msg)) {
         msg = `${msg} (HTTP ${httpStatus})`;
       }
 
-      const responseSnippet = respText ? respText.slice(0, 2000) : '';
       if (responseSnippet) {
         payloadLog.click2mail_error = { status: httpStatus || null, body: responseSnippet };
       } else if (httpStatus) {
