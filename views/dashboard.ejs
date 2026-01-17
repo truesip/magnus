@@ -513,6 +513,7 @@
       <a href="#buydid" id="tab-buydid"><img class="nav-icon" src="/Icon/Buy%20Numbers.ico" alt="" aria-hidden="true"><span>Buy Numbers</span></a>
       <a href="#ai" id="tab-ai"><img class="nav-icon" src="/Icon/AI%20Agent.ico" alt="" aria-hidden="true"><span>AI Agent</span></a>
       <a href="#trunk" id="tab-trunk"><img class="nav-icon" src="/Icon/call-forwarding.ico" alt="" aria-hidden="true"><span>Call Forwarding</span></a>
+      <a href="#inboundsip" id="tab-inboundsip"><img class="nav-icon" src="/Icon/SIP%20Accounts.ico" alt="" aria-hidden="true"><span>Inbound SIP</span></a>
       <a href="#cdr" id="tab-cdr"><img class="nav-icon" src="/Icon/Call%20History.ico" alt="" aria-hidden="true"><span>Call History</span></a>
       <a href="#billing" id="tab-billing"><img class="nav-icon" src="/Icon/Billing%20History.ico" alt="" aria-hidden="true"><span>Billing History</span></a>
       <a href="#profile" id="tab-profile"><img class="nav-icon" src="/Icon/Profile.ico" alt="" aria-hidden="true"><span>Profile</span></a>
@@ -634,6 +635,45 @@
         </div>
         <div id="trunk-empty" class="muted">Loading…</div>
       </section>
+
+      <section id="view-inboundsip" style="display:none">
+        <h2>Inbound SIP</h2>
+        <div class="muted" style="margin-bottom:10px">Create inbound SIP trunks (DIDWW Voice IN) and assign your purchased numbers to route calls to your PBX/SIP server.</div>
+
+        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
+          <div style="flex:1;min-width:340px">
+            <div class="toolbar">
+              <button id="createSipTrunkBtn" class="btn--warning">➕ Create SIP Trunk</button>
+              <input type="text" id="sipTrunkSearch" placeholder="Search by name or host..." style="width:220px;margin-left:auto">
+              <button id="sipTrunkSearchBtn">Search</button>
+              <button id="sipTrunkClearBtn" class="btn--muted">Clear</button>
+            </div>
+            <table id="sip-trunk-table" style="display:none">
+              <thead><tr><th>Name</th><th>Destination</th><th>Transport</th><th>Auth</th><th>Capacity</th><th>Actions</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div class="toolbar" id="sip-trunk-pager" style="display:none">
+              <button id="sipTrunkPrev">Prev</button>
+              <span id="sipTrunkPageInfo" class="muted"></span>
+              <button id="sipTrunkNext">Next</button>
+            </div>
+            <div id="sip-trunk-empty" class="muted">Loading…</div>
+          </div>
+
+          <div style="flex:1;min-width:340px">
+            <div class="toolbar">
+              <div class="muted">Assign purchased numbers to a SIP trunk</div>
+              <button id="sipTrunkAssignRefreshBtn" class="btn--muted" style="margin-left:auto">Refresh</button>
+            </div>
+            <table id="sip-trunk-dids-table" style="display:none">
+              <thead><tr><th>Number</th><th>Location</th><th>SIP Trunk</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div id="sip-trunk-dids-empty" class="muted">Loading…</div>
+          </div>
+        </div>
+      </section>
+
       <section id="view-buydid" style="display:none">
         <h2>Buy Numbers</h2>
         <div class="toolbar">
@@ -1009,6 +1049,84 @@
       </div>
     </div>
 
+    <!-- SIP Trunk (Inbound SIP) Modal -->
+    <div id="sipTrunkModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
+      <div style="background:#fff;padding:20px;border-radius:12px;width:460px;max-width:92%;max-height:92vh;overflow:auto">
+        <h3 style="margin:0 0 12px 0" id="sipTrunkModalTitle">📡 Create Inbound SIP Trunk</h3>
+
+        <div style="margin-bottom:10px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Trunk Name *</label>
+          <input id="sipTrunkName" type="text" placeholder="e.g. My PBX" style="width:100%;box-sizing:border-box">
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 120px;gap:10px;margin-bottom:10px">
+          <div>
+            <label style="display:block;margin-bottom:4px;font-size:13px">Host *</label>
+            <input id="sipTrunkHost" type="text" placeholder="pbx.example.com" style="width:100%;box-sizing:border-box">
+          </div>
+          <div>
+            <label style="display:block;margin-bottom:4px;font-size:13px">Port</label>
+            <input id="sipTrunkPort" type="number" placeholder="5060" min="1" max="65535" style="width:100%;box-sizing:border-box">
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 160px;gap:10px;margin-bottom:8px">
+          <div>
+            <label style="display:block;margin-bottom:4px;font-size:13px">User part of R-URI *</label>
+            <input id="sipTrunkUsername" type="text" placeholder="e.g. 1001 or {DID}" style="width:100%;box-sizing:border-box">
+            <div class="muted" style="margin-top:4px">Tip: you can use <code>{DID}</code> to pass the called number to your SIP server.</div>
+          </div>
+          <div>
+            <label style="display:block;margin-bottom:4px;font-size:13px">Transport</label>
+            <select id="sipTrunkTransport" style="width:100%;box-sizing:border-box">
+              <option value="udp">UDP</option>
+              <option value="tcp">TCP</option>
+              <option value="tls">TLS</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="margin-bottom:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input id="sipTrunkResolveRuri" type="checkbox"> Resolve rURI
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input id="sipTrunkAuthEnabled" type="checkbox"> Enable SIP Auth
+          </label>
+        </div>
+
+        <div id="sipTrunkAuthFields" style="display:none;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+          <div>
+            <label style="display:block;margin-bottom:4px;font-size:13px">Auth User</label>
+            <input id="sipTrunkAuthUser" type="text" placeholder="SIP auth username" style="width:100%;box-sizing:border-box">
+          </div>
+          <div>
+            <label style="display:block;margin-bottom:4px;font-size:13px">Auth Password</label>
+            <input id="sipTrunkAuthPassword" type="password" placeholder="Leave blank to keep current" style="width:100%;box-sizing:border-box">
+          </div>
+        </div>
+
+        <div style="margin-bottom:10px">
+          <label style="display:block;margin-bottom:4px;font-size:13px">Description</label>
+          <input id="sipTrunkDesc" type="text" placeholder="Optional description" style="width:100%;box-sizing:border-box">
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr;gap:10px;margin-bottom:12px">
+          <div>
+            <label style="display:block;margin-bottom:4px;font-size:13px">Capacity <span class="muted">(concurrent calls)</span></label>
+            <input id="sipTrunkCapacity" type="number" placeholder="Leave empty for unlimited" min="1" style="width:100%;box-sizing:border-box">
+          </div>
+        </div>
+
+        <input type="hidden" id="editSipTrunkId">
+
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button id="cancelSipTrunkBtn" class="btn--muted">Cancel</button>
+          <button id="confirmSipTrunkBtn" class="btn--warning">Create SIP Trunk</button>
+        </div>
+      </div>
+    </div>
+
     <!-- AI Agent Modal -->
     <div id="aiAgentModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
       <div class="ai-agent-modal-card" style="background:#fff;padding:14px;border-radius:10px;width:320px;max-width:92%;max-height:92vh;overflow:auto">
@@ -1112,8 +1230,8 @@
     const $ = (s)=>document.querySelector(s);
     var billingPage = 0;
     var billingPageSize = 20;
-    const tabs = {overview:$('#tab-overview'), profile:$('#tab-profile'), sip:$('#tab-sip'), trunk:$('#tab-trunk'), billing:$('#tab-billing'), buydid:$('#tab-buydid'), mydids:$('#tab-mydids'), ai:$('#tab-ai'), cdr:$('#tab-cdr')};
-    const views = {overview:$('#view-overview'), profile:$('#view-profile'), sip:$('#view-sip'), trunk:$('#view-trunk'), billing:$('#view-billing'), buydid:$('#view-buydid'), mydids:$('#view-mydids'), ai:$('#view-ai'), cdr:$('#view-cdr')};
+    const tabs = {overview:$('#tab-overview'), profile:$('#tab-profile'), sip:$('#tab-sip'), trunk:$('#tab-trunk'), inboundsip:$('#tab-inboundsip'), billing:$('#tab-billing'), buydid:$('#tab-buydid'), mydids:$('#tab-mydids'), ai:$('#tab-ai'), cdr:$('#tab-cdr')};
+    const views = {overview:$('#view-overview'), profile:$('#view-profile'), sip:$('#view-sip'), trunk:$('#view-trunk'), inboundsip:$('#view-inboundsip'), billing:$('#view-billing'), buydid:$('#view-buydid'), mydids:$('#view-mydids'), ai:$('#view-ai'), cdr:$('#view-cdr')};
     function activate(name){
       Object.keys(tabs).forEach(k=>{ tabs[k].classList.toggle('active',k===name); views[k].style.display = (k===name?'block':'none'); });
     }
@@ -1201,6 +1319,7 @@
     tabs.profile.addEventListener('click',e=>{e.preventDefault();activate('profile');loadProfile();});
     tabs.sip.addEventListener('click',e=>{e.preventDefault();activate('sip');sipPage=0;loadSip();});
     tabs.trunk.addEventListener('click',e=>{e.preventDefault();activate('trunk');trunkPage=0;loadTrunks();});
+    tabs.inboundsip.addEventListener('click',e=>{e.preventDefault();activate('inboundsip');sipTrunkPage=0;openInboundSip();});
     tabs.billing.addEventListener('click',e=>{e.preventDefault();activate('billing');billingPage=0;loadBillingHistory();});
     tabs.buydid.addEventListener('click',e=>{e.preventDefault();activate('buydid');loadCountries();});
     tabs.mydids.addEventListener('click',e=>{e.preventDefault();activate('mydids');mydidsPage=0;loadMyDids();});
@@ -3957,10 +4076,185 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     let trunksData = [];
     let trunkPage = 0; const trunkPageSize = 10;
     let trunkSearchQuery = '';
+
+    // Inbound SIP trunk management
+    let sipTrunksData = [];
+    let sipTrunkPage = 0; const sipTrunkPageSize = 10;
+    let sipTrunkSearchQuery = '';
+    let sipTrunkEditMode = false;
+
+    function sipTransportLabelFromId(id) {
+      const n = Number(id);
+      if (n === 1) return 'TCP';
+      if (n === 2) return 'UDP';
+      if (n === 3) return 'TLS';
+      return '';
+    }
+
+    function sipTrunkDestLabel(conf) {
+      const u = conf && conf.username ? String(conf.username) : '';
+      const h = conf && conf.host ? String(conf.host) : '';
+      const p = conf && conf.port != null && String(conf.port).trim() !== '' ? String(conf.port) : '';
+      if (!u && !h) return '';
+      return p ? `${u}@${h}:${p}` : `${u}@${h}`;
+    }
+
+    async function loadSipTrunks() {
+      try {
+        const r = await fetch('/api/me/didww/trunks?kind=sip');
+        const j = await r.json();
+        if (!j.success) {
+          $('#sip-trunk-empty').textContent = j.message || 'Failed to load SIP trunks';
+          return;
+        }
+        sipTrunksData = j.data || [];
+        renderSipTrunksTable();
+      } catch (e) {
+        console.error('[loadSipTrunks] error:', e);
+        $('#sip-trunk-empty').textContent = 'Failed to load SIP trunks';
+        $('#sip-trunk-empty').style.display = 'block';
+        $('#sip-trunk-table').style.display = 'none';
+        $('#sip-trunk-pager').style.display = 'none';
+      }
+    }
+
+    function renderSipTrunksTable() {
+      let filtered = sipTrunksData;
+      if (sipTrunkSearchQuery) {
+        const q = sipTrunkSearchQuery.toLowerCase();
+        filtered = sipTrunksData.filter(t => {
+          const attrs = t.attributes || {};
+          const conf = attrs.configuration?.attributes || attrs.configuration || {};
+          const name = (attrs.name || '').toLowerCase();
+          const host = (conf.host || '').toLowerCase();
+          const user = (conf.username || '').toLowerCase();
+          const desc = (attrs.description || '').toLowerCase();
+          return name.includes(q) || host.includes(q) || user.includes(q) || desc.includes(q);
+        });
+      }
+
+      const tbody = $('#sip-trunk-table tbody');
+      tbody.innerHTML = '';
+
+      const start = sipTrunkPage * sipTrunkPageSize;
+      const paginated = filtered.slice(start, start + sipTrunkPageSize);
+      const totalPages = Math.ceil(filtered.length / sipTrunkPageSize) || 1;
+
+      if (filtered.length === 0) {
+        $('#sip-trunk-empty').textContent = sipTrunkSearchQuery ? 'No SIP trunks match your search' : 'No SIP trunks yet - click “Create SIP Trunk” to add one.';
+        $('#sip-trunk-empty').style.display = 'block';
+        $('#sip-trunk-table').style.display = 'none';
+        $('#sip-trunk-pager').style.display = 'none';
+        return;
+      }
+
+      $('#sip-trunk-empty').style.display = 'none';
+      $('#sip-trunk-table').style.display = 'table';
+      $('#sip-trunk-pager').style.display = 'flex';
+      $('#sipTrunkPageInfo').textContent = sipTrunkSearchQuery ? `${filtered.length} result(s)` : `Page ${sipTrunkPage + 1} of ${totalPages}`;
+
+      paginated.forEach(t => {
+        const attrs = t.attributes || {};
+        const conf = attrs.configuration?.attributes || attrs.configuration || {};
+        const dest = sipTrunkDestLabel(conf);
+        const transport = sipTransportLabelFromId(conf.transport_protocol_id);
+        const auth = conf.auth_enabled ? 'Enabled' : '—';
+        const cap = attrs.capacity_limit || 'Unlimited';
+
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+          `<td>${escapeHtml(attrs.name || '')}</td>`+
+          `<td>${escapeHtml(dest)}</td>`+
+          `<td>${escapeHtml(transport)}</td>`+
+          `<td>${escapeHtml(auth)}</td>`+
+          `<td>${escapeHtml(String(cap))}</td>`+
+          `<td><button class=\"edit-siptrunk\" data-id=\"${escapeHtml(t.id)}\">Edit</button> <button class=\"del-siptrunk\" data-id=\"${escapeHtml(t.id)}\">Delete</button></td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function loadSipTrunkDids() {
+      try {
+        const r = await fetch('/api/me/didww/dids');
+        const j = await r.json();
+        if (!j || j.success === false) {
+          $('#sip-trunk-dids-empty').textContent = j?.message || 'Failed to load numbers';
+          $('#sip-trunk-dids-empty').style.display = 'block';
+          $('#sip-trunk-dids-table').style.display = 'none';
+          return;
+        }
+
+        const dids = Array.isArray(j.data) ? j.data : [];
+        const included = Array.isArray(j.included) ? j.included : [];
+
+        const trunksById = {};
+        included.forEach(it => {
+          if (it && it.type === 'voice_in_trunks') {
+            trunksById[it.id] = it;
+          }
+        });
+
+        const sipTrunksById = {};
+        (sipTrunksData || []).forEach(t => { if (t && t.id) sipTrunksById[t.id] = t; });
+
+        const tbody = $('#sip-trunk-dids-table tbody');
+        tbody.innerHTML = '';
+
+        if (!dids.length) {
+          $('#sip-trunk-dids-empty').textContent = 'No numbers yet. Purchase a number first in “Buy Numbers”.';
+          $('#sip-trunk-dids-empty').style.display = 'block';
+          $('#sip-trunk-dids-table').style.display = 'none';
+          return;
+        }
+
+        dids.forEach(d => {
+          const attrs = d.attributes || {};
+          const trunkRel = d.relationships?.voice_in_trunk?.data;
+          const currentTrunkId = trunkRel?.id || '';
+
+          // Location (best-effort from attributes)
+          const location = [attrs.city_name, attrs.region_name, attrs.country_name].filter(Boolean).join(', ');
+
+          let options = '<option value="">-- None --</option>';
+          // If current trunk is non-SIP, show it as the selected option so the user sees the current state.
+          if (currentTrunkId && !sipTrunksById[currentTrunkId]) {
+            const curObj = trunksById[currentTrunkId];
+            const curName = curObj?.attributes?.name || currentTrunkId;
+            options += `<option value=\"${escapeHtml(currentTrunkId)}\" selected>${escapeHtml(curName)} (non-SIP)</option>`;
+          }
+
+          (sipTrunksData || []).forEach(t => {
+            const name = t.attributes?.name || t.id;
+            const selected = t.id === currentTrunkId ? 'selected' : '';
+            options += `<option value=\"${escapeHtml(t.id)}\" ${selected}>${escapeHtml(name)}</option>`;
+          });
+
+          const tr = document.createElement('tr');
+          tr.innerHTML =
+            `<td>${escapeHtml(attrs.number || '')}</td>`+
+            `<td>${escapeHtml(location)}</td>`+
+            `<td><select class=\"sip-trunk-did-select\" data-did-id=\"${escapeHtml(d.id)}\" style=\"width:220px\">${options}</select></td>`;
+          tbody.appendChild(tr);
+        });
+
+        $('#sip-trunk-dids-empty').style.display = 'none';
+        $('#sip-trunk-dids-table').style.display = 'table';
+      } catch (e) {
+        console.error('[loadSipTrunkDids]', e);
+        $('#sip-trunk-dids-empty').textContent = 'Failed to load numbers';
+        $('#sip-trunk-dids-empty').style.display = 'block';
+        $('#sip-trunk-dids-table').style.display = 'none';
+      }
+    }
+
+    async function openInboundSip() {
+      await loadSipTrunks();
+      await loadSipTrunkDids();
+    }
     
     async function loadTrunks() {
       try {
-        const r = await fetch('/api/me/didww/trunks');
+        const r = await fetch('/api/me/didww/trunks?kind=pstn');
         const j = await r.json();
         
         if (!j.success) {
@@ -4031,6 +4325,249 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       trunkSearchQuery = $('#trunkSearch').value.trim();
       trunkPage = 0;
       renderTrunksTable();
+    });
+
+    // Inbound SIP search handlers
+    $('#sipTrunkSearchBtn').addEventListener('click', () => {
+      sipTrunkSearchQuery = $('#sipTrunkSearch').value.trim();
+      sipTrunkPage = 0;
+      renderSipTrunksTable();
+    });
+
+    $('#sipTrunkClearBtn').addEventListener('click', () => {
+      sipTrunkSearchQuery = '';
+      $('#sipTrunkSearch').value = '';
+      sipTrunkPage = 0;
+      renderSipTrunksTable();
+    });
+
+    $('#sipTrunkSearch').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        sipTrunkSearchQuery = $('#sipTrunkSearch').value.trim();
+        sipTrunkPage = 0;
+        renderSipTrunksTable();
+      }
+    });
+
+    // Inbound SIP pagination
+    document.getElementById('sipTrunkPrev').addEventListener('click', () => { if (sipTrunkPage > 0) { sipTrunkPage--; renderSipTrunksTable(); } });
+    document.getElementById('sipTrunkNext').addEventListener('click', () => {
+      const filteredLen = sipTrunkSearchQuery ? sipTrunksData.filter(t => {
+        const attrs = t.attributes || {};
+        const conf = attrs.configuration?.attributes || attrs.configuration || {};
+        const q = sipTrunkSearchQuery.toLowerCase();
+        return (attrs.name || '').toLowerCase().includes(q) || (conf.host || '').toLowerCase().includes(q) || (conf.username || '').toLowerCase().includes(q);
+      }).length : sipTrunksData.length;
+      if ((sipTrunkPage + 1) * sipTrunkPageSize < filteredLen) { sipTrunkPage++; renderSipTrunksTable(); }
+    });
+
+    // Inbound SIP modal handlers
+    function setSipTrunkAuthFieldsVisible() {
+      const enabled = !!($('#sipTrunkAuthEnabled') && $('#sipTrunkAuthEnabled').checked);
+      const wrap = document.getElementById('sipTrunkAuthFields');
+      if (!wrap) return;
+      wrap.style.display = enabled ? 'grid' : 'none';
+    }
+
+    $('#sipTrunkAuthEnabled').addEventListener('change', () => {
+      setSipTrunkAuthFieldsVisible();
+    });
+
+    $('#createSipTrunkBtn').addEventListener('click', () => {
+      sipTrunkEditMode = false;
+      $('#sipTrunkModalTitle').textContent = '📡 Create Inbound SIP Trunk';
+      $('#confirmSipTrunkBtn').textContent = 'Create SIP Trunk';
+      $('#editSipTrunkId').value = '';
+      $('#sipTrunkName').value = '';
+      $('#sipTrunkHost').value = '';
+      $('#sipTrunkPort').value = '5060';
+      $('#sipTrunkUsername').value = '{DID}';
+      $('#sipTrunkTransport').value = 'udp';
+      $('#sipTrunkResolveRuri').checked = false;
+      $('#sipTrunkAuthEnabled').checked = false;
+      $('#sipTrunkAuthUser').value = '';
+      $('#sipTrunkAuthPassword').value = '';
+      $('#sipTrunkDesc').value = '';
+      $('#sipTrunkCapacity').value = '';
+      setSipTrunkAuthFieldsVisible();
+      $('#sipTrunkModal').style.display = 'flex';
+      $('#sipTrunkName').focus();
+    });
+
+    $('#cancelSipTrunkBtn').addEventListener('click', () => {
+      $('#sipTrunkModal').style.display = 'none';
+    });
+
+    $('#sipTrunkModal').addEventListener('click', (e) => {
+      if (e.target === $('#sipTrunkModal')) {
+        $('#sipTrunkModal').style.display = 'none';
+      }
+    });
+
+    // Edit SIP trunk
+    document.addEventListener('click', async (ev) => {
+      if (ev.target && ev.target.classList.contains('edit-siptrunk')) {
+        const id = ev.target.getAttribute('data-id');
+        const t = (sipTrunksData || []).find(x => String(x.id) === String(id));
+        if (!t) return;
+
+        const attrs = t.attributes || {};
+        const conf = attrs.configuration?.attributes || attrs.configuration || {};
+
+        sipTrunkEditMode = true;
+        $('#sipTrunkModalTitle').textContent = '📡 Edit Inbound SIP Trunk';
+        $('#confirmSipTrunkBtn').textContent = 'Save Changes';
+        $('#editSipTrunkId').value = id;
+        $('#sipTrunkName').value = attrs.name || '';
+        $('#sipTrunkHost').value = conf.host || '';
+        $('#sipTrunkPort').value = conf.port != null ? String(conf.port) : '';
+        $('#sipTrunkUsername').value = conf.username || '';
+        // transport_protocol_id: 1 TCP, 2 UDP, 3 TLS
+        $('#sipTrunkTransport').value = (Number(conf.transport_protocol_id) === 1) ? 'tcp' : (Number(conf.transport_protocol_id) === 3 ? 'tls' : 'udp');
+        $('#sipTrunkResolveRuri').checked = !!conf.resolve_ruri;
+        $('#sipTrunkAuthEnabled').checked = !!conf.auth_enabled;
+        $('#sipTrunkAuthUser').value = conf.auth_user || '';
+        $('#sipTrunkAuthPassword').value = '';
+        $('#sipTrunkDesc').value = attrs.description || '';
+        $('#sipTrunkCapacity').value = attrs.capacity_limit != null ? String(attrs.capacity_limit) : '';
+        setSipTrunkAuthFieldsVisible();
+        $('#sipTrunkModal').style.display = 'flex';
+        $('#sipTrunkName').focus();
+      }
+    });
+
+    // Create or update SIP trunk
+    $('#confirmSipTrunkBtn').addEventListener('click', async () => {
+      const name = $('#sipTrunkName').value.trim();
+      const host = $('#sipTrunkHost').value.trim();
+      const port = $('#sipTrunkPort').value.trim();
+      const username = $('#sipTrunkUsername').value.trim();
+      const transport = $('#sipTrunkTransport').value;
+      const resolve_ruri = $('#sipTrunkResolveRuri').checked;
+      const auth_enabled = $('#sipTrunkAuthEnabled').checked;
+      const auth_user = $('#sipTrunkAuthUser').value.trim();
+      const auth_password = $('#sipTrunkAuthPassword').value;
+      const description = $('#sipTrunkDesc').value.trim();
+      const capacity_limit = $('#sipTrunkCapacity').value.trim();
+      const editId = $('#editSipTrunkId').value;
+
+      if (!name) return alert('Trunk name is required');
+      if (!host) return alert('Host is required');
+      if (!username) return alert('User part of R-URI is required');
+
+      const payload = {
+        name,
+        host,
+        username,
+        transport,
+        resolve_ruri,
+        description
+      };
+      if (port) payload.port = parseInt(port, 10);
+      if (capacity_limit) payload.capacity_limit = parseInt(capacity_limit, 10);
+      else if (sipTrunkEditMode) payload.capacity_limit = null;
+
+      if (auth_enabled) {
+        payload.auth_enabled = true;
+        if (auth_user) payload.auth_user = auth_user;
+        // For edits: leave blank to keep current
+        if (auth_password) payload.auth_password = auth_password;
+      } else {
+        payload.auth_enabled = false;
+      }
+
+      $('#confirmSipTrunkBtn').disabled = true;
+      $('#confirmSipTrunkBtn').textContent = sipTrunkEditMode ? 'Saving...' : 'Creating...';
+
+      try {
+        let r;
+        if (sipTrunkEditMode && editId) {
+          r = await fetch(`/api/me/didww/sip-trunks/${encodeURIComponent(editId)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+        } else {
+          r = await fetch('/api/me/didww/sip-trunks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+        }
+
+        const j = await r.json();
+        if (!j.success) {
+          alert(j.message || (sipTrunkEditMode ? 'Update failed' : 'Create failed'));
+          return;
+        }
+
+        showToast(sipTrunkEditMode ? 'SIP trunk updated successfully!' : `SIP trunk "${name}" created successfully!`);
+        $('#sipTrunkModal').style.display = 'none';
+        await loadSipTrunks();
+        await loadSipTrunkDids();
+      } catch (e) {
+        console.error('[siptrunk] error:', e);
+        alert(sipTrunkEditMode ? 'Failed to update SIP trunk' : 'Failed to create SIP trunk');
+      } finally {
+        $('#confirmSipTrunkBtn').disabled = false;
+        $('#confirmSipTrunkBtn').textContent = sipTrunkEditMode ? 'Save Changes' : 'Create SIP Trunk';
+      }
+    });
+
+    // Delete SIP trunk
+    document.addEventListener('click', async (ev) => {
+      if (ev.target && ev.target.classList.contains('del-siptrunk')) {
+        const id = ev.target.getAttribute('data-id');
+        if (!confirm('Delete this SIP trunk?')) return;
+        try {
+          const r = await fetch(`/api/me/didww/trunks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          const j = await r.json();
+          if (!j.success) return alert(j.message || 'Delete failed');
+          showToast('SIP trunk deleted successfully!');
+          await loadSipTrunks();
+          await loadSipTrunkDids();
+        } catch (e) {
+          console.error('[deleteSipTrunk] error:', e);
+          alert('Failed to delete SIP trunk');
+        }
+      }
+    });
+
+    // DID assignment to SIP trunks
+    document.addEventListener('change', async (ev) => {
+      if (ev.target && ev.target.classList.contains('sip-trunk-did-select')) {
+        const select = ev.target;
+        const didId = select.getAttribute('data-did-id');
+        const trunkId = select.value;
+
+        select.disabled = true;
+        try {
+          const r = await fetch(`/api/me/didww/dids/${encodeURIComponent(didId)}/trunk`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ trunk_id: trunkId || null })
+          });
+          const j = await r.json();
+          if (!j.success) {
+            alert(j.message || 'Failed to update trunk');
+            await loadSipTrunkDids();
+            return;
+          }
+          showToast('Inbound routing updated!');
+        } catch (e) {
+          console.error('[sip.did.trunk]', e);
+          alert('Failed to update trunk');
+          await loadSipTrunkDids();
+        } finally {
+          select.disabled = false;
+        }
+      }
+    });
+
+    $('#sipTrunkAssignRefreshBtn').addEventListener('click', async (e) => {
+      e.preventDefault();
+      await loadSipTrunks();
+      await loadSipTrunkDids();
     });
     
     $('#trunkClearBtn').addEventListener('click', () => {
@@ -4582,7 +5119,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         // Fetch DIDs and voice trunks in parallel
         const [didsRes, trunksRes] = await Promise.all([
           fetch('/api/me/didww/dids'),
-          fetch('/api/me/didww/trunks')
+          fetch('/api/me/didww/trunks?kind=all')
         ]);
         const didsJson = await didsRes.json();
         const trunksJson = await trunksRes.json();

@@ -15309,6 +15309,33 @@ async function didwwApiCall({ method, path, body }) {
   }
 }
 
+function didwwVoiceInTrunkConfigType(trunk) {
+  try {
+    const t = trunk?.attributes?.configuration?.type;
+    return t ? String(t).trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+function didwwTransportProtocolIdFromInput(val) {
+  // DIDWW transport_protocol_id: 1 TCP, 2 UDP, 3 TLS
+  const raw = String(val ?? '').trim();
+  if (!raw) return null;
+
+  // Accept numeric ids
+  if (/^\d+$/.test(raw)) {
+    const n = parseInt(raw, 10);
+    if (n === 1 || n === 2 || n === 3) return n;
+  }
+
+  const s = raw.toLowerCase();
+  if (s === 'tcp') return 1;
+  if (s === 'udp') return 2;
+  if (s === 'tls') return 3;
+  return null;
+}
+
 // Helper to get capacity pool ID (supports ID or name lookup)
 let cachedCapacityPoolId = null;
 async function getCapacityPoolId() {
@@ -15428,26 +15455,36 @@ app.get('/api/me/didww/pops', requireAuth, async (req, res) => {
 });
 
 // List voice in trunks (only those owned by the current user)
+// Optional filter: ?kind=all|pstn|sip
 app.get('/api/me/didww/trunks', requireAuth, async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     const userId = req.session.userId;
-    
+    const kindRaw = String(req.query.kind || 'all').trim().toLowerCase();
+    const kind = (kindRaw === 'pstn' || kindRaw === 'sip') ? kindRaw : 'all';
+
     // Get trunk IDs owned by this user from local DB
     const [userTrunks] = await pool.execute('SELECT didww_trunk_id FROM user_trunks WHERE user_id = ?', [userId]);
     const ownedTrunkIds = userTrunks.map(t => t.didww_trunk_id);
-    
+
     if (ownedTrunkIds.length === 0) {
       return res.json({ success: true, data: [], included: [] });
     }
-    
+
     // Fetch full trunk details from DIDWW API
     const data = await didwwApiCall({ method: 'GET', path: '/voice_in_trunks?include=pop' });
     const allTrunks = data.data || [];
-    
+
     // Filter to only include trunks owned by this user
-    const userOwnedTrunks = allTrunks.filter(t => ownedTrunkIds.includes(t.id));
-    
+    let userOwnedTrunks = allTrunks.filter(t => ownedTrunkIds.includes(t.id));
+
+    // Further filter by configuration type when requested
+    if (kind === 'pstn') {
+      userOwnedTrunks = userOwnedTrunks.filter(t => didwwVoiceInTrunkConfigType(t) === 'pstn_configurations');
+    } else if (kind === 'sip') {
+      userOwnedTrunks = userOwnedTrunks.filter(t => didwwVoiceInTrunkConfigType(t) === 'sip_configurations');
+    }
+
     return res.json({ success: true, data: userOwnedTrunks, included: data.included || [] });
   } catch (e) {
     if (DEBUG) console.error('[didww.trunks.list] error:', e.response?.data || e.message || e);
@@ -15455,12 +15492,12 @@ app.get('/api/me/didww/trunks', requireAuth, async (req, res) => {
   }
 });
 
-// Create voice in trunk
+// Create voice in trunk (PSTN call forwarding)
 app.post('/api/me/didww/trunks', requireAuth, async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     const userId = req.session.userId;
-    
+
     const { name, description, capacity_limit, pop_id, dst } = req.body || {};
     if (!name) {
       return res.status(400).json({ success: false, message: 'Trunk name is required' });
@@ -15471,7 +15508,7 @@ app.post('/api/me/didww/trunks', requireAuth, async (req, res) => {
     if (!/^\d{11}$/.test(String(dst))) {
       return res.status(400).json({ success: false, message: 'PSTN destination number must be 11 digits (numbers only).' });
     }
-    
+
     // Build attributes with required PSTN configuration
     const attributes = {
       name,
@@ -15482,18 +15519,18 @@ app.post('/api/me/didww/trunks', requireAuth, async (req, res) => {
         }
       }
     };
-    
+
     // Add optional attributes
     if (description) attributes.description = description;
     if (capacity_limit) attributes.capacity_limit = parseInt(capacity_limit, 10);
-    
+
     const body = {
       data: {
         type: 'voice_in_trunks',
         attributes
       }
     };
-    
+
     // Add POP relationship if provided
     if (pop_id) {
       body.data.relationships = {
@@ -15502,10 +15539,10 @@ app.post('/api/me/didww/trunks', requireAuth, async (req, res) => {
         }
       };
     }
-    
+
     const data = await didwwApiCall({ method: 'POST', path: '/voice_in_trunks', body });
     const createdTrunk = data.data || {};
-    
+
     // Save trunk ownership to local DB
     if (createdTrunk.id) {
       try {
@@ -15522,11 +15559,265 @@ app.post('/api/me/didww/trunks', requireAuth, async (req, res) => {
         return res.status(500).json({ success: false, message: 'Failed to save trunk ownership' });
       }
     }
-    
+
     return res.json({ success: true, data: createdTrunk });
   } catch (e) {
     if (DEBUG) console.error('[didww.trunk.create] error:', e.response?.data || e.message || e);
     const errMsg = e.response?.data?.errors?.[0]?.detail || 'Failed to create trunk';
+    return res.status(500).json({ success: false, message: errMsg });
+  }
+});
+
+// Create inbound SIP trunk (Voice IN trunk with sip_configurations)
+app.post('/api/me/didww/sip-trunks', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const {
+      name,
+      description,
+      capacity_limit,
+      pop_id,
+      username,
+      host,
+      port,
+      transport,
+      transport_protocol_id,
+      resolve_ruri,
+      auth_enabled,
+      auth_user,
+      auth_password
+    } = req.body || {};
+
+    const trunkName = String(name || '').trim();
+    const trunkHost = String(host || '').trim();
+    const trunkUsername = String(username || '').trim();
+
+    if (!trunkName) return res.status(400).json({ success: false, message: 'Trunk name is required' });
+    if (!trunkHost) return res.status(400).json({ success: false, message: 'Host is required' });
+    if (!trunkUsername) return res.status(400).json({ success: false, message: 'User part of R-URI (username) is required' });
+
+    let trunkPort = null;
+    if (port != null && String(port).trim() !== '') {
+      const n = parseInt(String(port), 10);
+      if (!Number.isFinite(n) || n < 1 || n > 65535) {
+        return res.status(400).json({ success: false, message: 'Port must be a valid integer between 1 and 65535' });
+      }
+      trunkPort = n;
+    }
+
+    const tpid = didwwTransportProtocolIdFromInput(transport_protocol_id != null ? transport_protocol_id : transport);
+    if (!tpid) {
+      return res.status(400).json({ success: false, message: 'Transport must be one of UDP, TCP, or TLS' });
+    }
+
+    const wantResolveRuri = (resolve_ruri === true) || String(resolve_ruri || '').trim() === '1' || String(resolve_ruri || '').toLowerCase() === 'true';
+
+    const authEnabled =
+      (auth_enabled === true) ||
+      String(auth_enabled || '').trim() === '1' ||
+      String(auth_enabled || '').toLowerCase() === 'true' ||
+      (!!String(auth_user || '').trim() && !!String(auth_password || '').trim());
+
+    const configurationAttributes = {
+      username: trunkUsername,
+      host: trunkHost,
+      transport_protocol_id: tpid,
+      ...(trunkPort != null ? { port: trunkPort } : {}),
+      resolve_ruri: wantResolveRuri,
+      auth_enabled: !!authEnabled,
+      ...(authEnabled && String(auth_user || '').trim() ? { auth_user: String(auth_user).trim() } : {}),
+      ...(authEnabled && String(auth_password || '').trim() ? { auth_password: String(auth_password).trim() } : {})
+    };
+
+    const attributes = {
+      name: trunkName,
+      configuration: {
+        type: 'sip_configurations',
+        attributes: configurationAttributes
+      }
+    };
+
+    if (description != null && String(description).trim() !== '') attributes.description = String(description).trim();
+    if (capacity_limit != null && String(capacity_limit).trim() !== '') {
+      const cap = parseInt(String(capacity_limit), 10);
+      if (!Number.isFinite(cap) || cap < 1) {
+        return res.status(400).json({ success: false, message: 'Capacity must be a positive integer' });
+      }
+      attributes.capacity_limit = cap;
+    }
+
+    const body = {
+      data: {
+        type: 'voice_in_trunks',
+        attributes
+      }
+    };
+
+    if (pop_id) {
+      body.data.relationships = {
+        pop: {
+          data: { type: 'pops', id: pop_id }
+        }
+      };
+    }
+
+    const data = await didwwApiCall({ method: 'POST', path: '/voice_in_trunks', body });
+    const createdTrunk = data.data || {};
+
+    // Save trunk ownership to local DB
+    if (createdTrunk.id) {
+      try {
+        const attrs = createdTrunk.attributes || {};
+        await pool.execute(
+          'INSERT INTO user_trunks (user_id, didww_trunk_id, name, dst, description, capacity_limit) VALUES (?, ?, ?, ?, ?, ?)',
+          [userId, createdTrunk.id, attrs.name || trunkName, null, attrs.description || (description || null), attrs.capacity_limit || (attributes.capacity_limit || null)]
+        );
+        if (DEBUG) console.log('[didww.siptrunk.create] Saved trunk ownership:', { userId, trunkId: createdTrunk.id });
+      } catch (dbErr) {
+        console.error('[didww.siptrunk.create] Failed to save trunk ownership:', dbErr.message);
+        // Trunk was created in DIDWW but failed to save locally - try to delete it
+        try { await didwwApiCall({ method: 'DELETE', path: `/voice_in_trunks/${createdTrunk.id}` }); } catch {}
+        return res.status(500).json({ success: false, message: 'Failed to save trunk ownership' });
+      }
+    }
+
+    return res.json({ success: true, data: createdTrunk });
+  } catch (e) {
+    if (DEBUG) console.error('[didww.siptrunk.create] error:', e.response?.data || e.message || e);
+    const errMsg = e.response?.data?.errors?.[0]?.detail || e.message || 'Failed to create SIP trunk';
+    return res.status(500).json({ success: false, message: errMsg });
+  }
+});
+
+// Update inbound SIP trunk (only if owned by current user)
+app.patch('/api/me/didww/sip-trunks/:id', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const trunkId = String(req.params.id || '').trim();
+    if (!trunkId) return res.status(400).json({ success: false, message: 'Missing trunk id' });
+
+    // Verify ownership
+    const [owned] = await pool.execute('SELECT id FROM user_trunks WHERE user_id = ? AND didww_trunk_id = ? LIMIT 1', [userId, trunkId]);
+    if (!owned || owned.length === 0) {
+      return res.status(403).json({ success: false, message: 'You do not have permission to update this trunk' });
+    }
+
+    const {
+      name,
+      description,
+      capacity_limit,
+      username,
+      host,
+      port,
+      transport,
+      transport_protocol_id,
+      resolve_ruri,
+      auth_enabled,
+      auth_user,
+      auth_password
+    } = req.body || {};
+
+    const attributes = {};
+
+    if (name != null && String(name).trim() !== '') attributes.name = String(name).trim();
+    if (description !== undefined) attributes.description = (description == null ? null : String(description));
+    if (capacity_limit !== undefined) {
+      if (capacity_limit == null || String(capacity_limit).trim() === '') {
+        attributes.capacity_limit = null;
+      } else {
+        const cap = parseInt(String(capacity_limit), 10);
+        if (!Number.isFinite(cap) || cap < 1) {
+          return res.status(400).json({ success: false, message: 'Capacity must be a positive integer' });
+        }
+        attributes.capacity_limit = cap;
+      }
+    }
+
+    // SIP configuration updates
+    const cfg = {};
+
+    if (username != null && String(username).trim() !== '') cfg.username = String(username).trim();
+    if (host != null && String(host).trim() !== '') cfg.host = String(host).trim();
+
+    if (port !== undefined) {
+      if (port == null || String(port).trim() === '') {
+        cfg.port = null;
+      } else {
+        const n = parseInt(String(port), 10);
+        if (!Number.isFinite(n) || n < 1 || n > 65535) {
+          return res.status(400).json({ success: false, message: 'Port must be a valid integer between 1 and 65535' });
+        }
+        cfg.port = n;
+      }
+    }
+
+    if (transport != null || transport_protocol_id != null) {
+      const tpid = didwwTransportProtocolIdFromInput(transport_protocol_id != null ? transport_protocol_id : transport);
+      if (!tpid) {
+        return res.status(400).json({ success: false, message: 'Transport must be one of UDP, TCP, or TLS' });
+      }
+      cfg.transport_protocol_id = tpid;
+    }
+
+    if (resolve_ruri !== undefined) {
+      cfg.resolve_ruri = (resolve_ruri === true) || String(resolve_ruri || '').trim() === '1' || String(resolve_ruri || '').toLowerCase() === 'true';
+    }
+
+    if (auth_enabled !== undefined || auth_user !== undefined || auth_password !== undefined) {
+      const authEnabled =
+        (auth_enabled === true) ||
+        String(auth_enabled || '').trim() === '1' ||
+        String(auth_enabled || '').toLowerCase() === 'true' ||
+        (!!String(auth_user || '').trim() && !!String(auth_password || '').trim());
+
+      cfg.auth_enabled = !!authEnabled;
+      if (auth_user !== undefined) cfg.auth_user = (auth_user == null ? null : String(auth_user));
+      if (auth_password !== undefined) cfg.auth_password = (auth_password == null ? null : String(auth_password));
+    }
+
+    if (Object.keys(cfg).length) {
+      attributes.configuration = {
+        type: 'sip_configurations',
+        attributes: cfg
+      };
+    }
+
+    if (!Object.keys(attributes).length) {
+      return res.status(400).json({ success: false, message: 'No changes provided' });
+    }
+
+    const body = {
+      data: {
+        type: 'voice_in_trunks',
+        id: trunkId,
+        attributes
+      }
+    };
+
+    const data = await didwwApiCall({ method: 'PATCH', path: `/voice_in_trunks/${trunkId}`, body });
+
+    // Update local DB (best-effort)
+    try {
+      const updates = [];
+      const values = [];
+      if (attributes.name) { updates.push('name = ?'); values.push(attributes.name); }
+      if (description !== undefined) { updates.push('description = ?'); values.push(description == null ? null : String(description)); }
+      if (capacity_limit !== undefined) { updates.push('capacity_limit = ?'); values.push(attributes.capacity_limit ?? null); }
+      if (updates.length > 0) {
+        values.push(trunkId);
+        await pool.execute(`UPDATE user_trunks SET ${updates.join(', ')} WHERE didww_trunk_id = ?`, values);
+      }
+    } catch (dbErr) {
+      if (DEBUG) console.warn('[didww.siptrunk.update] Failed to update local DB:', dbErr.message);
+    }
+
+    return res.json({ success: true, data: data.data || {} });
+  } catch (e) {
+    if (DEBUG) console.error('[didww.siptrunk.update] error:', e.response?.data || e.message || e);
+    const errMsg = e.response?.data?.errors?.[0]?.detail || e.message || 'Failed to update SIP trunk';
     return res.status(500).json({ success: false, message: errMsg });
   }
 });
