@@ -289,6 +289,11 @@ const CLICK2MAIL_DEFAULT_TRACKING_TYPE = String(process.env.CLICK2MAIL_DEFAULT_T
 const AI_MAIL_MARKUP_FLAT = Math.max(0, parseFloat(process.env.AI_MAIL_MARKUP_FLAT || '0') || 0);
 const AI_MAIL_MARKUP_PERCENT = Math.max(0, parseFloat(process.env.AI_MAIL_MARKUP_PERCENT || '0') || 0);
 
+// Physical mail is high-risk; require an explicit opt-in.
+const AI_PHYSICAL_MAIL_ENABLED = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.AI_PHYSICAL_MAIL_ENABLED || '').trim().toLowerCase()
+);
+
 // Optional: platform fees for AI tools (USD). Set to 0 to disable charging for that action.
 const AI_EMAIL_SEND_COST = Math.max(0, parseFloat(process.env.AI_EMAIL_SEND_COST || '1') || 0);
 const AI_VIDEO_MEETING_LINK_COST = Math.max(0, parseFloat(process.env.AI_VIDEO_MEETING_LINK_COST || '5') || 0);
@@ -4349,6 +4354,9 @@ app.post('/api/ai/agent/send-custom-physical-mail', async (req, res) => {
   let sendRowId = null;
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    if (!AI_PHYSICAL_MAIL_ENABLED) {
+      return res.status(403).json({ success: false, message: 'Physical mail is disabled by configuration' });
+    }
 
     const token = parseBearerToken(req.headers.authorization);
     if (!token) return res.status(401).json({ success: false, message: 'Missing Authorization bearer token' });
@@ -4778,6 +4786,11 @@ app.post('/api/ai/agent/send-custom-physical-mail', async (req, res) => {
       const returnPostal = String(returnAddrRow.postal_code || '').trim();
       const returnCountry = normalizeClick2MailCountry(returnAddrRow.country || 'US');
 
+      // Click2Mail batch XSD expects <name> as the first element within returnAddress/address.
+      const returnNameFinal = (returnName || returnOrg || 'Sender').trim();
+      const recipientNameFinal = String(corrected.name || corrected.organization || 'Recipient').trim();
+      const recipientOrg = String(corrected.organization || '').trim();
+
       const batchXml =
         `<?xml version="1.0" encoding="UTF-8"?>` +
         `<batch xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">` +
@@ -4797,7 +4810,7 @@ app.post('/api/ai/agent/send-custom-physical-mail', async (req, res) => {
               `<mailClass>${xmlEscape(mailClass)}</mailClass>` +
             `</printProductionOptions>` +
             `<returnAddress>` +
-              (returnName ? `<name>${xmlEscape(returnName)}</name>` : '') +
+              `<name>${xmlEscape(returnNameFinal)}</name>` +
               `<organization>${xmlEscape(returnOrg)}</organization>` +
               `<address1>${xmlEscape(returnAddress1)}</address1>` +
               (returnAddress2 ? `<address2>${xmlEscape(returnAddress2)}</address2>` : '<address2></address2>') +
@@ -4808,8 +4821,8 @@ app.post('/api/ai/agent/send-custom-physical-mail', async (req, res) => {
             `</returnAddress>` +
             `<recipients>` +
               `<address>` +
-                (corrected.name ? `<name>${xmlEscape(corrected.name)}</name>` : '') +
-                `<organization>${xmlEscape(String(corrected.organization || '').trim())}</organization>` +
+                `<name>${xmlEscape(recipientNameFinal)}</name>` +
+                `<organization>${xmlEscape(recipientOrg)}</organization>` +
                 `<address1>${xmlEscape(corrected.address1)}</address1>` +
                 (corrected.address2 ? `<address2>${xmlEscape(corrected.address2)}</address2>` : '<address2></address2>') +
                 (corrected.address3 ? `<address3>${xmlEscape(corrected.address3)}</address3>` : '<address3></address3>') +
@@ -5084,6 +5097,9 @@ app.post('/api/ai/agent/send-physical-mail', async (req, res) => {
   let sendRowId = null;
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    if (!AI_PHYSICAL_MAIL_ENABLED) {
+      return res.status(403).json({ success: false, message: 'Physical mail is disabled by configuration' });
+    }
 
     const token = parseBearerToken(req.headers.authorization);
     if (!token) return res.status(401).json({ success: false, message: 'Missing Authorization bearer token' });
@@ -5599,6 +5615,11 @@ app.post('/api/ai/agent/send-physical-mail', async (req, res) => {
       const returnPostal = String(returnAddrRow.postal_code || '').trim();
       const returnCountry = normalizeClick2MailCountry(returnAddrRow.country || 'US');
 
+      // Click2Mail batch XSD expects <name> as the first element within returnAddress/address.
+      const returnNameFinal = (returnName || returnOrg || 'Sender').trim();
+      const recipientNameFinal = String(corrected.name || corrected.organization || 'Recipient').trim();
+      const recipientOrg = String(corrected.organization || '').trim();
+
       const batchXml =
         `<?xml version="1.0" encoding="UTF-8"?>` +
         `<batch xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">` +
@@ -5618,7 +5639,7 @@ app.post('/api/ai/agent/send-physical-mail', async (req, res) => {
               `<mailClass>${xmlEscape(mailClass)}</mailClass>` +
             `</printProductionOptions>` +
             `<returnAddress>` +
-              (returnName ? `<name>${xmlEscape(returnName)}</name>` : '') +
+              `<name>${xmlEscape(returnNameFinal)}</name>` +
               `<organization>${xmlEscape(returnOrg)}</organization>` +
               `<address1>${xmlEscape(returnAddress1)}</address1>` +
               (returnAddress2 ? `<address2>${xmlEscape(returnAddress2)}</address2>` : '<address2></address2>') +
@@ -5629,8 +5650,8 @@ app.post('/api/ai/agent/send-physical-mail', async (req, res) => {
             `</returnAddress>` +
             `<recipients>` +
               `<address>` +
-                (corrected.name ? `<name>${xmlEscape(corrected.name)}</name>` : '') +
-                `<organization>${xmlEscape(String(corrected.organization || '').trim())}</organization>` +
+                `<name>${xmlEscape(recipientNameFinal)}</name>` +
+                `<organization>${xmlEscape(recipientOrg)}</organization>` +
                 `<address1>${xmlEscape(corrected.address1)}</address1>` +
                 (corrected.address2 ? `<address2>${xmlEscape(corrected.address2)}</address2>` : '<address2></address2>') +
                 (corrected.address3 ? `<address3>${xmlEscape(corrected.address3)}</address3>` : '<address3></address3>') +
@@ -6515,6 +6536,9 @@ function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl,
   if (akoolVisionLlmAttachMode != null && String(akoolVisionLlmAttachMode).trim()) secrets.AKOOL_VISION_LLM_ATTACH_MODE = String(akoolVisionLlmAttachMode).trim();
   if (akoolVisionLlmMaxDim != null && String(akoolVisionLlmMaxDim).trim()) secrets.AKOOL_VISION_LLM_MAX_DIM = String(akoolVisionLlmMaxDim).trim();
   if (akoolVisionLlmJpegQuality != null && String(akoolVisionLlmJpegQuality).trim()) secrets.AKOOL_VISION_LLM_JPEG_QUALITY = String(akoolVisionLlmJpegQuality).trim();
+
+  const physicalMailEnabled = String(process.env.AI_PHYSICAL_MAIL_ENABLED || '').trim();
+  if (physicalMailEnabled) secrets.AI_PHYSICAL_MAIL_ENABLED = physicalMailEnabled;
 
   const portalBase = String(portalBaseUrl || process.env.PORTAL_BASE_URL || process.env.PUBLIC_BASE_URL || '').trim();
   if (portalBase) secrets.PORTAL_BASE_URL = portalBase;

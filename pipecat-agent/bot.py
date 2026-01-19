@@ -327,6 +327,11 @@ async def bot(session_args: Any):
     portal_base_url = _env("PORTAL_BASE_URL", "").strip().rstrip("/")
     portal_token = _env("PORTAL_AGENT_ACTION_TOKEN", "").strip()
 
+    # Physical mail is high-risk; keep disabled unless explicitly enabled.
+    physical_mail_enabled = (
+        _env("AI_PHYSICAL_MAIL_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+    )
+
     tools = []
     has_send_document_tool = False
     has_send_custom_email_tool = False
@@ -447,64 +452,65 @@ async def bot(session_args: Any):
         )
         has_send_video_meeting_tool = True
 
-        tools.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": "send_physical_mail",
-                    "description": "Send a physical letter via USPS to the caller using the business owner's return address and a template.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "to_name": {"type": "string", "description": "Recipient name"},
-                            "to_organization": {"type": "string", "description": "Recipient organization (optional)"},
-                            "to_address1": {"type": "string", "description": "Street address line 1"},
-                            "to_address2": {"type": "string", "description": "Street address line 2 (optional)"},
-                            "to_address3": {"type": "string", "description": "Street address line 3 (optional)"},
-                            "to_city": {"type": "string", "description": "City"},
-                            "to_state": {"type": "string", "description": "State (2-letter for US)"},
-                            "to_postal_code": {"type": "string", "description": "ZIP / postal code"},
-                            "to_country": {"type": "string", "description": "Country code (default: US)"},
-                            "template_id": {"type": "integer", "description": "Optional template id override"},
-                            "variables": {
-                                "type": "object",
-                                "description": "Template variables mapping. Keys correspond to placeholders inside [[...]] in the DOCX template (e.g. Name, Address).",
+        if physical_mail_enabled:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "send_physical_mail",
+                        "description": "Send a physical letter via USPS to the caller using the business owner's return address and a template.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "to_name": {"type": "string", "description": "Recipient name"},
+                                "to_organization": {"type": "string", "description": "Recipient organization (optional)"},
+                                "to_address1": {"type": "string", "description": "Street address line 1"},
+                                "to_address2": {"type": "string", "description": "Street address line 2 (optional)"},
+                                "to_address3": {"type": "string", "description": "Street address line 3 (optional)"},
+                                "to_city": {"type": "string", "description": "City"},
+                                "to_state": {"type": "string", "description": "State (2-letter for US)"},
+                                "to_postal_code": {"type": "string", "description": "ZIP / postal code"},
+                                "to_country": {"type": "string", "description": "Country code (default: US)"},
+                                "template_id": {"type": "integer", "description": "Optional template id override"},
+                                "variables": {
+                                    "type": "object",
+                                    "description": "Template variables mapping. Keys correspond to placeholders inside [[...]] in the DOCX template (e.g. Name, Address).",
+                                },
                             },
+                            "required": ["to_address1", "to_city", "to_state", "to_postal_code"],
                         },
-                        "required": ["to_address1", "to_city", "to_state", "to_postal_code"],
                     },
-                },
-            }
-        )
-        has_send_physical_mail_tool = True
+                }
+            )
+            has_send_physical_mail_tool = True
 
-        tools.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": "send_custom_physical_mail",
-                    "description": "Send a custom physical letter via USPS (no template). Use this when the caller asks you to mail them a letter with custom text.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "to_name": {"type": "string", "description": "Recipient name"},
-                            "to_organization": {"type": "string", "description": "Recipient organization (optional)"},
-                            "to_address1": {"type": "string", "description": "Street address line 1"},
-                            "to_address2": {"type": "string", "description": "Street address line 2 (optional)"},
-                            "to_address3": {"type": "string", "description": "Street address line 3 (optional)"},
-                            "to_city": {"type": "string", "description": "City"},
-                            "to_state": {"type": "string", "description": "State (2-letter for US)"},
-                            "to_postal_code": {"type": "string", "description": "ZIP / postal code"},
-                            "to_country": {"type": "string", "description": "Country code (default: US)"},
-                            "subject": {"type": "string", "description": "Letter subject/title (optional)"},
-                            "body": {"type": "string", "description": "Letter body text"},
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "send_custom_physical_mail",
+                        "description": "Send a custom physical letter via USPS (no template). Use this when the caller asks you to mail them a letter with custom text.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "to_name": {"type": "string", "description": "Recipient name"},
+                                "to_organization": {"type": "string", "description": "Recipient organization (optional)"},
+                                "to_address1": {"type": "string", "description": "Street address line 1"},
+                                "to_address2": {"type": "string", "description": "Street address line 2 (optional)"},
+                                "to_address3": {"type": "string", "description": "Street address line 3 (optional)"},
+                                "to_city": {"type": "string", "description": "City"},
+                                "to_state": {"type": "string", "description": "State (2-letter for US)"},
+                                "to_postal_code": {"type": "string", "description": "ZIP / postal code"},
+                                "to_country": {"type": "string", "description": "Country code (default: US)"},
+                                "subject": {"type": "string", "description": "Letter subject/title (optional)"},
+                                "body": {"type": "string", "description": "Letter body text"},
+                            },
+                            "required": ["to_address1", "to_city", "to_state", "to_postal_code", "body"],
                         },
-                        "required": ["to_address1", "to_city", "to_state", "to_postal_code", "body"],
                     },
-                },
-            }
-        )
-        has_send_custom_physical_mail_tool = True
+                }
+            )
+            has_send_custom_physical_mail_tool = True
 
     # Extend the user-provided prompt with minimal tool guidance.
     prompt = base_prompt
