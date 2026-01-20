@@ -959,18 +959,18 @@
           </div>
 
           <% if (typeof achPaymentProvider !== 'undefined' && String(achPaymentProvider).toLowerCase() === 'increase') { %>
-            <div id="incBankBox" style="display:none;margin-top:10px;padding:10px;border:1px solid #e5e7eb;border-radius:10px;background:#f9fafb">
+            <div id="incBankBox" style="display:none;margin-top:10px;padding:10px;border:1px solid rgba(255,255,255,.12);border-radius:10px;background:rgba(0,0,0,.22)">
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-                <div style="font-size:12px;color:#111827"><strong>Bank verification</strong></div>
+                <div style="font-size:12px"><strong>Bank verification</strong></div>
                 <div id="incBankStatus" class="muted" style="font-size:12px"></div>
               </div>
               <div id="incBankVerifiedRow" class="muted" style="display:none;font-size:12px;margin-bottom:6px">
                 Verified bank ending in <span id="incBankLast4"></span>.
               </div>
               <div id="incBankLinkForm" style="display:none">
-                <label style="display:block;margin-bottom:4px;font-size:12px;color:#4b5563">Routing number</label>
+                <label style="display:block;margin-bottom:4px;font-size:12px">Routing number</label>
                 <input id="incRoutingNumber" type="text" inputmode="numeric" placeholder="9 digits" style="width:100%;box-sizing:border-box">
-                <label style="display:block;margin:8px 0 4px;font-size:12px;color:#4b5563">Account number</label>
+                <label style="display:block;margin:8px 0 4px;font-size:12px">Account number</label>
                 <input id="incAccountNumber" type="password" inputmode="numeric" placeholder="Account number" style="width:100%;box-sizing:border-box">
                 <button id="incSendMicroBtn" type="button" class="btn--muted" style="margin-top:8px;width:100%">Send microdeposits</button>
               </div>
