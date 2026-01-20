@@ -11722,23 +11722,7 @@ function increaseNormalizeAccountNumber(raw) {
   return String(raw || '').replace(/[^0-9]/g, '').trim();
 }
 
-function parseMicrodepositInputToCents(raw) {
-  const s = String(raw ?? '').trim();
-  if (!s) return null;
-  const n = Number(s);
-  if (!Number.isFinite(n)) return null;
-
-  // Users typically enter 0.13 (dollars). Support entering "13" as cents too.
-  let cents;
-  if (n < 1) cents = Math.round(n * 100);
-  else if (n <= 99 && Number.isInteger(n)) cents = n;
-  else cents = Math.round(n * 100);
-
-  if (!Number.isFinite(cents) || cents <= 0 || cents > 99) return null;
-  return cents;
-}
-
-// Start microdeposit verification by sending two small ACH credits.
+// Start bank-link by sending two small ACH credits and an optional offset debit.
 // NOTE: We never store routing/account numbers; only masked last4 + Increase IDs.
 app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (req, res) => {
   try {
@@ -11768,18 +11752,18 @@ app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (r
       const ex = existingRows && existingRows[0] ? existingRows[0] : null;
       if (ex) {
         const st = String(ex.status || '').toLowerCase();
-        if (st === 'verified') {
-          return res.status(409).json({ success: false, message: 'Bank account is already verified.' });
+        if (st === 'verified' && !force) {
+          return res.status(409).json({ success: false, message: 'Bank account is already linked.' });
         }
         if (!force && ex.microdeposit_sent_at) {
           const sentAtMs = new Date(ex.microdeposit_sent_at).getTime();
           if (Number.isFinite(sentAtMs)) {
             const ageMs = Date.now() - sentAtMs;
-            const minAgeMs = 24 * 60 * 60 * 1000; // 24h
+            const minAgeMs = 60 * 1000; // 60s (double-click / accidental resubmits)
             if (ageMs >= 0 && ageMs < minAgeMs) {
               return res.status(409).json({
                 success: false,
-                message: 'Microdeposits were already sent recently. Please wait for them to arrive before requesting new ones.'
+                message: 'Bank link was requested recently. Please wait a moment and try again.'
               });
             }
           }
@@ -11810,7 +11794,8 @@ app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (r
     let a2 = crypto.randomInt ? crypto.randomInt(11, 50) : (11 + Math.floor(Math.random() * 39));
     if (a2 === a1) a2 = (a1 % 39) + 11;
 
-    const payloadBase = {
+    // First microdeposit: create external account from routing/account.
+    const payloadCreateExternal = {
       account_id: String(INCREASE_ACCOUNT_ID),
       routing_number: routingNumber,
       account_number: accountNumber,
@@ -11818,33 +11803,51 @@ app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (r
       company_entry_description: 'ACCTVERIFY',
       company_name: companyName,
       individual_name: individualName,
-      individual_id: `talkusa-${userId}`
+      individual_id: `talkusa-${userId}`,
+      amount: a1
     };
 
     const t1 = await increaseApiCall({
       method: 'POST',
       path: '/ach_transfers',
-      body: Object.assign({}, payloadBase, { amount: a1 })
+      body: payloadCreateExternal
     });
 
-    const t2 = await increaseApiCall({
-      method: 'POST',
-      path: '/ach_transfers',
-      body: Object.assign({}, payloadBase, { amount: a2 })
-    });
-
-    const externalAccountId = String(
-      t1?.external_account_id || t2?.external_account_id || ''
-    ).trim();
-    const transferId1 = t1 && t1.id ? String(t1.id).trim() : null;
-    const transferId2 = t2 && t2.id ? String(t2.id).trim() : null;
-
+    const externalAccountId = String(t1?.external_account_id || '').trim();
     if (!externalAccountId) {
       return res.status(502).json({ success: false, message: 'Increase did not return an external account identifier' });
     }
 
+    // Second microdeposit + offset debit: use external_account_id (do not re-send routing/account).
+    const payloadExistingExternalBase = {
+      account_id: String(INCREASE_ACCOUNT_ID),
+      external_account_id: externalAccountId,
+      statement_descriptor: companyName,
+      company_entry_description: 'ACCTVERIFY',
+      company_name: companyName,
+      individual_name: individualName,
+      individual_id: `talkusa-${userId}`
+    };
+
+    const t2 = await increaseApiCall({
+      method: 'POST',
+      path: '/ach_transfers',
+      body: Object.assign({}, payloadExistingExternalBase, { amount: a2 })
+    });
+
+    // Offset debit for the sum of the two microdeposits (nets out the cost)
+    const offsetDebitCents = -(a1 + a2);
+    const t3 = await increaseApiCall({
+      method: 'POST',
+      path: '/ach_transfers',
+      body: Object.assign({}, payloadExistingExternalBase, { amount: offsetDebitCents })
+    });
+
+    const transferId1 = t1 && t1.id ? String(t1.id).trim() : null;
+    const transferId2 = t2 && t2.id ? String(t2.id).trim() : null;
+
     const last4 = accountNumber.slice(-4);
-    const rawPayload = JSON.stringify({ transfer1: t1, transfer2: t2 });
+    const rawPayload = JSON.stringify({ microdeposit_1: t1, microdeposit_2: t2, offset_debit: t3 });
 
     await pool.execute(
       `INSERT INTO increase_bank_links (
@@ -11852,11 +11855,11 @@ app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (r
         microdeposit_amount_1, microdeposit_amount_2,
         microdeposit_transfer_id_1, microdeposit_transfer_id_2,
         microdeposit_sent_at, send_attempts, verify_attempts, verified_at, raw_payload
-      ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, NOW(), 1, 0, NULL, ?)
+      ) VALUES (?, ?, ?, 'verified', ?, ?, ?, ?, NOW(), 1, 0, NOW(), ?)
       ON DUPLICATE KEY UPDATE
         external_account_id = VALUES(external_account_id),
         last4 = VALUES(last4),
-        status = 'pending',
+        status = 'verified',
         microdeposit_amount_1 = VALUES(microdeposit_amount_1),
         microdeposit_amount_2 = VALUES(microdeposit_amount_2),
         microdeposit_transfer_id_1 = VALUES(microdeposit_transfer_id_1),
@@ -11864,84 +11867,19 @@ app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (r
         microdeposit_sent_at = VALUES(microdeposit_sent_at),
         send_attempts = send_attempts + 1,
         verify_attempts = 0,
-        verified_at = NULL,
+        verified_at = NOW(),
         raw_payload = VALUES(raw_payload)`,
       [userId, externalAccountId, last4, a1, a2, transferId1, transferId2, rawPayload]
     );
 
     return res.json({
       success: true,
-      message: 'Microdeposits sent. Check your bank account in 1–2 business days, then enter the two amounts to verify.',
-      data: { status: 'pending', last4 }
+      message: 'Bank linked successfully.',
+      data: { status: 'verified', last4 }
     });
   } catch (e) {
     if (DEBUG) console.error('[increase.bank-link.start] error:', e?.data || e?.message || e);
-    return res.status(500).json({ success: false, message: e?.message || 'Failed to start microdeposit verification' });
-  }
-});
-
-// Verify the two microdeposit amounts.
-app.post('/api/me/increase/bank-link/microdeposits/verify', requireAuth, async (req, res) => {
-  try {
-    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
-
-    const userId = req.session.userId;
-    const amt1 = parseMicrodepositInputToCents(req.body?.amount1 ?? req.body?.amount_1 ?? req.body?.microdeposit1);
-    const amt2 = parseMicrodepositInputToCents(req.body?.amount2 ?? req.body?.amount_2 ?? req.body?.microdeposit2);
-
-    if (amt1 == null || amt2 == null) {
-      return res.status(400).json({ success: false, message: 'Please enter the two microdeposit amounts (e.g. 0.13 and 0.25).' });
-    }
-
-    const [rows] = await pool.execute(
-      'SELECT status, microdeposit_amount_1, microdeposit_amount_2, last4, verify_attempts FROM increase_bank_links WHERE user_id = ? LIMIT 1',
-      [userId]
-    );
-    const row = rows && rows[0] ? rows[0] : null;
-    if (!row) {
-      return res.status(404).json({ success: false, message: 'No bank verification in progress. Please send microdeposits first.' });
-    }
-
-    const status = String(row.status || 'pending').toLowerCase();
-    if (status === 'verified') {
-      return res.json({ success: true, message: 'Bank account is already verified.', data: { status: 'verified', last4: row.last4 || null } });
-    }
-
-    const expected1 = row.microdeposit_amount_1 != null ? Number(row.microdeposit_amount_1) : null;
-    const expected2 = row.microdeposit_amount_2 != null ? Number(row.microdeposit_amount_2) : null;
-
-    const matches = (amt1 === expected1 && amt2 === expected2) || (amt1 === expected2 && amt2 === expected1);
-
-    const nextAttempts = Number(row.verify_attempts || 0) + 1;
-
-    if (!matches) {
-      const maxAttempts = 5;
-      const newStatus = nextAttempts >= maxAttempts ? 'failed' : 'pending';
-      await pool.execute(
-        'UPDATE increase_bank_links SET verify_attempts = ?, status = ? WHERE user_id = ? LIMIT 1',
-        [nextAttempts, newStatus, userId]
-      );
-      return res.status(400).json({
-        success: false,
-        message: nextAttempts >= maxAttempts
-          ? 'Verification failed too many times. Please resend microdeposits and try again.'
-          : 'Those amounts did not match. Please double-check your bank statement and try again.'
-      });
-    }
-
-    await pool.execute(
-      'UPDATE increase_bank_links SET status = ?, verified_at = NOW(), verify_attempts = ? WHERE user_id = ? LIMIT 1',
-      ['verified', nextAttempts, userId]
-    );
-
-    return res.json({
-      success: true,
-      message: 'Bank account verified. You can now use ACH (Bank Debit) to add funds.',
-      data: { status: 'verified', last4: row.last4 || null }
-    });
-  } catch (e) {
-    if (DEBUG) console.error('[increase.bank-link.verify] error:', e?.message || e);
-    return res.status(500).json({ success: false, message: 'Failed to verify microdeposits' });
+    return res.status(500).json({ success: false, message: e?.message || 'Failed to link bank account' });
   }
 });
 
@@ -12288,7 +12226,7 @@ async function handleIncreaseAchCheckout(req, res) {
     const linkStatus = String(link?.status || '').toLowerCase();
     const externalAccountId = link && link.external_account_id ? String(link.external_account_id).trim() : '';
     if (!externalAccountId || linkStatus !== 'verified') {
-      return res.status(400).json({ success: false, message: 'Please link and verify your bank account first.' });
+      return res.status(400).json({ success: false, message: 'Please link your bank account first.' });
     }
 
     // Fetch user info for statement name + later crediting

@@ -946,7 +946,7 @@
             <input type="radio" name="fundMethod" value="crypto"> Crypto
           </label>
           <label style="margin-left:8px;cursor:pointer">
-            <input type="radio" name="fundMethod" value="ach"> <%= (typeof achPaymentProvider !== 'undefined' && String(achPaymentProvider).toLowerCase() === 'increase') ? 'ACH (Bank Debit – Verify first)' : 'ACH' %>
+            <input type="radio" name="fundMethod" value="ach"> <%= (typeof achPaymentProvider !== 'undefined' && String(achPaymentProvider).toLowerCase() === 'increase') ? 'ACH (Bank Debit)' : 'ACH' %>
           </label>
           <div style="margin-top:6px;font-size:12px;color:#6b7280">
             <div><strong>Card</strong>: instant credit after successful payment.</div>
@@ -972,15 +972,10 @@
                 <input id="incRoutingNumber" type="text" inputmode="numeric" placeholder="9 digits" style="width:100%;box-sizing:border-box">
                 <label style="display:block;margin:8px 0 4px;font-size:12px">Account number</label>
                 <input id="incAccountNumber" type="password" inputmode="numeric" placeholder="Account number" style="width:100%;box-sizing:border-box">
-                <button id="incSendMicroBtn" type="button" class="btn--muted" style="margin-top:8px;width:100%">Send microdeposits</button>
-              </div>
-              <div id="incBankVerifyForm" style="display:none;margin-top:10px">
-                <div class="muted" style="font-size:12px;margin-bottom:6px">Enter the two microdeposit amounts (e.g. 0.13 and 0.25).</div>
-                <div style="display:flex;gap:8px">
-                  <input id="incMicroAmount1" type="number" step="0.01" min="0" placeholder="0.13" style="flex:1;box-sizing:border-box">
-                  <input id="incMicroAmount2" type="number" step="0.01" min="0" placeholder="0.25" style="flex:1;box-sizing:border-box">
+                <button id="incSendMicroBtn" type="button" class="btn--muted" style="margin-top:8px;width:100%">Link bank account</button>
+                <div class="muted" style="font-size:12px;margin-top:6px">
+                  We’ll send two small deposits and one small debit (offset) to net out the verification cost.
                 </div>
-                <button id="incVerifyMicroBtn" type="button" class="btn--muted" style="margin-top:8px;width:100%">Verify microdeposits</button>
               </div>
 
               <div id="incAchConsentForm" style="display:none;margin-top:10px">
@@ -4323,7 +4318,6 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       const verifiedRow = document.getElementById('incBankVerifiedRow');
       const last4El = document.getElementById('incBankLast4');
       const linkForm = document.getElementById('incBankLinkForm');
-      const verifyForm = document.getElementById('incBankVerifyForm');
 
       const consentForm = document.getElementById('incAchConsentForm');
       const consentCheckbox = document.getElementById('incAchAuthorizeCheckbox');
@@ -4335,7 +4329,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       if (statusEl) {
         statusEl.textContent =
           status === 'verified' ? 'Verified' :
-          status === 'pending' ? 'Microdeposits sent' :
+          status === 'pending' ? 'Verification initiated' :
           status === 'failed' ? 'Verification failed' :
           'Not linked';
       }
@@ -4343,7 +4337,6 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
 
       if (verifiedRow) verifiedRow.style.display = (status === 'verified' && last4) ? 'block' : 'none';
       if (linkForm) linkForm.style.display = (status === 'verified') ? 'none' : 'block';
-      if (verifyForm) verifyForm.style.display = (status === 'pending') ? 'block' : 'none';
 
       if (consentForm) consentForm.style.display = (status === 'verified') ? 'block' : 'none';
       if (last4InlineEl) last4InlineEl.textContent = last4 ? `••••${last4}` : '••••';
@@ -4421,7 +4414,6 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     // Bank link actions (only present for Increase)
     {
       const sendBtn = document.getElementById('incSendMicroBtn');
-      const verifyBtn = document.getElementById('incVerifyMicroBtn');
 
       if (sendBtn) {
         sendBtn.addEventListener('click', async () => {
@@ -4430,7 +4422,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           if (!routing || !acct) return showToast('Please enter your routing and account numbers.', 'error');
 
           sendBtn.disabled = true;
-          sendBtn.textContent = 'Sending microdeposits...';
+          sendBtn.textContent = 'Linking bank...';
           try {
             const r = await fetch('/api/me/increase/bank-link/microdeposits/start', {
               method: 'POST',
@@ -4439,54 +4431,19 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
             });
             const j = await r.json();
             if (!j || j.success === false) {
-              showToast(j?.message || 'Failed to send microdeposits', 'error');
+              showToast(j?.message || 'Failed to link bank account', 'error');
               return;
             }
             // Clear account number field after submission
             const acctEl = document.getElementById('incAccountNumber');
             if (acctEl) acctEl.value = '';
-            showToast(j.message || 'Microdeposits sent. Check your bank account, then verify amounts.');
+            showToast(j.message || 'Bank linked. You can now continue with ACH.');
             await loadIncBankLink();
           } catch (e) {
-            showToast('Failed to send microdeposits', 'error');
+            showToast('Failed to link bank account', 'error');
           } finally {
             sendBtn.disabled = false;
-            sendBtn.textContent = 'Send microdeposits';
-          }
-        });
-      }
-
-      if (verifyBtn) {
-        verifyBtn.addEventListener('click', async () => {
-          const a1 = String(document.getElementById('incMicroAmount1')?.value || '').trim();
-          const a2 = String(document.getElementById('incMicroAmount2')?.value || '').trim();
-          if (!a1 || !a2) return showToast('Please enter both microdeposit amounts.', 'error');
-
-          verifyBtn.disabled = true;
-          verifyBtn.textContent = 'Verifying...';
-          try {
-            const r = await fetch('/api/me/increase/bank-link/microdeposits/verify', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ amount1: a1, amount2: a2 })
-            });
-            const j = await r.json();
-            if (!j || j.success === false) {
-              showToast(j?.message || 'Verification failed', 'error');
-              return;
-            }
-            showToast(j.message || 'Bank verified.');
-            // Clear inputs
-            const m1 = document.getElementById('incMicroAmount1');
-            const m2 = document.getElementById('incMicroAmount2');
-            if (m1) m1.value = '';
-            if (m2) m2.value = '';
-            await loadIncBankLink();
-          } catch {
-            showToast('Verification failed', 'error');
-          } finally {
-            verifyBtn.disabled = false;
-            verifyBtn.textContent = 'Verify microdeposits';
+            sendBtn.textContent = 'Link bank account';
           }
         });
       }
