@@ -16969,6 +16969,8 @@ async function chargeDidMarkup({ userId, magnusUserId, didId, didNumber, markupA
     if (DEBUG) console.warn('[didww.markup] Duplicate-check query failed; continuing with charge:', dupErr.message || dupErr);
   }
 
+  let creditBefore = null;
+
   // Optional: enforce sufficient funds (no negative balance) for monthly DID fees.
   if (DIDWW_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE) {
     let creditInfo = null;
@@ -16984,6 +16986,8 @@ async function chargeDidMarkup({ userId, magnusUserId, didId, didNumber, markupA
       if (DEBUG) console.warn('[didww.markup] Credit missing; skipping charge', { magnusUserId });
       return { ok: false, reason: 'credit_missing' };
     }
+
+    creditBefore = currentCredit;
 
     if (currentCredit < amt) {
       // Record unpaid billing row so the customer can see what happened.
@@ -17008,10 +17012,22 @@ async function chargeDidMarkup({ userId, magnusUserId, didId, didNumber, markupA
   const billingId = insertResult.insertId;
 
   try {
-    const creditInfo = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
-    const currentCredit = (creditInfo && Number.isFinite(creditInfo.credit)) ? Number(creditInfo.credit) : null;
+    let magnusResponse = null;
+    let success = false;
+    let creditAfter = null;
 
-    if (currentCredit == null) {
+    // Read credit before charging so we can verify whether the refill actually affected user.credit.
+    // If we already read it for the nonpayment gate, reuse that value.
+    if (creditBefore == null) {
+      try {
+        const beforeInfo = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+        if (beforeInfo && Number.isFinite(beforeInfo.credit)) creditBefore = Number(beforeInfo.credit);
+      } catch (e) {
+        if (DEBUG) console.warn('[didww.markup] Failed to read MagnusBilling credit before charge:', e?.message || e);
+      }
+    }
+
+    if (creditBefore == null) {
       await pool.execute(
         'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
         ['failed', 'Unable to read MagnusBilling credit', billingId]
@@ -17019,39 +17035,110 @@ async function chargeDidMarkup({ userId, magnusUserId, didId, didNumber, markupA
       return { ok: false, reason: 'credit_missing', billingId };
     }
 
-    if (DIDWW_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE && currentCredit < amt) {
+    if (DIDWW_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE && creditBefore < amt) {
       await pool.execute(
         'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
-        ['failed', `Insufficient balance: ${currentCredit}`, billingId]
+        ['failed', `Insufficient balance: ${creditBefore}`, billingId]
       );
-      return { ok: false, reason: 'insufficient_funds', credit: currentCredit, billingId };
+      return { ok: false, reason: 'insufficient_funds', credit: creditBefore, billingId };
     }
 
-    const newCredit = currentCredit - amt;
-    const updateResp = await updateMagnusUserCredit({ magnusUserId, newCredit, httpsAgent, hostHeader });
-    const magnusResponse = JSON.stringify(updateResp?.data || updateResp || {});
+    // Primary: create a negative refill in MagnusBilling so there is a visible ledger entry.
+    try {
+      const refillParams = new URLSearchParams();
+      refillParams.append('module', 'refill');
+      refillParams.append('action', 'save');
+      refillParams.append('id_user', String(magnusUserId));
+      refillParams.append('credit', String(-amt)); // negative = charge/fee
+      refillParams.append('description', description);
+      refillParams.append('payment', '1');
+      refillParams.append('refill_type', '0');
 
-    const success = updateResp?.status >= 200 && updateResp?.status < 300;
+      const refillResp = await mbSignedCall({ relPath: '/index.php/refill/save', params: refillParams, httpsAgent, hostHeader });
+      magnusResponse = JSON.stringify(refillResp?.data || refillResp || {});
+
+      if (
+        refillResp?.data?.success === true ||
+        (Array.isArray(refillResp?.data?.rows) && refillResp.data.rows.length > 0) ||
+        (refillResp?.status >= 200 && refillResp?.status < 300)
+      ) {
+        success = true;
+
+        // Ensure user.credit is actually decremented (some installs don't apply negative refills to credit)
+        try {
+          const ensureRes = await ensureMagnusCreditDeltaApplied({
+            magnusUserId,
+            creditDelta: -amt,
+            creditBefore,
+            httpsAgent,
+            hostHeader,
+            label: 'didww.markup'
+          });
+          if (!ensureRes.ok) {
+            success = false;
+          } else {
+            if (ensureRes.adjusted && ensureRes.target != null && Number.isFinite(Number(ensureRes.target))) {
+              creditAfter = Number(ensureRes.target);
+            } else if (ensureRes.creditAfter != null && Number.isFinite(Number(ensureRes.creditAfter))) {
+              creditAfter = Number(ensureRes.creditAfter);
+            }
+          }
+        } catch (ensureErr) {
+          success = false;
+          if (DEBUG) console.warn('[didww.markup] Credit correction threw after negative refill; will mark billing failed', ensureErr?.message || ensureErr);
+        }
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[didww.markup] Refill module failed, falling back to direct credit update:', e?.message || e);
+    }
+
+    // Fallback: direct credit update
+    if (!success) {
+      try {
+        const info = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+        const currentCredit = (info && Number.isFinite(info.credit)) ? Number(info.credit) : null;
+        if (currentCredit == null) throw new Error('Unable to read MagnusBilling credit');
+
+        if (DIDWW_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE && currentCredit < amt) {
+          magnusResponse = `Insufficient balance: ${currentCredit}`;
+          success = false;
+        } else {
+          const newCredit = currentCredit - amt;
+          const updateResp = await updateMagnusUserCredit({ magnusUserId, newCredit, httpsAgent, hostHeader });
+          magnusResponse = JSON.stringify(updateResp?.data || updateResp || {});
+          success = updateResp?.status >= 200 && updateResp?.status < 300;
+          creditAfter = newCredit;
+        }
+      } catch (e) {
+        success = false;
+        magnusResponse = String(e?.message || e);
+      }
+    }
 
     await pool.execute(
       'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
-      [success ? 'completed' : 'failed', magnusResponse, billingId]
+      [success ? 'completed' : 'failed', magnusResponse || 'No MagnusBilling response', billingId]
     );
 
     if (!success) {
       return { ok: false, reason: 'magnus_update_failed', billingId, magnusResponse };
     }
 
-    if (DEBUG) console.log('[didww.markup] Deducted markup from MagnusBilling credit:', {
+    if (DEBUG) console.log('[didww.markup] Charged monthly service fee (and recorded MB transaction):', {
       magnusUserId,
       didId,
       didNumber,
       amount: amt,
-      currentCredit,
-      newCredit
+      creditBefore,
+      creditAfter: creditAfter != null ? creditAfter : undefined
     });
 
-    return { ok: true, billingId, creditBefore: currentCredit, creditAfter: newCredit };
+    return {
+      ok: true,
+      billingId,
+      creditBefore,
+      ...(creditAfter != null ? { creditAfter } : {})
+    };
   } catch (e) {
     if (DEBUG) console.warn('[didww.markup] MagnusBilling error while charging markup:', e.message || e);
     try {
