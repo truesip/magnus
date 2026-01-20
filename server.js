@@ -1645,6 +1645,46 @@ async function initDb() {
     raw_payload JSON NULL
   )`);
 
+  // Increase ACH debit authorization records (consent + PDF audit)
+  await pool.query(`CREATE TABLE IF NOT EXISTS increase_ach_authorizations (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    billing_history_id BIGINT NOT NULL,
+    order_id VARCHAR(191) NOT NULL,
+    ach_transfer_id VARCHAR(128) NULL,
+    external_account_id VARCHAR(128) NOT NULL,
+    bank_last4 VARCHAR(8) NULL,
+    amount DECIMAL(10,2) NOT NULL,
+    statement_descriptor VARCHAR(64) NULL,
+    company_entry_description VARCHAR(32) NULL,
+    signer_name VARCHAR(128) NOT NULL,
+    signer_email VARCHAR(255) NULL,
+    signer_phone VARCHAR(40) NULL,
+    signer_address1 VARCHAR(255) NULL,
+    signer_city VARCHAR(100) NULL,
+    signer_state VARCHAR(100) NULL,
+    signer_postal_code VARCHAR(32) NULL,
+    signer_country CHAR(2) NULL,
+    authorized_ip VARCHAR(64) NULL,
+    authorized_user_agent VARCHAR(255) NULL,
+    authorized_at DATETIME NOT NULL,
+    consent_version VARCHAR(32) NOT NULL DEFAULT 'v1',
+    consent_text TEXT NOT NULL,
+    pdf_sha256 CHAR(64) NULL,
+    pdf_blob LONGBLOB NOT NULL,
+    email_status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    email_error TEXT NULL,
+    emailed_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_inc_auth_order (order_id),
+    UNIQUE KEY uniq_inc_auth_billing (billing_history_id),
+    KEY idx_inc_auth_user (user_id),
+    KEY idx_inc_auth_transfer (ach_transfer_id),
+    CONSTRAINT fk_inc_auth_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_inc_auth_billing FOREIGN KEY (billing_history_id) REFERENCES billing_history(id) ON DELETE CASCADE
+  )`);
+
   // AI Agents (Pipecat Cloud)
   await pool.query(`CREATE TABLE IF NOT EXISTS ai_agents (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -2568,6 +2608,19 @@ async function smtp2goSendEmail(payload, { kind, to, subject } = {}) {
   }
 
   return resp.data;
+}
+
+function smtp2goAttachmentFromBuffer(buf, { filename, mimeType } = {}) {
+  if (!buf || !Buffer.isBuffer(buf)) return null;
+  const safeName = String(filename || 'attachment')
+    .replace(/[^a-z0-9._-]+/gi, '_')
+    .slice(0, 120) || 'attachment';
+  const mt = String(mimeType || 'application/octet-stream').trim() || 'application/octet-stream';
+  return {
+    filename: safeName,
+    fileblob: buf.toString('base64'),
+    mimetype: mt
+  };
 }
 
 async function sendVerificationEmail(toEmail, code) {
@@ -3758,6 +3811,109 @@ async function generateSimpleLetterPdfBuffer({ subject, body, includeBlankAddres
     align: 'left',
     lineGap: 4
   });
+
+  doc.end();
+  return done;
+}
+
+async function generateIncreaseAchAuthorizationPdfBuffer({
+  companyName,
+  billingId,
+  orderId,
+  achTransferId,
+  amount,
+  bankLast4,
+  customerName,
+  customerUsername,
+  customerEmail,
+  customerPhone,
+  customerAddressLine,
+  signerName,
+  authorizedAt,
+  authorizedIp,
+  userAgent,
+  consentText,
+  consentVersion
+} = {}) {
+  if (!PDFDocument) throw new Error('PDF generator not installed (missing pdfkit dependency)');
+
+  const safeCompany = String(companyName || 'TalkUSA').trim();
+  const safeOrder = String(orderId || '').trim();
+  const safeTransfer = String(achTransferId || '').trim();
+  const safeBillingId = (billingId != null) ? String(billingId).trim() : '';
+
+  const amtNum = Number(amount || 0);
+  const amtStr = Number.isFinite(amtNum) ? `$${amtNum.toFixed(2)}` : '';
+
+  const last4 = String(bankLast4 || '').trim();
+  const bankStr = last4 ? `••••${last4}` : '••••';
+
+  const cName = String(customerName || '').trim();
+  const cUser = String(customerUsername || '').trim();
+  const cEmail = String(customerEmail || '').trim();
+  const cPhone = String(customerPhone || '').trim();
+  const cAddr = String(customerAddressLine || '').trim();
+
+  const sigName = String(signerName || cName || cUser || '').trim();
+
+  const at = (authorizedAt instanceof Date && Number.isFinite(authorizedAt.getTime()))
+    ? authorizedAt
+    : new Date();
+
+  const ip = String(authorizedIp || '').trim();
+  const ua = String(userAgent || '').trim();
+  const uaShort = ua.length > 200 ? (ua.slice(0, 200) + '…') : ua;
+
+  const consent = String(consentText || '').trim();
+  const cVer = String(consentVersion || 'v1').trim();
+
+  const doc = new PDFDocument({ size: 'LETTER', margin: 72 });
+
+  const chunks = [];
+  doc.on('data', (d) => chunks.push(d));
+
+  const done = new Promise((resolve, reject) => {
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+  });
+
+  // Title
+  doc.font('Helvetica-Bold').fontSize(16).text('Bank Account Authorization (ACH Debit)', { align: 'left' });
+  doc.moveDown(0.5);
+
+  doc.font('Helvetica').fontSize(11);
+  doc.text(`Company: ${safeCompany}`);
+  if (safeBillingId) doc.text(`Invoice: ${safeBillingId}`);
+  if (safeOrder) doc.text(`Order ID: ${safeOrder}`);
+  if (safeTransfer) doc.text(`ACH Transfer ID: ${safeTransfer}`);
+  doc.text(`Amount: ${amtStr || '—'}`);
+  doc.text(`Bank account (masked): ${bankStr}`);
+  doc.text(`Authorization time (UTC): ${at.toISOString()}`);
+  if (ip) doc.text(`IP address: ${ip}`);
+  if (uaShort) doc.text(`User agent: ${uaShort}`);
+  doc.moveDown(0.75);
+
+  // Customer
+  doc.font('Helvetica-Bold').fontSize(12).text('Customer information');
+  doc.font('Helvetica').fontSize(11);
+  if (cName) doc.text(`Name: ${cName}`);
+  if (cUser) doc.text(`Username: ${cUser}`);
+  if (cEmail) doc.text(`Email: ${cEmail}`);
+  if (cPhone) doc.text(`Phone: ${cPhone}`);
+  if (cAddr) doc.text(`Address: ${cAddr}`);
+  doc.moveDown(0.75);
+
+  // Consent text
+  doc.font('Helvetica-Bold').fontSize(12).text('Authorization statement');
+  doc.font('Helvetica').fontSize(11).text(consent || '—', { align: 'left', lineGap: 4 });
+  doc.moveDown(0.75);
+
+  // Signature
+  doc.font('Helvetica-Bold').fontSize(12).text('Electronic signature');
+  doc.font('Helvetica').fontSize(11);
+  doc.text(`Signed by (typed): ${sigName || '—'}`);
+  doc.text(`Signature method: checkbox consent + typed name (consent ${cVer})`);
+  doc.text(`Signed at (UTC): ${at.toISOString()}`);
 
   doc.end();
   return done;
@@ -11789,6 +11945,196 @@ app.post('/api/me/increase/bank-link/microdeposits/verify', requireAuth, async (
   }
 });
 
+// Download the stored ACH authorization PDF for a given billing id (Increase ACH).
+// Inline by default; add ?download=1 to force download.
+app.get('/api/me/increase/ach-authorization/:billingId/pdf', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = req.session.userId;
+    const billingId = String(req.params.billingId || '').trim();
+    if (!billingId || !/^\d+$/.test(billingId)) {
+      return res.status(400).json({ success: false, message: 'Invalid billing id' });
+    }
+
+    const [rows] = await pool.execute(
+      'SELECT pdf_blob, pdf_sha256 FROM increase_ach_authorizations WHERE user_id = ? AND billing_history_id = ? LIMIT 1',
+      [userId, billingId]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    if (!row || !row.pdf_blob) {
+      return res.status(404).json({ success: false, message: 'Authorization PDF not found' });
+    }
+
+    const buf = Buffer.isBuffer(row.pdf_blob) ? row.pdf_blob : Buffer.from(row.pdf_blob);
+    const sha = row.pdf_sha256 ? String(row.pdf_sha256) : '';
+
+    const asAttachment = String(req.query.download || '') === '1';
+    const dispositionType = asAttachment ? 'attachment' : 'inline';
+    const safeName = `ach-authorization-${billingId}.pdf`;
+
+    res.set('Content-Type', 'application/pdf');
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Cache-Control', 'no-store');
+    res.set('Content-Disposition', `${dispositionType}; filename="${safeName}"`);
+    if (sha) res.set('ETag', `"${sha}"`);
+    res.set('Content-Length', String(buf.length));
+
+    return res.status(200).send(buf);
+  } catch (e) {
+    if (DEBUG) console.warn('[increase.ach.authorization.pdf] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load authorization PDF' });
+  }
+});
+
+// Resend the stored ACH authorization PDF to the user (BCC admin).
+app.post('/api/me/increase/ach-authorization/:billingId/resend', requireAuth, async (req, res) => {
+  let authorizationRowId = null;
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const smtpApiKey = process.env.SMTP2GO_API_KEY;
+    const smtpSender = process.env.SMTP2GO_SENDER || `no-reply@${(process.env.SENDER_DOMAIN || 'talkusa.net')}`;
+    const adminEmail = process.env.ADMIN_NOTIFY_EMAIL;
+    if (!smtpApiKey || !adminEmail) {
+      return res.status(500).json({ success: false, message: 'Email is not configured' });
+    }
+
+    const userId = req.session.userId;
+    const billingId = String(req.params.billingId || '').trim();
+    if (!billingId || !/^\d+$/.test(billingId)) {
+      return res.status(400).json({ success: false, message: 'Invalid billing id' });
+    }
+
+    const force = !!(req.body && (req.body.force === true || req.body.force === 1 || req.body.force === '1'));
+
+    const [rows] = await pool.execute(
+      'SELECT id, pdf_blob, bank_last4, amount, order_id, ach_transfer_id, emailed_at FROM increase_ach_authorizations WHERE user_id = ? AND billing_history_id = ? LIMIT 1',
+      [userId, billingId]
+    );
+    const authRow = rows && rows[0] ? rows[0] : null;
+    if (!authRow || !authRow.pdf_blob) {
+      return res.status(404).json({ success: false, message: 'Authorization not found' });
+    }
+
+    authorizationRowId = authRow.id;
+
+    // Prevent accidental double-send on double-clicks (can override by sending force=1)
+    if (!force && authRow.emailed_at) {
+      const sentAtMs = new Date(authRow.emailed_at).getTime();
+      if (Number.isFinite(sentAtMs)) {
+        const ageMs = Date.now() - sentAtMs;
+        const minAgeMs = 30 * 1000; // 30s
+        if (ageMs >= 0 && ageMs < minAgeMs) {
+          return res.status(429).json({
+            success: false,
+            message: 'Authorization email was sent recently. Please wait a moment and try again.'
+          });
+        }
+      }
+    }
+
+    // Fetch user email/name for recipient
+    let userEmail = '';
+    let customerName = '';
+    try {
+      const [uRows] = await pool.execute('SELECT username, firstname, lastname, email FROM signup_users WHERE id=? LIMIT 1', [userId]);
+      const u = uRows && uRows[0] ? uRows[0] : null;
+      if (u) {
+        if (u.email) userEmail = String(u.email).trim();
+        const full = `${u.firstname || ''} ${u.lastname || ''}`.trim();
+        customerName = full || String(u.username || '').trim() || (req.session.username || 'Customer');
+      }
+    } catch {}
+
+    if (!userEmail) {
+      return res.status(400).json({ success: false, message: 'No email address found for this account' });
+    }
+
+    const bankLast4 = authRow.bank_last4 ? String(authRow.bank_last4).trim() : '';
+    const amountFixed = Number(authRow.amount || 0);
+    const orderId = authRow.order_id ? String(authRow.order_id) : '';
+    const achTransferId = authRow.ach_transfer_id ? String(authRow.ach_transfer_id) : '';
+
+    const pdfBuf = Buffer.isBuffer(authRow.pdf_blob) ? authRow.pdf_blob : Buffer.from(authRow.pdf_blob);
+
+    const subject = `ACH authorization (Invoice ${billingId})`;
+
+    const lines = [
+      `Hello ${customerName || 'Customer'},`,
+      '',
+      'Attached is your ACH debit authorization document.',
+      Number.isFinite(amountFixed) && amountFixed > 0 ? `Amount: $${amountFixed.toFixed(2)}` : null,
+      bankLast4 ? `Bank account ending: ****${bankLast4}` : null,
+      `Invoice: ${billingId}`,
+      orderId ? `Order ID: ${orderId}` : null,
+      achTransferId ? `ACH Transfer ID: ${achTransferId}` : null,
+      '',
+      'If you did not authorize this payment, please contact support immediately.',
+      '',
+      'TalkUSA'
+    ].filter(Boolean);
+
+    const text = lines.join('\n');
+    const html = `
+      <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+        <h2>ACH authorization</h2>
+        <p>Hello ${String(customerName || 'Customer').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')},</p>
+        <p>Attached is your ACH debit authorization document.</p>
+        <ul>
+          ${Number.isFinite(amountFixed) && amountFixed > 0 ? `<li><strong>Amount:</strong> $${amountFixed.toFixed(2)}</li>` : ''}
+          ${bankLast4 ? `<li><strong>Bank account ending:</strong> ****${String(bankLast4)}</li>` : ''}
+          <li><strong>Invoice:</strong> ${String(billingId)}</li>
+          ${orderId ? `<li><strong>Order ID:</strong> ${String(orderId)}</li>` : ''}
+          ${achTransferId ? `<li><strong>ACH Transfer ID:</strong> ${String(achTransferId)}</li>` : ''}
+        </ul>
+        <p style="margin-top:16px">If you did not authorize this payment, please contact support immediately.</p>
+        <p style="color:#6b7280;font-size:12px">This message includes a PDF attachment.</p>
+      </div>`;
+
+    const attachment = smtp2goAttachmentFromBuffer(pdfBuf, {
+      filename: `ach-authorization-${billingId}.pdf`,
+      mimeType: 'application/pdf'
+    });
+
+    const payload = {
+      api_key: smtpApiKey,
+      to: [userEmail],
+      bcc: [adminEmail],
+      sender: smtpSender,
+      subject,
+      text_body: text,
+      html_body: html,
+      ...(attachment ? { attachments: [attachment] } : {})
+    };
+
+    await smtp2goSendEmail(payload, { kind: 'increase-ach-authorization-resend', to: userEmail, subject });
+
+    try {
+      await pool.execute(
+        'UPDATE increase_ach_authorizations SET email_status = ?, email_error = NULL, emailed_at = NOW(), updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+        ['sent', authorizationRowId]
+      );
+    } catch {}
+
+    return res.json({ success: true, message: 'Authorization email resent.' });
+  } catch (e) {
+    const msg = e?.message || 'Resend failed';
+    if (DEBUG) console.warn('[increase.ach.authorization.resend] error:', msg);
+
+    if (authorizationRowId && pool) {
+      try {
+        await pool.execute(
+          'UPDATE increase_ach_authorizations SET email_status = ?, email_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          ['failed', String(msg).slice(0, 2000), authorizationRowId]
+        );
+      } catch {}
+    }
+
+    return res.status(500).json({ success: false, message: msg });
+  }
+});
+
 // Create a NOWPayments checkout (Standard e-commerce flow)
 // Returns a hosted payment URL where the user can complete a crypto payment.
 app.post('/api/me/nowpayments/checkout', requireAuth, async (req, res) => {
@@ -11915,6 +12261,24 @@ async function handleIncreaseAchCheckout(req, res) {
       return res.status(400).json({ success: false, message: `Amount must be between $${CHECKOUT_MIN_AMOUNT} and $${CHECKOUT_MAX_AMOUNT}` });
     }
 
+    // Authorization (required): checkbox + typed name
+    const auth = (req.body && (req.body.authorization || req.body.ach_authorization || req.body.achAuthorization)) || {};
+    const agreed = !!(
+      auth && (auth.agreed === true || auth.agreed === 1 || String(auth.agreed || '').trim().toLowerCase() === 'true' || String(auth.agreed || '').trim() === '1')
+    );
+    const signerName = String(auth.signer_name || auth.signerName || auth.name || '').trim().slice(0, 128);
+    if (!agreed) {
+      return res.status(400).json({ success: false, message: 'ACH authorization is required (please check the authorization box).' });
+    }
+    if (!signerName) {
+      return res.status(400).json({ success: false, message: 'Please type your full name to sign the ACH authorization.' });
+    }
+
+    // Capture audit metadata
+    const authorizedAt = new Date();
+    const authorizedIp = getClientIp(req);
+    const authorizedUserAgent = String(req.get('user-agent') || '').trim().slice(0, 255) || null;
+
     // Require a verified bank link
     const [linkRows] = await pool.execute(
       'SELECT external_account_id, last4, status FROM increase_bank_links WHERE user_id = ? LIMIT 1',
@@ -11929,11 +12293,41 @@ async function handleIncreaseAchCheckout(req, res) {
 
     // Fetch user info for statement name + later crediting
     const [userRows] = await pool.execute(
-      'SELECT id, magnus_user_id, username, firstname, lastname, email FROM signup_users WHERE id = ? LIMIT 1',
+      'SELECT id, magnus_user_id, username, firstname, lastname, email, phone, address1, city, state, postal_code, country FROM signup_users WHERE id = ? LIMIT 1',
       [userId]
     );
     const user = userRows && userRows[0] ? userRows[0] : null;
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const userEmail = String(user.email || '').trim();
+    if (!userEmail) {
+      return res.status(400).json({ success: false, message: 'An email address is required to use ACH payments' });
+    }
+
+    // Email configuration (required to send authorization PDF)
+    const smtpApiKey = process.env.SMTP2GO_API_KEY;
+    const smtpSender = process.env.SMTP2GO_SENDER || `no-reply@${(process.env.SENDER_DOMAIN || 'talkusa.net')}`;
+    const adminEmail = process.env.ADMIN_NOTIFY_EMAIL;
+    if (!smtpApiKey) {
+      return res.status(500).json({ success: false, message: 'SMTP2GO_API_KEY is not configured (cannot send ACH authorization PDF)' });
+    }
+    if (!adminEmail) {
+      return res.status(500).json({ success: false, message: 'ADMIN_NOTIFY_EMAIL is not configured (cannot send admin copy of ACH authorization PDF)' });
+    }
+
+    // Billing address is included on the authorization document.
+    const addr1 = String(user.address1 || '').trim();
+    const city = String(user.city || '').trim();
+    const state = String(user.state || '').trim();
+    const postalCode = String(user.postal_code || '').trim();
+    const country = String(user.country || '').trim();
+    if (!addr1 || !city || !state || !postalCode || !country) {
+      return res.status(400).json({
+        success: false,
+        message: 'Your billing address on file is incomplete. Please contact support to update your address before using ACH.'
+      });
+    }
+    const customerAddressLine = formatSignupAddressLine({ address1: addr1, city, state, postalCode, country });
 
     const magnusUserId = String(user.magnus_user_id || '').trim();
     if (!magnusUserId) {
@@ -12011,15 +12405,170 @@ async function handleIncreaseAchCheckout(req, res) {
       );
     } catch {}
 
+    // Build + store an authorization PDF and email it to the user + admin (best-effort).
+    let authorizationId = null;
+    let authorizationEmailSent = false;
+    try {
+      const consentVersion = 'v1';
+      const amountFixed = Number(amountNum.toFixed(2));
+      const bankLast4 = link?.last4 ? String(link.last4) : '';
+      const bankMasked = bankLast4 ? `****${bankLast4}` : '****';
+      const consentText = [
+        `I, ${signerName}, authorize ${companyName} to initiate a one-time ACH debit from my bank account ending in ${bankMasked} for $${amountFixed.toFixed(2)}.`,
+        `This authorization is provided electronically (checkbox consent + typed name).`,
+        `I certify that I am an authorized signer on this bank account and that the information provided is accurate.`
+      ].join('\n\n');
+
+      const fullNameForPdf = `${user.firstname || ''} ${user.lastname || ''}`.trim();
+      const customerName = fullNameForPdf || user.username || (req.session.username || 'Customer');
+      const customerPhone = String(user.phone || '').trim();
+
+      const pdfBuf = await generateIncreaseAchAuthorizationPdfBuffer({
+        companyName,
+        billingId,
+        orderId,
+        achTransferId,
+        amount: amountFixed,
+        bankLast4,
+        customerName,
+        customerUsername: String(user.username || '').trim(),
+        customerEmail: userEmail,
+        customerPhone,
+        customerAddressLine,
+        signerName,
+        authorizedAt,
+        authorizedIp,
+        userAgent: authorizedUserAgent,
+        consentText,
+        consentVersion
+      });
+
+      const pdfSha256 = crypto.createHash('sha256').update(pdfBuf).digest('hex');
+
+      // Insert authorization audit row (including PDF)
+      try {
+        const [ins] = await pool.execute(
+          `INSERT INTO increase_ach_authorizations (
+            user_id, billing_history_id, order_id, ach_transfer_id,
+            external_account_id, bank_last4,
+            amount, statement_descriptor, company_entry_description,
+            signer_name, signer_email, signer_phone,
+            signer_address1, signer_city, signer_state, signer_postal_code, signer_country,
+            authorized_ip, authorized_user_agent, authorized_at,
+            consent_version, consent_text,
+            pdf_sha256, pdf_blob,
+            email_status
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [
+            userId, billingId, orderId, achTransferId,
+            externalAccountId, bankLast4 || null,
+            amountFixed, companyName, companyEntryDescription,
+            signerName, userEmail, customerPhone || null,
+            addr1, city, state, postalCode, country,
+            authorizedIp || null, authorizedUserAgent || null, authorizedAt,
+            consentVersion, consentText,
+            pdfSha256, pdfBuf,
+            'pending'
+          ]
+        );
+        authorizationId = ins.insertId;
+      } catch (e) {
+        // If the insert fails, we can still attempt to email, but we won't have a row id to mark status.
+        if (DEBUG) console.warn('[increase.ach.auth] Failed to insert authorization row:', e?.message || e);
+      }
+
+      // Email PDF attachment
+      try {
+        const subject = `ACH authorization (Invoice ${billingId})`;
+        const lines = [
+          `Hello ${customerName || 'Customer'},`,
+          '',
+          `Attached is your ACH debit authorization document.`,
+          `Amount: $${amountFixed.toFixed(2)}`,
+          bankLast4 ? `Bank account ending: ****${bankLast4}` : null,
+          `Invoice: ${billingId}`,
+          `Order ID: ${orderId}`,
+          `ACH Transfer ID: ${achTransferId}`,
+          '',
+          'If you did not authorize this payment, please contact support immediately.',
+          '',
+          'TalkUSA'
+        ].filter(Boolean);
+
+        const text = lines.join('\n');
+        const html = `
+          <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+            <h2>ACH authorization</h2>
+            <p>Hello ${String(customerName || 'Customer').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')},</p>
+            <p>Attached is your ACH debit authorization document.</p>
+            <ul>
+              <li><strong>Amount:</strong> $${amountFixed.toFixed(2)}</li>
+              ${bankLast4 ? `<li><strong>Bank account ending:</strong> ****${String(bankLast4)}</li>` : ''}
+              <li><strong>Invoice:</strong> ${String(billingId)}</li>
+              <li><strong>Order ID:</strong> ${String(orderId)}</li>
+              <li><strong>ACH Transfer ID:</strong> ${String(achTransferId)}</li>
+            </ul>
+            <p style="margin-top:16px">If you did not authorize this payment, please contact support immediately.</p>
+            <p style="color:#6b7280;font-size:12px">This message includes a PDF attachment.</p>
+          </div>`;
+
+        const attachment = smtp2goAttachmentFromBuffer(pdfBuf, {
+          filename: `ach-authorization-${billingId}.pdf`,
+          mimeType: 'application/pdf'
+        });
+
+        const payload = {
+          api_key: smtpApiKey,
+          to: [userEmail],
+          bcc: [adminEmail],
+          sender: smtpSender,
+          subject,
+          text_body: text,
+          html_body: html,
+          ...(attachment ? { attachments: [attachment] } : {})
+        };
+
+        await smtp2goSendEmail(payload, { kind: 'increase-ach-authorization', to: userEmail, subject });
+        authorizationEmailSent = true;
+
+        if (authorizationId) {
+          try {
+            await pool.execute(
+              'UPDATE increase_ach_authorizations SET email_status = ?, email_error = NULL, emailed_at = NOW(), updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+              ['sent', authorizationId]
+            );
+          } catch {}
+        }
+      } catch (e) {
+        const msg = e?.message || 'Authorization email failed';
+        if (DEBUG) console.warn('[increase.ach.auth] Email failed:', msg);
+        if (authorizationId) {
+          try {
+            await pool.execute(
+              'UPDATE increase_ach_authorizations SET email_status = ?, email_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+              ['failed', String(msg).slice(0, 2000), authorizationId]
+            );
+          } catch {}
+        }
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[increase.ach.auth] Failed to generate authorization PDF:', e?.message || e);
+    }
+
     return res.json({
       success: true,
       status: 'pending',
-      message: 'ACH debit initiated. Your TalkUSA balance will be credited after the bank confirmation window clears.',
+      message: authorizationEmailSent
+        ? 'ACH debit initiated. Your TalkUSA balance will be credited after the bank confirmation window clears.'
+        : 'ACH debit initiated. Your TalkUSA balance will be credited after the bank confirmation window clears. (Authorization email could not be sent.)',
       data: {
         billing_id: billingId,
         ach_transfer_id: achTransferId,
         bank_last4: link?.last4 ? String(link.last4) : null,
-        hold_automatically_resolves_at: holdAuto || null
+        hold_automatically_resolves_at: holdAuto || null,
+        authorization_id: authorizationId,
+        authorization_email_sent: authorizationEmailSent,
+        authorization_pdf_url: authorizationId ? `/api/me/increase/ach-authorization/${encodeURIComponent(String(billingId))}/pdf` : null
       }
     });
   } catch (e) {

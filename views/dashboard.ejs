@@ -982,6 +982,23 @@
                 </div>
                 <button id="incVerifyMicroBtn" type="button" class="btn--muted" style="margin-top:8px;width:100%">Verify microdeposits</button>
               </div>
+
+              <div id="incAchConsentForm" style="display:none;margin-top:10px">
+                <div class="muted" style="font-size:12px;margin-bottom:8px"><strong>Authorization (required)</strong></div>
+                <div class="muted" style="font-size:12px;margin-bottom:8px">
+                  Billing address on file: <span id="incAchBillingAddress"></span>
+                </div>
+                <label style="display:flex;gap:8px;align-items:flex-start;font-size:12px;cursor:pointer;line-height:1.3">
+                  <input id="incAchAuthorizeCheckbox" type="checkbox" style="margin-top:3px">
+                  <span>
+                    I authorize TalkUSA to initiate a one-time ACH debit from my bank account ending in <span id="incAchLast4Inline">••••</span> for <span id="incAchAmountInline">$0.00</span>.
+                    By signing electronically, I agree to the ACH debit authorization terms.
+                  </span>
+                </label>
+                <label style="display:block;margin:10px 0 4px;font-size:12px">Type your full name to sign</label>
+                <input id="incAchSignerName" type="text" placeholder="Full legal name" style="width:100%;box-sizing:border-box">
+                <div class="muted" style="font-size:12px;margin-top:8px">A signed authorization PDF will be emailed to you and the administrator.</div>
+              </div>
             </div>
           <% } %>
         </div>
@@ -1144,6 +1161,7 @@
     const SIP_DOMAIN = <%- JSON.stringify(typeof sipDomain !== 'undefined' ? sipDomain : '') %>;
     const ACH_PAYMENT_PROVIDER = <%- JSON.stringify(typeof achPaymentProvider !== 'undefined' ? achPaymentProvider : 'billcom') %>;
     const $ = (s)=>document.querySelector(s);
+    let meProfile = null;
     var billingPage = 0;
     var billingPageSize = 20;
     const tabs = {overview:$('#tab-overview'), profile:$('#tab-profile'), sip:$('#tab-sip'), trunk:$('#tab-trunk'), billing:$('#tab-billing'), buydid:$('#tab-buydid'), mydids:$('#tab-mydids'), ai:$('#tab-ai'), cdr:$('#tab-cdr')};
@@ -3518,6 +3536,7 @@
       try{
         const r = await fetch('/api/me/profile'); const j = await r.json();
         const d = j?.data || {};
+        meProfile = d || null;
         if (j.success){
           const body = $('#profile-table tbody'); body.innerHTML = '';
           const balanceDisplay = d.balance !== null && d.balance !== undefined ? `$${Number(d.balance).toFixed(2)}` : 'Loading...';
@@ -3549,6 +3568,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
             body.appendChild(tr);
           }
           $('#profile-empty').style.display='none'; $('#profile-table').style.display='table';
+          try { renderIncBankUi(); } catch {}
         } else { $('#profile-empty').textContent='No profile'; }
       }catch{ $('#profile-empty').textContent='Failed to load profile'; }
     }
@@ -4305,6 +4325,13 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       const linkForm = document.getElementById('incBankLinkForm');
       const verifyForm = document.getElementById('incBankVerifyForm');
 
+      const consentForm = document.getElementById('incAchConsentForm');
+      const consentCheckbox = document.getElementById('incAchAuthorizeCheckbox');
+      const signerEl = document.getElementById('incAchSignerName');
+      const billingAddrEl = document.getElementById('incAchBillingAddress');
+      const last4InlineEl = document.getElementById('incAchLast4Inline');
+      const amountInlineEl = document.getElementById('incAchAmountInline');
+
       if (statusEl) {
         statusEl.textContent =
           status === 'verified' ? 'Verified' :
@@ -4317,6 +4344,40 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       if (verifiedRow) verifiedRow.style.display = (status === 'verified' && last4) ? 'block' : 'none';
       if (linkForm) linkForm.style.display = (status === 'verified') ? 'none' : 'block';
       if (verifyForm) verifyForm.style.display = (status === 'pending') ? 'block' : 'none';
+
+      if (consentForm) consentForm.style.display = (status === 'verified') ? 'block' : 'none';
+      if (last4InlineEl) last4InlineEl.textContent = last4 ? `••••${last4}` : '••••';
+
+      // Fill in amount preview (best-effort)
+      if (amountInlineEl) {
+        const amt = Number(document.getElementById('fundAmount')?.value || 0);
+        amountInlineEl.textContent = Number.isFinite(amt) && amt > 0 ? `$${amt.toFixed(2)}` : '$0.00';
+      }
+
+      // Fill billing address preview from profile
+      if (billingAddrEl) {
+        const p = meProfile || {};
+        const addrParts = [p.address1, [p.city, p.state].filter(Boolean).join(', '), p.postalCode, p.country]
+          .map(v => String(v || '').trim())
+          .filter(Boolean);
+        billingAddrEl.textContent = addrParts.length ? addrParts.join(' ') : '—';
+      }
+
+      // Prefill signer name if empty
+      if (signerEl) {
+        const existing = String(signerEl.value || '').trim();
+        if (!existing) {
+          const p = meProfile || {};
+          const name = String(p.name || '').trim();
+          const uname = String(p.username || '').trim();
+          signerEl.value = name || uname || '';
+        }
+      }
+
+      // If no longer verified, clear the consent checkbox
+      if (consentCheckbox && status !== 'verified') {
+        consentCheckbox.checked = false;
+      }
     }
 
     async function loadIncBankLink(){
@@ -4345,6 +4406,17 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         updateAddFundsMethodUi();
       });
     });
+
+    // Update consent amount preview as the user types
+    {
+      const amtEl = document.getElementById('fundAmount');
+      if (amtEl) {
+        amtEl.addEventListener('input', () => {
+          if (!isIncreaseAch) return;
+          try { renderIncBankUi(); } catch {}
+        });
+      }
+    }
 
     // Bank link actions (only present for Increase)
     {
@@ -4450,7 +4522,9 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
 
       const method = getSelectedFundMethod();
 
-      // If Increase ACH is selected, require verified bank link before initiating debit.
+      let authorization = null;
+
+      // If Increase ACH is selected, require verified bank link + explicit authorization.
       if (method === 'ach' && isIncreaseAch) {
         const st = String(incBankLink && incBankLink.status ? incBankLink.status : '').toLowerCase();
         if (st !== 'verified') {
@@ -4458,6 +4532,22 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           updateAddFundsMethodUi();
           return;
         }
+
+        const agreed = !!document.getElementById('incAchAuthorizeCheckbox')?.checked;
+        const signerName = String(document.getElementById('incAchSignerName')?.value || '').trim();
+
+        if (!agreed) {
+          showToast('Please check the authorization box to proceed with ACH debit.', 'error');
+          updateAddFundsMethodUi();
+          return;
+        }
+        if (!signerName) {
+          showToast('Please type your full name to sign the ACH authorization.', 'error');
+          updateAddFundsMethodUi();
+          return;
+        }
+
+        authorization = { agreed: true, signer_name: signerName };
       }
 
       $('#confirmFundBtn').disabled = true;
@@ -4474,10 +4564,13 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
             ? '/api/me/ach/checkout'
             : '/api/me/card/checkout';
 
+        const payload = { amount };
+        if (authorization) payload.authorization = authorization;
+
         const r = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ amount })
+          body: JSON.stringify(payload)
         });
         const j = await r.json();
 
@@ -4508,6 +4601,15 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         // Non-hosted flow (Increase ACH debit)
         $('#addFundModal').style.display = 'none';
         showToast(j.message || 'Payment started. Your balance will update after confirmation.');
+
+        // If present, surface a download link to the signed ACH authorization PDF.
+        try {
+          const pdfUrl = (j && j.data && j.data.authorization_pdf_url) ? String(j.data.authorization_pdf_url) : '';
+          if (pdfUrl) {
+            showLinkToast('Your ACH authorization PDF is ready.', 'Download authorization PDF', pdfUrl, 'success');
+          }
+        } catch {}
+
         activate('billing');
         billingPage = 0;
         loadBillingHistory();
