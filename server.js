@@ -18091,9 +18091,23 @@ app.get('/api/me/didww/available-dids', requireAuth, async (req, res) => {
 // Purchase a DID number
 app.post('/api/me/didww/orders', requireAuth, async (req, res) => {
   try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = req.session.userId;
     const { sku_id, did_group_id, available_did_id, is_tollfree } = req.body || {};
     
     if (!sku_id) return res.status(400).json({ success: false, message: 'sku_id is required' });
+
+    // Resolve Magnus user id once (required for balance checks + charging).
+    const httpsAgent = magnusBillingAgent;
+    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+    const magnusUserId = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
+    if (!magnusUserId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Could not find MagnusBilling user ID. Please log out and log back in, then try again.'
+      });
+    }
     
     // Always check MagnusBilling balance before placing order
     // Use TalkUSA monthly markup prices (local vs toll-free)
@@ -18114,34 +18128,20 @@ app.post('/api/me/didww/orders', requireAuth, async (req, res) => {
     
     // Check MagnusBilling balance before placing order
     try {
-      const httpsAgent = new https.Agent({ 
-        rejectUnauthorized: process.env.MAGNUSBILLING_TLS_INSECURE !== '1', 
-        ...(process.env.MAGNUSBILLING_TLS_SERVERNAME ? { servername: process.env.MAGNUSBILLING_TLS_SERVERNAME } : {}) 
-      });
-      const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
-      const magnusUserId = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
-      
-      if (magnusUserId) {
-        const readParams = new URLSearchParams();
-        readParams.append('module', 'user');
-        readParams.append('action', 'read');
-        readParams.append('start', '0');
-        readParams.append('limit', '100');
-        const readResp = await mbSignedCall({ relPath: '/index.php/user/read', params: readParams, httpsAgent, hostHeader });
-        const allUsers = readResp?.data?.rows || readResp?.data?.data || [];
-        const userRow = allUsers.find(u => String(u.id || u.user_id || '') === String(magnusUserId));
-        
-        if (userRow) {
-          const currentCredit = Number(userRow.credit || 0);
-          if (DEBUG) console.log('[didww.order] Balance check:', { magnusUserId, currentCredit, requiredMonthly, isTollfree: isTollfreeFlag });
-          
-          if (currentCredit < requiredMonthly) {
-            return res.status(400).json({ 
-              success: false, 
-              message: `Insufficient balance in your TalkUSA account. This number costs $${requiredMonthly.toFixed(2)} per month and your current balance is $${currentCredit.toFixed(2)}. Please add funds on the dashboard and try again.` 
-            });
-          }
-        }
+      const info = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+      const currentCredit = (info && Number.isFinite(info.credit)) ? Number(info.credit) : null;
+
+      if (currentCredit == null) {
+        return res.status(500).json({ success: false, message: 'Failed to verify account balance. Please try again.' });
+      }
+
+      if (DEBUG) console.log('[didww.order] Balance check:', { magnusUserId, currentCredit, requiredMonthly, isTollfree: isTollfreeFlag });
+
+      if (currentCredit < requiredMonthly) {
+        return res.status(400).json({ 
+          success: false, 
+          message: `Insufficient balance in your TalkUSA account. This number costs $${requiredMonthly.toFixed(2)} per month and your current balance is $${currentCredit.toFixed(2)}. Please add funds on the dashboard and try again.` 
+        });
       }
     } catch (balanceErr) {
       console.error('[didww.order] Failed to check balance:', balanceErr.message);
@@ -18188,27 +18188,8 @@ app.post('/api/me/didww/orders', requireAuth, async (req, res) => {
     let order = data.data || {};
     if (DEBUG) console.log('[didww.order] Order response:', JSON.stringify(data).substring(0, 1000));
     
-    // Record purchase in billing history and deduct from MagnusBilling
     const purchaseAmount = parseFloat(order.attributes?.amount || '0');
-    if (pool && req.session.userId && order.id && purchaseAmount > 0) {
-      try {
-        const reference = order.attributes?.reference || order.id;
-        const description = `DID Purchase (Order: ${reference})`;
-        await pool.execute(
-          'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-          [req.session.userId, -purchaseAmount, description, 'completed']
-        );
-        if (DEBUG) console.log('[didww.order] Recorded billing history:', { amount: -purchaseAmount, reference });
-        
-        // NOTE: We no longer deduct the DIDWW wholesale purchase amount from the
-        // customer's MagnusBilling balance here. The business absorbs the
-        // provider cost and only bills the customer the TalkUSA monthly
-        // service fee (markup) via the separate monthly billing logic.
-      } catch (billingErr) {
-        console.error('[didww.order] Failed to record billing history:', billingErr.message);
-      }
-    }
-    
+
     // Extract DIDs - DIDWW may include them in the response or we need to fetch separately
     let includedDids = (data.included || []).filter(i => i.type === 'dids');
     
@@ -18268,7 +18249,7 @@ app.post('/api/me/didww/orders', requireAuth, async (req, res) => {
     if (DEBUG) console.log('[didww.order] DIDs found:', includedDids.length, includedDids.map(d => ({ id: d.id, number: d.attributes?.number })));
     
     // Save purchased DIDs to user_dids table and assign to capacity resources
-    if (pool && req.session.userId && includedDids.length > 0) {
+    if (pool && userId && includedDids.length > 0) {
       const capacityPoolId = await getCapacityPoolId();
       const sharedCapacityGroupId = await getSharedCapacityGroupId();
       
@@ -18278,9 +18259,9 @@ app.post('/api/me/didww/orders', requireAuth, async (req, res) => {
           const didType = did.attributes?.did_type || null;
           await pool.execute(
             'INSERT INTO user_dids (user_id, didww_did_id, did_number, did_type) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE did_number=VALUES(did_number)',
-            [req.session.userId, did.id, didNumber, didType]
+            [userId, did.id, didNumber, didType]
           );
-          if (DEBUG) console.log('[didww.order] Saved DID to user_dids:', { userId: req.session.userId, didId: did.id, number: didNumber });
+          if (DEBUG) console.log('[didww.order] Saved DID to user_dids:', { userId, didId: did.id, number: didNumber });
           
           // Assign DID to capacity pool / shared capacity group if configured
           if (capacityPoolId || sharedCapacityGroupId) {
@@ -18317,11 +18298,49 @@ app.post('/api/me/didww/orders', requireAuth, async (req, res) => {
       }
     }
 
+    // Best-effort: bill monthly service fees immediately so the MagnusBilling balance
+    // changes right after purchase (even if the background scheduler is disabled).
+    let didsMeta = null;
+    if (pool && userId && includedDids.length > 0) {
+      try {
+        const didIds = includedDids.map(d => d && d.id).filter(Boolean);
+        if (didIds.length > 0) {
+          const idsFilter = didIds.join(',');
+          didsMeta = await didwwApiCall({
+            method: 'GET',
+            path: `/dids?filter[id]=${idsFilter}&include=did_group.city,did_group.region,did_group.country,did_group.stock_keeping_units,did_group.did_group_type`
+          });
+        }
+      } catch (metaErr) {
+        didsMeta = null;
+        if (DEBUG) console.warn('[didww.order] Failed to fetch DID metadata for billing:', metaErr?.message || metaErr);
+      }
+
+      try {
+        const didsForBilling = (didsMeta && Array.isArray(didsMeta.data) && didsMeta.data.length)
+          ? didsMeta.data
+          : includedDids;
+        const includedForBilling = (didsMeta && Array.isArray(didsMeta.included))
+          ? didsMeta.included
+          : (data.included || []);
+
+        await billDidMarkupsForUser({
+          localUserId: userId,
+          magnusUserId,
+          userDids: didsForBilling,
+          included: includedForBilling,
+          httpsAgent,
+          hostHeader
+        });
+      } catch (billErr) {
+        if (DEBUG) console.warn('[didww.order] Failed to bill monthly service fee after purchase:', billErr?.message || billErr);
+      }
+    }
+
     // Send purchase receipt email if we have numbers and a user email
     // Use did_purchase_receipts table for at-most-once semantics per (user, order)
-    if (pool && req.session.userId && includedDids.length > 0 && order.id) {
+    if (pool && userId && includedDids.length > 0 && order.id) {
       try {
-        const userId = req.session.userId;
         const orderId = order.id;
         let shouldSend = true;
         try {
@@ -18358,14 +18377,18 @@ app.post('/api/me/didww/orders', requireAuth, async (req, res) => {
             // Build per-number line items with location and pricing
             let items = [];
             try {
-              const didIds = includedDids.map(d => d && d.id).filter(Boolean);
-              if (didIds.length > 0) {
-                const idsFilter = didIds.join(',');
-                const didsResp = await didwwApiCall({
-                  method: 'GET',
-                  path: `/dids?filter[id]=${idsFilter}&include=did_group.city,did_group.region,did_group.country,did_group.stock_keeping_units,did_group.did_group_type`
-                });
-                items = buildDidPurchaseLineItems(didsResp.data || includedDids, didsResp.included || []);
+              if (didsMeta && Array.isArray(didsMeta.data) && didsMeta.data.length) {
+                items = buildDidPurchaseLineItems(didsMeta.data || includedDids, didsMeta.included || []);
+              } else {
+                const didIds = includedDids.map(d => d && d.id).filter(Boolean);
+                if (didIds.length > 0) {
+                  const idsFilter = didIds.join(',');
+                  const didsResp = await didwwApiCall({
+                    method: 'GET',
+                    path: `/dids?filter[id]=${idsFilter}&include=did_group.city,did_group.region,did_group.country,did_group.stock_keeping_units,did_group.did_group_type`
+                  });
+                  items = buildDidPurchaseLineItems(didsResp.data || includedDids, didsResp.included || []);
+                }
               }
             } catch (metaErr) {
               if (DEBUG) console.warn('[didww.order] Failed to fetch DID metadata for receipt:', metaErr.message || metaErr);
@@ -18456,6 +18479,7 @@ app.get('/api/me/didww/dids', requireAuth, async (req, res) => {
   try {
     // First, check for pending orders and reconcile them
     if (pool && req.session.userId) {
+      let magnusUserIdForBilling = null;
       try {
         const [pendingOrders] = await pool.execute(
           'SELECT order_id FROM pending_orders WHERE user_id = ? AND reconciled = 0',
@@ -18509,6 +18533,29 @@ app.get('/api/me/didww/dids', requireAuth, async (req, res) => {
                       console.error('[didww.reconcile] Failed to update DID capacity relationships:', cpErr.response?.data || cpErr.message);
                     }
                   }
+                }
+
+                // Best-effort: bill monthly service fees for newly reconciled numbers immediately.
+                try {
+                  if (!magnusUserIdForBilling) {
+                    const httpsAgent = magnusBillingAgent;
+                    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+                    magnusUserIdForBilling = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
+                  }
+                  if (magnusUserIdForBilling) {
+                    const httpsAgent = magnusBillingAgent;
+                    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+                    await billDidMarkupsForUser({
+                      localUserId: req.session.userId,
+                      magnusUserId: magnusUserIdForBilling,
+                      userDids: didsData.data || [],
+                      included: didsData.included || [],
+                      httpsAgent,
+                      hostHeader
+                    });
+                  }
+                } catch (billErr) {
+                  if (DEBUG) console.warn('[didww.reconcile] Failed to bill monthly service fees for pending order:', billErr?.message || billErr);
                 }
 
                 // After saving and assigning, send purchase receipt email (best-effort, at-most-once)
