@@ -202,6 +202,13 @@ function shouldRedactLogKey(key) {
   if (k === 'authorization' || k.endsWith('authorization')) return true;
   if (k === 'cookie' || k === 'set-cookie') return true;
 
+  // Bank account details (never log)
+  // NOTE: avoid over-redacting non-sensitive IDs like account_id/external_account_id.
+  if (k.includes('routing_number') || k.includes('routingnumber')) return true;
+  if (k === 'aba' || k.includes('bank_routing')) return true;
+  if (k.includes('account_number') || k.includes('accountnumber')) return true;
+  if (k.includes('bank_account_number') || k.includes('bankaccountnumber')) return true;
+
   return false;
 }
 
@@ -1582,6 +1589,60 @@ async function initDb() {
     KEY idx_billcom_user (user_id),
     KEY idx_billcom_order (order_id),
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
+  // Increase bank links (microdeposit verification)
+  // NOTE: Do NOT store routing/account numbers. Store only Increase IDs + masked display.
+  await pool.query(`CREATE TABLE IF NOT EXISTS increase_bank_links (
+    user_id BIGINT NOT NULL,
+    external_account_id VARCHAR(128) NOT NULL,
+    last4 VARCHAR(8) NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    microdeposit_amount_1 INT NULL,
+    microdeposit_amount_2 INT NULL,
+    microdeposit_transfer_id_1 VARCHAR(128) NULL,
+    microdeposit_transfer_id_2 VARCHAR(128) NULL,
+    microdeposit_sent_at DATETIME NULL,
+    send_attempts INT NOT NULL DEFAULT 0,
+    verify_attempts INT NOT NULL DEFAULT 0,
+    verified_at DATETIME NULL,
+    raw_payload JSON NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id),
+    UNIQUE KEY uniq_increase_external_account (external_account_id),
+    CONSTRAINT fk_increase_bank_links_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
+  // Increase ACH transfers (debits) table - tracks bank debit transfers + hold-release reconciliation
+  await pool.query(`CREATE TABLE IF NOT EXISTS increase_ach_transfers (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    billing_history_id BIGINT NOT NULL,
+    ach_transfer_id VARCHAR(128) NOT NULL,
+    order_id VARCHAR(191) NOT NULL,
+    amount DECIMAL(10,2) NOT NULL,
+    currency VARCHAR(16) NOT NULL DEFAULT 'USD',
+    status VARCHAR(64) NOT NULL DEFAULT 'pending',
+    hold_automatically_resolves_at DATETIME NULL,
+    credited TINYINT(1) NOT NULL DEFAULT 0,
+    raw_payload JSON NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_increase_ach_transfer (ach_transfer_id),
+    UNIQUE KEY uniq_increase_order (order_id),
+    KEY idx_increase_user (user_id),
+    KEY idx_increase_billing (billing_history_id),
+    KEY idx_increase_hold (hold_automatically_resolves_at),
+    CONSTRAINT fk_increase_ach_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_increase_ach_billing FOREIGN KEY (billing_history_id) REFERENCES billing_history(id) ON DELETE CASCADE
+  )`);
+
+  // Increase webhook event idempotency (Standard Webhooks)
+  await pool.query(`CREATE TABLE IF NOT EXISTS increase_webhook_events (
+    event_id VARCHAR(128) PRIMARY KEY,
+    received_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    raw_payload JSON NULL
   )`);
 
   // AI Agents (Pipecat Cloud)
@@ -3123,7 +3184,8 @@ app.get('/dashboard', requireAuth, (req, res) => {
     tollfreeDidMarkup: tollfreeMarkup,
     checkoutMinAmount: checkoutMin,
     checkoutMaxAmount: checkoutMax,
-    sipDomain
+    sipDomain,
+    achPaymentProvider: ACH_PAYMENT_PROVIDER
   });
 });
 // Guard: deleting the primary signup user is disabled via API as well
@@ -11464,6 +11526,269 @@ app.post('/api/me/add-funds', requireAuth, async (req, res) => {
   }
 });
 
+// ========== Increase (ACH debit - verify first) ==========
+// Get current user's bank-link status (masked)
+app.get('/api/me/increase/bank-link', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = req.session.userId;
+    const [rows] = await pool.execute(
+      'SELECT status, last4, microdeposit_sent_at, verified_at FROM increase_bank_links WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+
+    const row = rows && rows[0] ? rows[0] : null;
+    if (!row) {
+      return res.json({ success: true, data: { status: 'none' } });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        status: String(row.status || 'pending'),
+        last4: row.last4 != null ? String(row.last4) : null,
+        microdeposit_sent_at: row.microdeposit_sent_at ? row.microdeposit_sent_at.toISOString() : null,
+        verified_at: row.verified_at ? row.verified_at.toISOString() : null
+      }
+    });
+  } catch (e) {
+    if (DEBUG) console.error('[increase.bank-link.get] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load bank link status' });
+  }
+});
+
+function increaseNormalizeRoutingNumber(raw) {
+  return String(raw || '').replace(/[^0-9]/g, '').trim();
+}
+
+function increaseNormalizeAccountNumber(raw) {
+  return String(raw || '').replace(/[^0-9]/g, '').trim();
+}
+
+function parseMicrodepositInputToCents(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return null;
+  const n = Number(s);
+  if (!Number.isFinite(n)) return null;
+
+  // Users typically enter 0.13 (dollars). Support entering "13" as cents too.
+  let cents;
+  if (n < 1) cents = Math.round(n * 100);
+  else if (n <= 99 && Number.isInteger(n)) cents = n;
+  else cents = Math.round(n * 100);
+
+  if (!Number.isFinite(cents) || cents <= 0 || cents > 99) return null;
+  return cents;
+}
+
+// Start microdeposit verification by sending two small ACH credits.
+// NOTE: We never store routing/account numbers; only masked last4 + Increase IDs.
+app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    if (!isIncreaseConfigured()) {
+      return res.status(500).json({ success: false, message: 'ACH (Increase) is not configured' });
+    }
+
+    const userId = req.session.userId;
+    const routingNumber = increaseNormalizeRoutingNumber(req.body?.routing_number || req.body?.routingNumber);
+    const accountNumber = increaseNormalizeAccountNumber(req.body?.account_number || req.body?.accountNumber);
+    const force = !!(req.body && (req.body.force === true || req.body.force === 1 || req.body.force === '1'));
+
+    if (!routingNumber || routingNumber.length !== 9) {
+      return res.status(400).json({ success: false, message: 'Routing number must be 9 digits' });
+    }
+    if (!accountNumber || accountNumber.length < 4) {
+      return res.status(400).json({ success: false, message: 'Account number is required' });
+    }
+
+    // Prevent accidental re-sends unless explicitly forced.
+    try {
+      const [existingRows] = await pool.execute(
+        'SELECT status, microdeposit_sent_at FROM increase_bank_links WHERE user_id = ? LIMIT 1',
+        [userId]
+      );
+      const ex = existingRows && existingRows[0] ? existingRows[0] : null;
+      if (ex) {
+        const st = String(ex.status || '').toLowerCase();
+        if (st === 'verified') {
+          return res.status(409).json({ success: false, message: 'Bank account is already verified.' });
+        }
+        if (!force && ex.microdeposit_sent_at) {
+          const sentAtMs = new Date(ex.microdeposit_sent_at).getTime();
+          if (Number.isFinite(sentAtMs)) {
+            const ageMs = Date.now() - sentAtMs;
+            const minAgeMs = 24 * 60 * 60 * 1000; // 24h
+            if (ageMs >= 0 && ageMs < minAgeMs) {
+              return res.status(409).json({
+                success: false,
+                message: 'Microdeposits were already sent recently. Please wait for them to arrive before requesting new ones.'
+              });
+            }
+          }
+        }
+      }
+    } catch {}
+
+    // Fetch user info for individual_name
+    let username = '';
+    let firstName = '';
+    let lastName = '';
+    try {
+      const [uRows] = await pool.execute('SELECT username, firstname, lastname FROM signup_users WHERE id=? LIMIT 1', [userId]);
+      const u = uRows && uRows[0] ? uRows[0] : null;
+      if (u) {
+        if (u.username) username = String(u.username);
+        if (u.firstname) firstName = String(u.firstname);
+        if (u.lastname) lastName = String(u.lastname);
+      }
+    } catch {}
+
+    const fullName = `${firstName || ''} ${lastName || ''}`.trim();
+    const individualName = (fullName || username || 'Customer').substring(0, 70);
+    const companyName = String(INCREASE_COMPANY_NAME || 'TalkUSA').trim().substring(0, 16) || 'TalkUSA';
+
+    // Two distinct random microdeposits (cents)
+    const a1 = crypto.randomInt ? crypto.randomInt(11, 50) : (11 + Math.floor(Math.random() * 39));
+    let a2 = crypto.randomInt ? crypto.randomInt(11, 50) : (11 + Math.floor(Math.random() * 39));
+    if (a2 === a1) a2 = (a1 % 39) + 11;
+
+    const payloadBase = {
+      account_id: String(INCREASE_ACCOUNT_ID),
+      currency: 'USD',
+      routing_number: routingNumber,
+      account_number: accountNumber,
+      company_entry_description: 'ACCTVERIFY',
+      company_name: companyName,
+      individual_name: individualName,
+      individual_id: `talkusa-${userId}`
+    };
+
+    const t1 = await increaseApiCall({
+      method: 'POST',
+      path: '/ach_transfers',
+      body: Object.assign({}, payloadBase, { amount: a1 })
+    });
+
+    const t2 = await increaseApiCall({
+      method: 'POST',
+      path: '/ach_transfers',
+      body: Object.assign({}, payloadBase, { amount: a2 })
+    });
+
+    const externalAccountId = String(
+      t1?.external_account_id || t2?.external_account_id || ''
+    ).trim();
+    const transferId1 = t1 && t1.id ? String(t1.id).trim() : null;
+    const transferId2 = t2 && t2.id ? String(t2.id).trim() : null;
+
+    if (!externalAccountId) {
+      return res.status(502).json({ success: false, message: 'Increase did not return an external account identifier' });
+    }
+
+    const last4 = accountNumber.slice(-4);
+    const rawPayload = JSON.stringify({ transfer1: t1, transfer2: t2 });
+
+    await pool.execute(
+      `INSERT INTO increase_bank_links (
+        user_id, external_account_id, last4, status,
+        microdeposit_amount_1, microdeposit_amount_2,
+        microdeposit_transfer_id_1, microdeposit_transfer_id_2,
+        microdeposit_sent_at, send_attempts, verify_attempts, verified_at, raw_payload
+      ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, NOW(), 1, 0, NULL, ?)
+      ON DUPLICATE KEY UPDATE
+        external_account_id = VALUES(external_account_id),
+        last4 = VALUES(last4),
+        status = 'pending',
+        microdeposit_amount_1 = VALUES(microdeposit_amount_1),
+        microdeposit_amount_2 = VALUES(microdeposit_amount_2),
+        microdeposit_transfer_id_1 = VALUES(microdeposit_transfer_id_1),
+        microdeposit_transfer_id_2 = VALUES(microdeposit_transfer_id_2),
+        microdeposit_sent_at = VALUES(microdeposit_sent_at),
+        send_attempts = send_attempts + 1,
+        verify_attempts = 0,
+        verified_at = NULL,
+        raw_payload = VALUES(raw_payload)`,
+      [userId, externalAccountId, last4, a1, a2, transferId1, transferId2, rawPayload]
+    );
+
+    return res.json({
+      success: true,
+      message: 'Microdeposits sent. Check your bank account in 1–2 business days, then enter the two amounts to verify.',
+      data: { status: 'pending', last4 }
+    });
+  } catch (e) {
+    if (DEBUG) console.error('[increase.bank-link.start] error:', e?.data || e?.message || e);
+    return res.status(500).json({ success: false, message: e?.message || 'Failed to start microdeposit verification' });
+  }
+});
+
+// Verify the two microdeposit amounts.
+app.post('/api/me/increase/bank-link/microdeposits/verify', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = req.session.userId;
+    const amt1 = parseMicrodepositInputToCents(req.body?.amount1 ?? req.body?.amount_1 ?? req.body?.microdeposit1);
+    const amt2 = parseMicrodepositInputToCents(req.body?.amount2 ?? req.body?.amount_2 ?? req.body?.microdeposit2);
+
+    if (amt1 == null || amt2 == null) {
+      return res.status(400).json({ success: false, message: 'Please enter the two microdeposit amounts (e.g. 0.13 and 0.25).' });
+    }
+
+    const [rows] = await pool.execute(
+      'SELECT status, microdeposit_amount_1, microdeposit_amount_2, last4, verify_attempts FROM increase_bank_links WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'No bank verification in progress. Please send microdeposits first.' });
+    }
+
+    const status = String(row.status || 'pending').toLowerCase();
+    if (status === 'verified') {
+      return res.json({ success: true, message: 'Bank account is already verified.', data: { status: 'verified', last4: row.last4 || null } });
+    }
+
+    const expected1 = row.microdeposit_amount_1 != null ? Number(row.microdeposit_amount_1) : null;
+    const expected2 = row.microdeposit_amount_2 != null ? Number(row.microdeposit_amount_2) : null;
+
+    const matches = (amt1 === expected1 && amt2 === expected2) || (amt1 === expected2 && amt2 === expected1);
+
+    const nextAttempts = Number(row.verify_attempts || 0) + 1;
+
+    if (!matches) {
+      const maxAttempts = 5;
+      const newStatus = nextAttempts >= maxAttempts ? 'failed' : 'pending';
+      await pool.execute(
+        'UPDATE increase_bank_links SET verify_attempts = ?, status = ? WHERE user_id = ? LIMIT 1',
+        [nextAttempts, newStatus, userId]
+      );
+      return res.status(400).json({
+        success: false,
+        message: nextAttempts >= maxAttempts
+          ? 'Verification failed too many times. Please resend microdeposits and try again.'
+          : 'Those amounts did not match. Please double-check your bank statement and try again.'
+      });
+    }
+
+    await pool.execute(
+      'UPDATE increase_bank_links SET status = ?, verified_at = NOW(), verify_attempts = ? WHERE user_id = ? LIMIT 1',
+      ['verified', nextAttempts, userId]
+    );
+
+    return res.json({
+      success: true,
+      message: 'Bank account verified. You can now use ACH (Bank Debit) to add funds.',
+      data: { status: 'verified', last4: row.last4 || null }
+    });
+  } catch (e) {
+    if (DEBUG) console.error('[increase.bank-link.verify] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to verify microdeposits' });
+  }
+});
+
 // Create a NOWPayments checkout (Standard e-commerce flow)
 // Returns a hosted payment URL where the user can complete a crypto payment.
 app.post('/api/me/nowpayments/checkout', requireAuth, async (req, res) => {
@@ -11569,9 +11894,151 @@ app.post('/api/me/nowpayments/checkout', requireAuth, async (req, res) => {
   }
 });
 
+// Create an Increase ACH debit (pull) and credit the user only after Increase's hold clears.
+// Returns a local "pending" response (no hosted payment URL).
+async function handleIncreaseAchCheckout(req, res) {
+  let billingId = null;
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    if (!isIncreaseConfigured()) {
+      return res.status(500).json({ success: false, message: 'ACH (Increase) is not configured' });
+    }
+
+    const userId = req.session.userId;
+    const { amount } = req.body || {};
+
+    const amountNum = parseFloat(amount);
+    if (!Number.isFinite(amountNum)) {
+      return res.status(400).json({ success: false, message: 'Invalid amount' });
+    }
+    if (amountNum < CHECKOUT_MIN_AMOUNT || amountNum > CHECKOUT_MAX_AMOUNT) {
+      return res.status(400).json({ success: false, message: `Amount must be between $${CHECKOUT_MIN_AMOUNT} and $${CHECKOUT_MAX_AMOUNT}` });
+    }
+
+    // Require a verified bank link
+    const [linkRows] = await pool.execute(
+      'SELECT external_account_id, last4, status FROM increase_bank_links WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+    const link = linkRows && linkRows[0] ? linkRows[0] : null;
+    const linkStatus = String(link?.status || '').toLowerCase();
+    const externalAccountId = link && link.external_account_id ? String(link.external_account_id).trim() : '';
+    if (!externalAccountId || linkStatus !== 'verified') {
+      return res.status(400).json({ success: false, message: 'Please link and verify your bank account first.' });
+    }
+
+    // Fetch user info for statement name + later crediting
+    const [userRows] = await pool.execute(
+      'SELECT id, magnus_user_id, username, firstname, lastname, email FROM signup_users WHERE id = ? LIMIT 1',
+      [userId]
+    );
+    const user = userRows && userRows[0] ? userRows[0] : null;
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const magnusUserId = String(user.magnus_user_id || '').trim();
+    if (!magnusUserId) {
+      return res.status(400).json({ success: false, message: 'Could not find MagnusBilling user ID' });
+    }
+
+    const fullName = `${user.firstname || ''} ${user.lastname || ''}`.trim();
+    const displayName = fullName || user.username || (req.session.username || 'Customer');
+
+    // Insert pending billing record. billing_history.id is our invoice number.
+    const [insertResult] = await pool.execute(
+      'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
+      [userId, amountNum, null, 'pending']
+    );
+    billingId = insertResult.insertId;
+
+    const desc = buildRefillDescription(billingId);
+    try { await pool.execute('UPDATE billing_history SET description = ? WHERE id = ?', [desc, billingId]); } catch {}
+
+    const orderId = `inc-${userId}-${billingId}`;
+
+    // Increase expects amount in cents; negative amount indicates an ACH debit (pull).
+    const debitCents = -Math.round(amountNum * 100);
+    if (!Number.isFinite(debitCents) || debitCents >= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid amount' });
+    }
+
+    const companyName = String(INCREASE_COMPANY_NAME || 'TalkUSA').trim().substring(0, 16) || 'TalkUSA';
+    const companyEntryDescription = String((process.env.INCREASE_COMPANY_ENTRY_DESCRIPTION || 'TALKUSA')).trim().substring(0, 10) || 'TALKUSA';
+
+    const transfer = await increaseApiCall({
+      method: 'POST',
+      path: '/ach_transfers',
+      headers: { 'Idempotency-Key': orderId },
+      body: {
+        account_id: String(INCREASE_ACCOUNT_ID),
+        external_account_id: externalAccountId,
+        amount: debitCents,
+        currency: 'USD',
+        company_name: companyName,
+        company_entry_description: companyEntryDescription,
+        individual_name: String(displayName || 'Customer').substring(0, 70),
+        individual_id: `talkusa-${userId}`
+      }
+    });
+
+    const achTransferId = transfer && transfer.id ? String(transfer.id).trim() : '';
+    if (!achTransferId) {
+      await pool.execute(
+        'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+        ['failed', JSON.stringify(transfer || {}), billingId]
+      );
+      return res.status(502).json({ success: false, message: 'Increase did not return an ACH transfer id' });
+    }
+
+    const holdAuto = transfer?.inbound_funds_hold?.automatically_resolves_at || null;
+    let holdAutoDt = null;
+    if (holdAuto) {
+      const ms = Date.parse(String(holdAuto));
+      if (Number.isFinite(ms)) holdAutoDt = new Date(ms);
+    }
+
+    const transferStatus = String(transfer?.status || 'pending');
+    const payloadJson = JSON.stringify(transfer);
+
+    await pool.execute(
+      'INSERT INTO increase_ach_transfers (user_id, billing_history_id, ach_transfer_id, order_id, amount, currency, status, hold_automatically_resolves_at, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)',
+      [userId, billingId, achTransferId, orderId, Number(amountNum.toFixed(2)), 'USD', transferStatus, holdAutoDt, payloadJson]
+    );
+
+    try {
+      await pool.execute(
+        'UPDATE billing_history SET magnus_response = ? WHERE id = ? LIMIT 1',
+        [JSON.stringify({ provider: 'increase', ach_transfer_id: achTransferId, hold_automatically_resolves_at: holdAuto || null }), billingId]
+      );
+    } catch {}
+
+    return res.json({
+      success: true,
+      status: 'pending',
+      message: 'ACH debit initiated. Your TalkUSA balance will be credited after the bank confirmation window clears.',
+      data: {
+        billing_id: billingId,
+        ach_transfer_id: achTransferId,
+        bank_last4: link?.last4 ? String(link.last4) : null,
+        hold_automatically_resolves_at: holdAuto || null
+      }
+    });
+  } catch (e) {
+    if (billingId && pool) {
+      try {
+        await pool.execute(
+          'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+          ['failed', String(e?.message || e), billingId]
+        );
+      } catch {}
+    }
+    if (DEBUG) console.error('[increase.ach.checkout] error:', e?.data || e?.message || e);
+    return res.status(500).json({ success: false, message: e?.message || 'Failed to create ACH debit' });
+  }
+}
+
 // Create a Bill.com / BILL invoice and return a hosted payment link.
 // Users can pay via BILL and their TalkUSA balance will be credited on webhook confirmation.
-app.post('/api/me/billcom/checkout', requireAuth, async (req, res) => {
+async function handleBillcomCheckout(req, res) {
   let billingId = null;
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
@@ -11711,6 +12178,15 @@ app.post('/api/me/billcom/checkout', requireAuth, async (req, res) => {
     if (DEBUG) console.error('[billcom.checkout] error:', e?.data || e?.message || e);
     return res.status(500).json({ success: false, message: 'Failed to create ACH payment' });
   }
+}
+
+app.post('/api/me/billcom/checkout', requireAuth, handleBillcomCheckout);
+
+// ACH provider switch endpoint (used by UI)
+app.post('/api/me/ach/checkout', requireAuth, async (req, res) => {
+  const provider = String(process.env.ACH_PAYMENT_PROVIDER || ACH_PAYMENT_PROVIDER || 'billcom').trim().toLowerCase();
+  if (provider === 'increase') return handleIncreaseAchCheckout(req, res);
+  return handleBillcomCheckout(req, res);
 });
 
 // Create a Square Payment Link checkout for card payments
@@ -13288,6 +13764,51 @@ app.post('/webhooks/billcom', async (req, res) => {
     return res.status(200).json({ success: true });
   } catch (e) {
     if (DEBUG) console.error('[billcom.webhook] Unhandled error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Webhook handling failed' });
+  }
+});
+
+// Increase webhook endpoint (Standard Webhooks)
+// Configure in Increase dashboard:
+//   PUBLIC_BASE_URL + /webhooks/increase
+app.post('/webhooks/increase', async (req, res) => {
+  try {
+    if (!pool) {
+      return res.status(500).json({ success: false, message: 'Database not configured' });
+    }
+
+    const sigOk = verifyIncreaseWebhookSignature(req);
+    if (!sigOk) {
+      if (DEBUG) console.warn('[increase.webhook] Invalid signature');
+      return res.status(400).json({ success: false, message: 'Invalid signature' });
+    }
+
+    const evt = req.body || {};
+    const eventId = evt && evt.id ? String(evt.id).trim() : '';
+
+    // Idempotency: record event id (best-effort). If duplicate, ignore.
+    if (eventId) {
+      try {
+        const payloadJson = JSON.stringify(evt);
+        await pool.execute(
+          'INSERT IGNORE INTO increase_webhook_events (event_id, raw_payload) VALUES (?, ?)',
+          [eventId, payloadJson]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[increase.webhook] Failed to persist event id:', e?.message || e);
+      }
+    }
+
+    // Nudge reconciliation (polling remains the source of truth)
+    try {
+      setImmediate(() => {
+        runIncreaseReconcileTick().catch(() => {});
+      });
+    } catch {}
+
+    return res.status(200).json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[increase.webhook] Unhandled error:', e?.message || e);
     return res.status(500).json({ success: false, message: 'Webhook handling failed' });
   }
 });
@@ -14976,6 +15497,23 @@ const BILLCOM_ORGANIZATION_ID = process.env.BILLCOM_ORGANIZATION_ID || '';
 const BILLCOM_DEV_KEY = process.env.BILLCOM_DEV_KEY || '';
 const BILLCOM_WEBHOOK_SECURITY_KEY = process.env.BILLCOM_WEBHOOK_SECURITY_KEY || '';
 
+// ACH payment provider selector
+// - billcom (default): Bill.com invoice + hosted payment link
+// - increase: Increase ACH debit (verify-first via microdeposits)
+const ACH_PAYMENT_PROVIDER = String(process.env.ACH_PAYMENT_PROVIDER || 'billcom').trim().toLowerCase();
+
+// Increase configuration (ACH debits + webhooks)
+const INCREASE_ENV = String(process.env.INCREASE_ENV || 'sandbox').trim().toLowerCase(); // sandbox | production
+const INCREASE_API_URL = String(
+  process.env.INCREASE_API_URL || (INCREASE_ENV === 'production' ? 'https://api.increase.com' : 'https://sandbox.increase.com')
+).trim().replace(/\/+$/, '');
+const INCREASE_API_KEY = process.env.INCREASE_API_KEY || '';
+const INCREASE_ACCOUNT_ID = process.env.INCREASE_ACCOUNT_ID || '';
+// Standard Webhooks secret (https://increase.com/documentation/webhooks)
+const INCREASE_WEBHOOK_SECRET = process.env.INCREASE_WEBHOOK_SECRET || '';
+// NACHA company name shown on bank statements (often limited to 16 chars; Increase may enforce)
+const INCREASE_COMPANY_NAME = String(process.env.INCREASE_COMPANY_NAME || 'TalkUSA').trim() || 'TalkUSA';
+
 // Card payment provider selector
 // - square (default): Square Payment Links
 // - stripe: Stripe hosted Checkout
@@ -15041,6 +15579,55 @@ function nowpaymentsAxios() {
       'Accept': 'application/json'
     }
   });
+}
+
+// ========== Increase helpers ==========
+function isIncreaseConfigured() {
+  return !!(INCREASE_API_KEY && INCREASE_ACCOUNT_ID && INCREASE_API_URL);
+}
+
+function increaseAxios() {
+  const key = String(INCREASE_API_KEY || '').trim();
+  if (!key) {
+    throw new Error('INCREASE_API_KEY not configured');
+  }
+  if (!INCREASE_API_URL) {
+    throw new Error('INCREASE_API_URL not configured');
+  }
+  return axios.create({
+    baseURL: INCREASE_API_URL,
+    timeout: 30000,
+    headers: {
+      'Authorization': `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    },
+    validateStatus: () => true
+  });
+}
+
+async function increaseApiCall({ method, path, body, params, headers }) {
+  const client = increaseAxios();
+  const resp = await client.request({
+    method,
+    url: path,
+    data: body,
+    params,
+    headers: Object.assign({}, headers || {})
+  });
+
+  if (!(resp.status >= 200 && resp.status < 300)) {
+    if (DEBUG) console.error('[increaseApiCall] Request failed:', { status: resp.status, path, data: resp.data });
+    const msg = (resp.data && (resp.data.message || resp.data.error))
+      ? String(resp.data.message || resp.data.error)
+      : `Increase API error (${resp.status})`;
+    const err = new Error(msg);
+    err.status = resp.status;
+    err.data = resp.data;
+    throw err;
+  }
+
+  return resp.data;
 }
 
 // ========== Bill.com / BILL helpers ==========
@@ -15300,6 +15887,71 @@ function verifyBillcomWebhookSignature(req) {
     return crypto.timingSafeEqual(a, b);
   } catch (e) {
     if (DEBUG) console.warn('[billcom.webhook] Signature verification error:', e.message || e);
+    return false;
+  }
+}
+
+// Verify Increase webhook signature (Standard Webhooks)
+// https://increase.com/documentation/webhooks
+function verifyIncreaseWebhookSignature(req) {
+  try {
+    const secret = String(INCREASE_WEBHOOK_SECRET || '').trim();
+    if (!secret) {
+      if (DEBUG) console.warn('[increase.webhook] INCREASE_WEBHOOK_SECRET not set; skipping verification');
+      return true;
+    }
+
+    const webhookId = req.headers['webhook-id'];
+    const webhookTimestamp = req.headers['webhook-timestamp'];
+    const webhookSignature = req.headers['webhook-signature'];
+
+    if (!webhookId || !webhookTimestamp || !webhookSignature) {
+      if (DEBUG) console.warn('[increase.webhook] Missing required webhook headers');
+      return false;
+    }
+
+    const raw = req.rawBody;
+    if (!raw || !Buffer.isBuffer(raw)) {
+      if (DEBUG) console.warn('[increase.webhook] Missing rawBody for signature verification');
+      return false;
+    }
+
+    const ts = parseInt(String(webhookTimestamp), 10);
+    if (!Number.isFinite(ts)) {
+      if (DEBUG) console.warn('[increase.webhook] Invalid webhook-timestamp header');
+      return false;
+    }
+
+    const toleranceSec = Math.max(0, parseInt(process.env.INCREASE_WEBHOOK_TOLERANCE_SECONDS || '300', 10) || 300);
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (toleranceSec && Math.abs(nowSec - ts) > toleranceSec) {
+      if (DEBUG) console.warn('[increase.webhook] Timestamp outside tolerance', { ts, nowSec, toleranceSec });
+      return false;
+    }
+
+    const signedPayload = `${String(webhookId)}.${String(ts)}.${raw.toString('utf8')}`;
+    const expected = 'v1,' + crypto
+      .createHmac('sha256', secret)
+      .update(signedPayload)
+      .digest('base64');
+
+    const headerSigs = String(webhookSignature)
+      .split(' ')
+      .map(s => s.trim())
+      .filter(Boolean);
+
+    const expectedBuf = Buffer.from(expected, 'utf8');
+    for (const sig of headerSigs) {
+      const sigBuf = Buffer.from(sig, 'utf8');
+      if (sigBuf.length === expectedBuf.length && crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+        return true;
+      }
+    }
+
+    if (DEBUG) console.warn('[increase.webhook] Signature mismatch');
+    return false;
+  } catch (e) {
+    if (DEBUG) console.warn('[increase.webhook] Signature verification error:', e.message || e);
     return false;
   }
 }
@@ -18332,6 +18984,203 @@ async function runMarkupBillingTick() {
   }
 }
 
+// ========== Increase reconciliation (credit only after hold clears) ==========
+let increaseReconcileRunning = false;
+
+async function runIncreaseReconcileTick() {
+  if (increaseReconcileRunning) return;
+  if (!pool) return;
+  if (!isIncreaseConfigured()) return;
+
+  increaseReconcileRunning = true;
+  try {
+    const limit = 50;
+    const [rows] = await pool.query(
+      `SELECT id, user_id, billing_history_id, ach_transfer_id
+       FROM increase_ach_transfers
+       WHERE credited = 0
+       ORDER BY created_at ASC
+       LIMIT ${limit}`
+    );
+
+    for (const r of rows || []) {
+      const rowId = Number(r.id);
+      const userId = Number(r.user_id);
+      const billingId = Number(r.billing_history_id);
+      const achTransferId = String(r.ach_transfer_id || '').trim();
+      if (!rowId || !userId || !billingId || !achTransferId) continue;
+
+      let transfer;
+      try {
+        transfer = await increaseApiCall({ method: 'GET', path: `/ach_transfers/${encodeURIComponent(achTransferId)}` });
+      } catch (e) {
+        if (DEBUG) console.warn('[increase.reconcile] Failed to fetch ach_transfer:', { achTransferId, error: e?.message || e });
+        continue;
+      }
+
+      const statusRaw = String(transfer?.status || '').trim();
+      const status = statusRaw.toLowerCase();
+
+      const holdAuto = transfer?.inbound_funds_hold?.automatically_resolves_at || null;
+      let holdAutoDt = null;
+      if (holdAuto) {
+        const ms = Date.parse(String(holdAuto));
+        if (Number.isFinite(ms)) holdAutoDt = new Date(ms);
+      }
+
+      const payloadJson = JSON.stringify(transfer || {});
+
+      // Persist latest status + hold timing for debugging
+      try {
+        await pool.execute(
+          'UPDATE increase_ach_transfers SET status = ?, hold_automatically_resolves_at = ?, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [statusRaw || 'unknown', holdAutoDt, payloadJson, rowId]
+        );
+      } catch {}
+
+      const terminalFailStatuses = new Set(['returned', 'rejected', 'canceled', 'cancelled', 'reversed', 'failed']);
+      const hasReturnInfo = transfer?.return_reason_code || transfer?.return || transfer?.return_reason;
+      if (terminalFailStatuses.has(status) || hasReturnInfo) {
+        // Mark local billing row as failed if it isn't already completed.
+        try {
+          const [bRows] = await pool.execute(
+            'SELECT id, user_id, status FROM billing_history WHERE id = ? LIMIT 1',
+            [billingId]
+          );
+          const b = bRows && bRows[0] ? bRows[0] : null;
+          if (b && String(b.user_id) === String(userId) && String(b.status) !== 'completed') {
+            await pool.execute(
+              'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+              ['failed', payloadJson, billingId]
+            );
+          }
+        } catch {}
+        continue;
+      }
+
+      // Hold cleared when inbound_funds_hold is absent OR automatically_resolves_at is in the past.
+      let holdCleared = false;
+      if (!transfer?.inbound_funds_hold) {
+        holdCleared = true;
+      } else if (holdAutoDt) {
+        holdCleared = Date.now() >= holdAutoDt.getTime();
+      }
+
+      if (!holdCleared) continue;
+
+      // Acquire a per-transfer lock to prevent double-crediting.
+      let lockAcquired = false;
+      try {
+        const [lockRes] = await pool.execute(
+          'UPDATE increase_ach_transfers SET credited = 2 WHERE id = ? AND credited = 0',
+          [rowId]
+        );
+        lockAcquired = !!(lockRes && lockRes.affectedRows > 0);
+      } catch {}
+
+      if (!lockAcquired) continue;
+
+      try {
+        const [bRows] = await pool.execute(
+          'SELECT id, user_id, amount, description, status FROM billing_history WHERE id = ? LIMIT 1',
+          [billingId]
+        );
+        const billing = bRows && bRows[0] ? bRows[0] : null;
+        if (!billing || String(billing.user_id) !== String(userId)) {
+          await pool.execute('UPDATE increase_ach_transfers SET credited = 0 WHERE id = ? AND credited = 2', [rowId]);
+          continue;
+        }
+
+        if (String(billing.status) === 'completed') {
+          await pool.execute('UPDATE increase_ach_transfers SET credited = 1 WHERE id = ? AND credited <> 1', [rowId]);
+          continue;
+        }
+
+        const [userRows] = await pool.execute(
+          'SELECT id, magnus_user_id, username, firstname, lastname, email FROM signup_users WHERE id = ? LIMIT 1',
+          [userId]
+        );
+        const user = userRows && userRows[0] ? userRows[0] : null;
+        const magnusUserId = String(user?.magnus_user_id || '').trim();
+        if (!user || !magnusUserId) {
+          await pool.execute('UPDATE increase_ach_transfers SET credited = 0 WHERE id = ? AND credited = 2', [rowId]);
+          continue;
+        }
+
+        const nameBase = user.username || '';
+        const fullName = `${user.firstname || ''} ${user.lastname || ''}`.trim();
+        const displayName = fullName || nameBase || 'Customer';
+        const userEmail = user.email || '';
+
+        const amountNum = Number(billing.amount || 0);
+        const desc = billing.description || buildRefillDescription(billingId);
+
+        const httpsAgent = magnusBillingAgent;
+        const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+
+        const result = await applyMagnusRefill({
+          userId,
+          magnusUserId,
+          amountNum,
+          desc,
+          displayName,
+          userEmail,
+          httpsAgent,
+          hostHeader,
+          billingId,
+          paymentMethod: 'Increase (ACH Debit)',
+          processorTransactionId: achTransferId
+        });
+
+        if (!result.success) {
+          await pool.execute('UPDATE increase_ach_transfers SET credited = 0 WHERE id = ? AND credited = 2', [rowId]);
+          continue;
+        }
+
+        await pool.execute(
+          'UPDATE increase_ach_transfers SET credited = 1, status = ?, hold_automatically_resolves_at = COALESCE(?, hold_automatically_resolves_at), raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          ['COMPLETED', holdAutoDt, payloadJson, rowId]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[increase.reconcile] Error while crediting:', e?.message || e);
+        try { await pool.execute('UPDATE increase_ach_transfers SET credited = 0 WHERE id = ? AND credited = 2', [rowId]); } catch {}
+      }
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[increase.reconcile] Tick error:', e?.message || e);
+  } finally {
+    increaseReconcileRunning = false;
+  }
+}
+
+function startIncreaseReconcileScheduler() {
+  // If INCREASE_RECONCILE_INTERVAL_MINUTES is unset, fall back to BILLING_MARKUP_INTERVAL_MINUTES.
+  const incMins = (parseInt(process.env.INCREASE_RECONCILE_INTERVAL_MINUTES || '0', 10) || 0);
+  const fallbackMins = (parseInt(process.env.BILLING_MARKUP_INTERVAL_MINUTES || '0', 10) || 0);
+  const mins = incMins || fallbackMins;
+  const intervalMs = mins * 60 * 1000;
+
+  if (!intervalMs) {
+    if (DEBUG) console.log('[increase.scheduler] Disabled (no interval set)');
+    return;
+  }
+  if (!isIncreaseConfigured()) {
+    if (DEBUG) console.log('[increase.scheduler] Disabled (Increase not configured)');
+    return;
+  }
+
+  if (DEBUG) console.log('[increase.scheduler] Enabled with interval (ms):', intervalMs);
+
+  // Run shortly after boot (best-effort), then on interval.
+  setTimeout(() => {
+    runIncreaseReconcileTick().catch(() => {});
+  }, 10_000);
+
+  setInterval(() => {
+    runIncreaseReconcileTick().catch(() => {});
+  }, intervalMs);
+}
+
 // Start a simple interval-based scheduler.
 // Controlled by BILLING_MARKUP_INTERVAL_MINUTES; if unset or 0, scheduler is disabled.
 function startBillingScheduler() {
@@ -18365,6 +19214,7 @@ async function startServer() {
       console.log(`Environment: ${process.env.NODE_ENV}`);
       if (DEBUG) console.log('Debug logging enabled');
       startBillingScheduler();
+      startIncreaseReconcileScheduler();
       startCdrImportScheduler();
     });
   } catch (e) {

@@ -946,13 +946,44 @@
             <input type="radio" name="fundMethod" value="crypto"> Crypto
           </label>
           <label style="margin-left:8px;cursor:pointer">
-            <input type="radio" name="fundMethod" value="billcom"> ACH
+            <input type="radio" name="fundMethod" value="ach"> <%= (typeof achPaymentProvider !== 'undefined' && String(achPaymentProvider).toLowerCase() === 'increase') ? 'ACH (Bank Debit – Verify first)' : 'ACH' %>
           </label>
           <div style="margin-top:6px;font-size:12px;color:#6b7280">
             <div><strong>Card</strong>: instant credit after successful payment.</div>
             <div><strong>Crypto</strong>: credit is applied after network confirmations (may take several minutes).</div>
-            <div><strong>ACH</strong>: credit is applied after invoice payment is confirmed (may take a few minutes).</div>
+            <% if (typeof achPaymentProvider !== 'undefined' && String(achPaymentProvider).toLowerCase() === 'increase') { %>
+              <div><strong>ACH debit</strong>: credit is applied after the bank confirmation window clears (typically 2 business days).</div>
+            <% } else { %>
+              <div><strong>ACH</strong>: credit is applied after invoice payment is confirmed (may take a few minutes).</div>
+            <% } %>
           </div>
+
+          <% if (typeof achPaymentProvider !== 'undefined' && String(achPaymentProvider).toLowerCase() === 'increase') { %>
+            <div id="incBankBox" style="display:none;margin-top:10px;padding:10px;border:1px solid #e5e7eb;border-radius:10px;background:#f9fafb">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                <div style="font-size:12px;color:#111827"><strong>Bank verification</strong></div>
+                <div id="incBankStatus" class="muted" style="font-size:12px"></div>
+              </div>
+              <div id="incBankVerifiedRow" class="muted" style="display:none;font-size:12px;margin-bottom:6px">
+                Verified bank ending in <span id="incBankLast4"></span>.
+              </div>
+              <div id="incBankLinkForm" style="display:none">
+                <label style="display:block;margin-bottom:4px;font-size:12px;color:#4b5563">Routing number</label>
+                <input id="incRoutingNumber" type="text" inputmode="numeric" placeholder="9 digits" style="width:100%;box-sizing:border-box">
+                <label style="display:block;margin:8px 0 4px;font-size:12px;color:#4b5563">Account number</label>
+                <input id="incAccountNumber" type="password" inputmode="numeric" placeholder="Account number" style="width:100%;box-sizing:border-box">
+                <button id="incSendMicroBtn" type="button" class="btn--muted" style="margin-top:8px;width:100%">Send microdeposits</button>
+              </div>
+              <div id="incBankVerifyForm" style="display:none;margin-top:10px">
+                <div class="muted" style="font-size:12px;margin-bottom:6px">Enter the two microdeposit amounts (e.g. 0.13 and 0.25).</div>
+                <div style="display:flex;gap:8px">
+                  <input id="incMicroAmount1" type="number" step="0.01" min="0" placeholder="0.13" style="flex:1;box-sizing:border-box">
+                  <input id="incMicroAmount2" type="number" step="0.01" min="0" placeholder="0.25" style="flex:1;box-sizing:border-box">
+                </div>
+                <button id="incVerifyMicroBtn" type="button" class="btn--muted" style="margin-top:8px;width:100%">Verify microdeposits</button>
+              </div>
+            </div>
+          <% } %>
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
           <button id="cancelFundBtn" class="btn--muted">Cancel</button>
@@ -1111,6 +1142,7 @@
     const CHECKOUT_MIN_AMOUNT = <%= typeof checkoutMinAmount !== 'undefined' ? checkoutMinAmount : 100 %>;
     const CHECKOUT_MAX_AMOUNT = <%= typeof checkoutMaxAmount !== 'undefined' ? checkoutMaxAmount : 500 %>;
     const SIP_DOMAIN = <%- JSON.stringify(typeof sipDomain !== 'undefined' ? sipDomain : '') %>;
+    const ACH_PAYMENT_PROVIDER = <%- JSON.stringify(typeof achPaymentProvider !== 'undefined' ? achPaymentProvider : 'billcom') %>;
     const $ = (s)=>document.querySelector(s);
     var billingPage = 0;
     var billingPageSize = 20;
@@ -4252,10 +4284,147 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     $('#billingNext').addEventListener('click', () => { billingPage++; loadBillingHistory(); });
     
     // Add Fund Modal
+    const isIncreaseAch = String(ACH_PAYMENT_PROVIDER || '').toLowerCase() === 'increase';
+    let incBankLink = { status: 'none' };
+
+    function getSelectedFundMethod(){
+      const methodInput = document.querySelector('input[name="fundMethod"]:checked');
+      return methodInput ? String(methodInput.value || '') : 'card';
+    }
+
+    function renderIncBankUi(){
+      const box = document.getElementById('incBankBox');
+      if (!box) return;
+
+      const status = String(incBankLink && incBankLink.status ? incBankLink.status : 'none').toLowerCase();
+      const last4 = incBankLink && incBankLink.last4 ? String(incBankLink.last4) : '';
+
+      const statusEl = document.getElementById('incBankStatus');
+      const verifiedRow = document.getElementById('incBankVerifiedRow');
+      const last4El = document.getElementById('incBankLast4');
+      const linkForm = document.getElementById('incBankLinkForm');
+      const verifyForm = document.getElementById('incBankVerifyForm');
+
+      if (statusEl) {
+        statusEl.textContent =
+          status === 'verified' ? 'Verified' :
+          status === 'pending' ? 'Microdeposits sent' :
+          status === 'failed' ? 'Verification failed' :
+          'Not linked';
+      }
+      if (last4El) last4El.textContent = last4 ? `••••${last4}` : '';
+
+      if (verifiedRow) verifiedRow.style.display = (status === 'verified' && last4) ? 'block' : 'none';
+      if (linkForm) linkForm.style.display = (status === 'verified') ? 'none' : 'block';
+      if (verifyForm) verifyForm.style.display = (status === 'pending') ? 'block' : 'none';
+    }
+
+    async function loadIncBankLink(){
+      if (!isIncreaseAch) return;
+      try {
+        const r = await fetch('/api/me/increase/bank-link');
+        const j = await r.json();
+        if (!j || j.success === false) return;
+        incBankLink = j.data || { status: 'none' };
+        renderIncBankUi();
+      } catch {}
+    }
+
+    function updateAddFundsMethodUi(){
+      const box = document.getElementById('incBankBox');
+      if (!box) return;
+      const method = getSelectedFundMethod();
+      const show = isIncreaseAch && method === 'ach';
+      box.style.display = show ? 'block' : 'none';
+      if (show) loadIncBankLink();
+    }
+
+    // React to method selection changes
+    document.querySelectorAll('input[name="fundMethod"]').forEach(el => {
+      el.addEventListener('change', () => {
+        updateAddFundsMethodUi();
+      });
+    });
+
+    // Bank link actions (only present for Increase)
+    {
+      const sendBtn = document.getElementById('incSendMicroBtn');
+      const verifyBtn = document.getElementById('incVerifyMicroBtn');
+
+      if (sendBtn) {
+        sendBtn.addEventListener('click', async () => {
+          const routing = String(document.getElementById('incRoutingNumber')?.value || '').trim();
+          const acct = String(document.getElementById('incAccountNumber')?.value || '').trim();
+          if (!routing || !acct) return showToast('Please enter your routing and account numbers.', 'error');
+
+          sendBtn.disabled = true;
+          sendBtn.textContent = 'Sending microdeposits...';
+          try {
+            const r = await fetch('/api/me/increase/bank-link/microdeposits/start', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ routing_number: routing, account_number: acct })
+            });
+            const j = await r.json();
+            if (!j || j.success === false) {
+              showToast(j?.message || 'Failed to send microdeposits', 'error');
+              return;
+            }
+            // Clear account number field after submission
+            const acctEl = document.getElementById('incAccountNumber');
+            if (acctEl) acctEl.value = '';
+            showToast(j.message || 'Microdeposits sent. Check your bank account, then verify amounts.');
+            await loadIncBankLink();
+          } catch (e) {
+            showToast('Failed to send microdeposits', 'error');
+          } finally {
+            sendBtn.disabled = false;
+            sendBtn.textContent = 'Send microdeposits';
+          }
+        });
+      }
+
+      if (verifyBtn) {
+        verifyBtn.addEventListener('click', async () => {
+          const a1 = String(document.getElementById('incMicroAmount1')?.value || '').trim();
+          const a2 = String(document.getElementById('incMicroAmount2')?.value || '').trim();
+          if (!a1 || !a2) return showToast('Please enter both microdeposit amounts.', 'error');
+
+          verifyBtn.disabled = true;
+          verifyBtn.textContent = 'Verifying...';
+          try {
+            const r = await fetch('/api/me/increase/bank-link/microdeposits/verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ amount1: a1, amount2: a2 })
+            });
+            const j = await r.json();
+            if (!j || j.success === false) {
+              showToast(j?.message || 'Verification failed', 'error');
+              return;
+            }
+            showToast(j.message || 'Bank verified.');
+            // Clear inputs
+            const m1 = document.getElementById('incMicroAmount1');
+            const m2 = document.getElementById('incMicroAmount2');
+            if (m1) m1.value = '';
+            if (m2) m2.value = '';
+            await loadIncBankLink();
+          } catch {
+            showToast('Verification failed', 'error');
+          } finally {
+            verifyBtn.disabled = false;
+            verifyBtn.textContent = 'Verify microdeposits';
+          }
+        });
+      }
+    }
+
     $('#addFundBtn').addEventListener('click', () => {
       $('#addFundModal').style.display = 'flex';
       $('#fundAmount').value = '';
       $('#fundAmount').focus();
+      updateAddFundsMethodUi();
     });
     
     $('#cancelFundBtn').addEventListener('click', () => {
@@ -4279,22 +4448,32 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         return alert(`Amount must be between $${CHECKOUT_MIN_AMOUNT.toFixed(2)} and $${CHECKOUT_MAX_AMOUNT.toFixed(2)}.`);
       }
 
-      const methodInput = document.querySelector('input[name="fundMethod"]:checked');
-      const method = methodInput ? methodInput.value : 'card';
+      const method = getSelectedFundMethod();
+
+      // If Increase ACH is selected, require verified bank link before initiating debit.
+      if (method === 'ach' && isIncreaseAch) {
+        const st = String(incBankLink && incBankLink.status ? incBankLink.status : '').toLowerCase();
+        if (st !== 'verified') {
+          showToast('Please verify your bank account first (microdeposits).', 'error');
+          updateAddFundsMethodUi();
+          return;
+        }
+      }
 
       $('#confirmFundBtn').disabled = true;
       $('#confirmFundBtn').textContent = method === 'crypto'
         ? 'Redirecting to Crypto...'
-        : method === 'billcom'
-          ? 'Redirecting to ACH...'
+        : method === 'ach'
+          ? (isIncreaseAch ? 'Starting ACH debit...' : 'Redirecting to ACH...')
           : 'Redirecting to Card...';
 
       try {
         const endpoint = method === 'crypto'
           ? '/api/me/nowpayments/checkout'
-          : method === 'billcom'
-            ? '/api/me/billcom/checkout'
+          : method === 'ach'
+            ? '/api/me/ach/checkout'
             : '/api/me/card/checkout';
+
         const r = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -4302,29 +4481,37 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         });
         const j = await r.json();
 
-        if (!j.success || !j.payment_url) {
+        if (!j || j.success === false) {
           const label = method === 'crypto'
             ? 'Crypto payment'
-            : method === 'billcom'
+            : method === 'ach'
               ? 'ACH payment'
-              : method === 'card'
-                ? 'Card payment'
-                : 'Payment';
-          showToast(j.message || `${label} could not be started. Please try again.`, 'error');
+              : 'Card payment';
+          showToast(j?.message || `${label} could not be started. Please try again.`, 'error');
+          if (method === 'ach' && isIncreaseAch) await loadIncBankLink();
           return;
         }
 
-        // Hide modal and show a toast with a direct link before redirecting
-        $('#addFundModal').style.display = 'none';
-        const label = method === 'crypto'
-          ? 'Crypto payment'
-          : method === 'billcom'
-            ? 'ACH payment'
-            : 'Card payment';
-        showLinkToast(`${label} checkout page is ready. If you are not redirected automatically, click the link below.`, 'Open payment page', j.payment_url, 'success');
+        // Hosted checkout flow (Card / Crypto / Bill.com ACH)
+        if (j.payment_url) {
+          $('#addFundModal').style.display = 'none';
+          const label = method === 'crypto'
+            ? 'Crypto payment'
+            : method === 'ach'
+              ? 'ACH payment'
+              : 'Card payment';
+          showLinkToast(`${label} checkout page is ready. If you are not redirected automatically, click the link below.`, 'Open payment page', j.payment_url, 'success');
+          window.location.href = j.payment_url;
+          return;
+        }
 
-        // Redirect user to hosted checkout page (Card provider or NOWPayments)
-        window.location.href = j.payment_url;
+        // Non-hosted flow (Increase ACH debit)
+        $('#addFundModal').style.display = 'none';
+        showToast(j.message || 'Payment started. Your balance will update after confirmation.');
+        activate('billing');
+        billingPage = 0;
+        loadBillingHistory();
+        loadProfile();
       } catch (e) {
         console.error('[addFunds]', e);
         alert('Failed to start payment. Please try again.');
