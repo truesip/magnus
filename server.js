@@ -11656,9 +11656,9 @@ app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (r
 
     const payloadBase = {
       account_id: String(INCREASE_ACCOUNT_ID),
-      currency: 'USD',
       routing_number: routingNumber,
       account_number: accountNumber,
+      statement_descriptor: companyName,
       company_entry_description: 'ACCTVERIFY',
       company_name: companyName,
       individual_name: individualName,
@@ -11972,7 +11972,7 @@ async function handleIncreaseAchCheckout(req, res) {
         account_id: String(INCREASE_ACCOUNT_ID),
         external_account_id: externalAccountId,
         amount: debitCents,
-        currency: 'USD',
+        statement_descriptor: companyName,
         company_name: companyName,
         company_entry_description: companyEntryDescription,
         individual_name: String(displayName || 'Customer').substring(0, 70),
