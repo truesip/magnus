@@ -970,13 +970,26 @@
                 Verified bank ending in <span id="incBankLast4"></span>.
               </div>
               <div id="incBankLinkForm" style="display:none">
-                <label style="display:block;margin-bottom:4px;font-size:12px">Routing number</label>
-                <input id="incRoutingNumber" type="text" inputmode="numeric" placeholder="9 digits" style="width:100%;box-sizing:border-box">
-                <label style="display:block;margin:8px 0 4px;font-size:12px">Account number</label>
-                <input id="incAccountNumber" type="password" inputmode="numeric" placeholder="Account number" style="width:100%;box-sizing:border-box">
-                <button id="incSendMicroBtn" type="button" class="btn--muted" style="margin-top:8px;width:100%">Link bank account</button>
-                <div class="muted" style="font-size:12px;margin-top:6px">
-                  We’ll send two small deposits and one small debit (offset) to net out the verification cost.
+                <div id="incBankLinkInputs">
+                  <label style="display:block;margin-bottom:4px;font-size:12px">Routing number</label>
+                  <input id="incRoutingNumber" type="text" inputmode="numeric" placeholder="9 digits" style="width:100%;box-sizing:border-box">
+                  <label style="display:block;margin:8px 0 4px;font-size:12px">Account number</label>
+                  <input id="incAccountNumber" type="password" inputmode="numeric" placeholder="Account number" style="width:100%;box-sizing:border-box">
+                  <button id="incSendMicroBtn" type="button" class="btn--muted" style="margin-top:8px;width:100%">Start bank verification</button>
+                  <div class="muted" style="font-size:12px;margin-top:6px">
+                    We’ll initiate two small ACH debits (“micro pulls”). Once they appear on your statement, enter the two amounts to verify.
+                  </div>
+                </div>
+
+                <div id="incBankVerifyInputs" style="display:none;margin-top:10px">
+                  <label style="display:block;margin-bottom:4px;font-size:12px">First amount ($)</label>
+                  <input id="incVerifyAmount1" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.12" style="width:100%;box-sizing:border-box">
+                  <label style="display:block;margin:8px 0 4px;font-size:12px">Second amount ($)</label>
+                  <input id="incVerifyAmount2" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.34" style="width:100%;box-sizing:border-box">
+                  <button id="incVerifyMicroBtn" type="button" class="btn--muted" style="margin-top:8px;width:100%">Verify amounts</button>
+                  <div class="muted" style="font-size:12px;margin-top:6px">
+                    Amounts are usually under $0.50 and may take 1–2 business days to appear.
+                  </div>
                 </div>
               </div>
 
@@ -4320,6 +4333,8 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       const verifiedRow = document.getElementById('incBankVerifiedRow');
       const last4El = document.getElementById('incBankLast4');
       const linkForm = document.getElementById('incBankLinkForm');
+      const linkInputs = document.getElementById('incBankLinkInputs');
+      const verifyInputs = document.getElementById('incBankVerifyInputs');
 
       const consentForm = document.getElementById('incAchConsentForm');
       const consentCheckbox = document.getElementById('incAchAuthorizeCheckbox');
@@ -4339,6 +4354,8 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
 
       if (verifiedRow) verifiedRow.style.display = (status === 'verified' && last4) ? 'block' : 'none';
       if (linkForm) linkForm.style.display = (status === 'verified') ? 'none' : 'block';
+      if (linkInputs) linkInputs.style.display = (status === 'pending') ? 'none' : 'block';
+      if (verifyInputs) verifyInputs.style.display = (status === 'pending') ? 'block' : 'none';
 
       if (consentForm) consentForm.style.display = (status === 'verified') ? 'block' : 'none';
       if (last4InlineEl) last4InlineEl.textContent = last4 ? `••••${last4}` : '••••';
@@ -4416,6 +4433,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     // Bank link actions (only present for Increase)
     {
       const sendBtn = document.getElementById('incSendMicroBtn');
+      const verifyBtn = document.getElementById('incVerifyMicroBtn');
 
       if (sendBtn) {
         sendBtn.addEventListener('click', async () => {
@@ -4424,7 +4442,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           if (!routing || !acct) return showToast('Please enter your routing and account numbers.', 'error');
 
           sendBtn.disabled = true;
-          sendBtn.textContent = 'Linking bank...';
+          sendBtn.textContent = 'Starting verification...';
           try {
             const r = await fetch('/api/me/increase/bank-link/microdeposits/start', {
               method: 'POST',
@@ -4433,19 +4451,56 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
             });
             const j = await r.json();
             if (!j || j.success === false) {
-              showToast(j?.message || 'Failed to link bank account', 'error');
+              showToast(j?.message || 'Failed to start bank verification', 'error');
               return;
             }
             // Clear account number field after submission
             const acctEl = document.getElementById('incAccountNumber');
             if (acctEl) acctEl.value = '';
-            showToast(j.message || 'Bank linked. You can now continue with ACH.');
+            showToast(j.message || 'Verification started. Check your bank statement, then verify the two amounts.');
             await loadIncBankLink();
+            try { document.getElementById('incVerifyAmount1')?.focus(); } catch {}
           } catch (e) {
-            showToast('Failed to link bank account', 'error');
+            showToast('Failed to start bank verification', 'error');
           } finally {
             sendBtn.disabled = false;
-            sendBtn.textContent = 'Link bank account';
+            sendBtn.textContent = 'Start bank verification';
+          }
+        });
+      }
+
+      if (verifyBtn) {
+        verifyBtn.addEventListener('click', async () => {
+          const a1 = String(document.getElementById('incVerifyAmount1')?.value || '').trim();
+          const a2 = String(document.getElementById('incVerifyAmount2')?.value || '').trim();
+          if (!a1 || !a2) return showToast('Please enter the two amounts from your bank statement.', 'error');
+
+          verifyBtn.disabled = true;
+          verifyBtn.textContent = 'Verifying...';
+          try {
+            const r = await fetch('/api/me/increase/bank-link/microdeposits/verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ amount_1: a1, amount_2: a2 })
+            });
+            const j = await r.json();
+            if (!j || j.success === false) {
+              showToast(j?.message || 'Failed to verify amounts', 'error');
+              return;
+            }
+            // Clear amount fields after success
+            const a1El = document.getElementById('incVerifyAmount1');
+            const a2El = document.getElementById('incVerifyAmount2');
+            if (a1El) a1El.value = '';
+            if (a2El) a2El.value = '';
+
+            showToast(j.message || 'Bank account verified.');
+            await loadIncBankLink();
+          } catch (e) {
+            showToast('Failed to verify bank account', 'error');
+          } finally {
+            verifyBtn.disabled = false;
+            verifyBtn.textContent = 'Verify amounts';
           }
         });
       }
@@ -4487,7 +4542,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       if (method === 'ach' && isIncreaseAch) {
         const st = String(incBankLink && incBankLink.status ? incBankLink.status : '').toLowerCase();
         if (st !== 'verified') {
-          showToast('Please verify your bank account first (microdeposits).', 'error');
+          showToast('Please verify your bank account first (micro pulls).', 'error');
           updateAddFundsMethodUi();
           return;
         }

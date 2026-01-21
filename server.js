@@ -1591,7 +1591,7 @@ async function initDb() {
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
 
-  // Increase bank links (microdeposit verification)
+  // Increase bank links (bank verification via micro pulls)
   // NOTE: Do NOT store routing/account numbers. Store only Increase IDs + masked display.
   await pool.query(`CREATE TABLE IF NOT EXISTS increase_bank_links (
     user_id BIGINT NOT NULL,
@@ -11722,8 +11722,27 @@ function increaseNormalizeAccountNumber(raw) {
   return String(raw || '').replace(/[^0-9]/g, '').trim();
 }
 
-// Start bank-link by sending two small ACH credits and an optional offset debit.
+function increaseParseMicroAmountToCents(raw) {
+  const s = String(raw ?? '').trim().replace(/[$,]/g, '');
+  if (!s) return null;
+  const n = Number(s);
+  if (!Number.isFinite(n) || n <= 0) return null;
+
+  // Accept dollars like 0.11 or cents like 11 (<= 99).
+  let cents = null;
+  if (n < 1) {
+    cents = Math.round(n * 100);
+  } else if (Number.isInteger(n) && n <= 99) {
+    cents = n;
+  }
+
+  if (!Number.isInteger(cents) || cents <= 0 || cents > 99) return null;
+  return cents;
+}
+
+// Start bank-link by initiating two small ACH debits ("micro pulls") from the user's bank.
 // NOTE: We never store routing/account numbers; only masked last4 + Increase IDs.
+// This does NOT require a positive balance in the Increase account.
 app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
@@ -11789,12 +11808,12 @@ app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (r
     const individualName = (fullName || username || 'Customer').substring(0, 70);
     const companyName = String(INCREASE_COMPANY_NAME || 'TalkUSA').trim().substring(0, 16) || 'TalkUSA';
 
-    // Two distinct random microdeposits (cents)
+    // Two distinct random micro amounts (cents). We will debit these amounts.
     const a1 = crypto.randomInt ? crypto.randomInt(11, 50) : (11 + Math.floor(Math.random() * 39));
     let a2 = crypto.randomInt ? crypto.randomInt(11, 50) : (11 + Math.floor(Math.random() * 39));
     if (a2 === a1) a2 = (a1 % 39) + 11;
 
-    // First microdeposit: create external account from routing/account.
+    // First micro pull: create external account from routing/account.
     const payloadCreateExternal = {
       account_id: String(INCREASE_ACCOUNT_ID),
       routing_number: routingNumber,
@@ -11804,7 +11823,7 @@ app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (r
       company_name: companyName,
       individual_name: individualName,
       individual_id: `talkusa-${userId}`,
-      amount: a1
+      amount: -a1
     };
 
     const t1 = await increaseApiCall({
@@ -11818,7 +11837,7 @@ app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (r
       return res.status(502).json({ success: false, message: 'Increase did not return an external account identifier' });
     }
 
-    // Second microdeposit + offset debit: use external_account_id (do not re-send routing/account).
+    // Second micro pull: use external_account_id (do not re-send routing/account).
     const payloadExistingExternalBase = {
       account_id: String(INCREASE_ACCOUNT_ID),
       external_account_id: externalAccountId,
@@ -11832,22 +11851,14 @@ app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (r
     const t2 = await increaseApiCall({
       method: 'POST',
       path: '/ach_transfers',
-      body: Object.assign({}, payloadExistingExternalBase, { amount: a2 })
-    });
-
-    // Offset debit for the sum of the two microdeposits (nets out the cost)
-    const offsetDebitCents = -(a1 + a2);
-    const t3 = await increaseApiCall({
-      method: 'POST',
-      path: '/ach_transfers',
-      body: Object.assign({}, payloadExistingExternalBase, { amount: offsetDebitCents })
+      body: Object.assign({}, payloadExistingExternalBase, { amount: -a2 })
     });
 
     const transferId1 = t1 && t1.id ? String(t1.id).trim() : null;
     const transferId2 = t2 && t2.id ? String(t2.id).trim() : null;
 
     const last4 = accountNumber.slice(-4);
-    const rawPayload = JSON.stringify({ microdeposit_1: t1, microdeposit_2: t2, offset_debit: t3 });
+    const rawPayload = JSON.stringify({ micro_pull_1: t1, micro_pull_2: t2 });
 
     await pool.execute(
       `INSERT INTO increase_bank_links (
@@ -11855,11 +11866,11 @@ app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (r
         microdeposit_amount_1, microdeposit_amount_2,
         microdeposit_transfer_id_1, microdeposit_transfer_id_2,
         microdeposit_sent_at, send_attempts, verify_attempts, verified_at, raw_payload
-      ) VALUES (?, ?, ?, 'verified', ?, ?, ?, ?, NOW(), 1, 0, NOW(), ?)
+      ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, NOW(), 1, 0, NULL, ?)
       ON DUPLICATE KEY UPDATE
         external_account_id = VALUES(external_account_id),
         last4 = VALUES(last4),
-        status = 'verified',
+        status = 'pending',
         microdeposit_amount_1 = VALUES(microdeposit_amount_1),
         microdeposit_amount_2 = VALUES(microdeposit_amount_2),
         microdeposit_transfer_id_1 = VALUES(microdeposit_transfer_id_1),
@@ -11867,19 +11878,119 @@ app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (r
         microdeposit_sent_at = VALUES(microdeposit_sent_at),
         send_attempts = send_attempts + 1,
         verify_attempts = 0,
-        verified_at = NOW(),
+        verified_at = NULL,
         raw_payload = VALUES(raw_payload)`,
       [userId, externalAccountId, last4, a1, a2, transferId1, transferId2, rawPayload]
     );
 
     return res.json({
       success: true,
-      message: 'Bank linked successfully.',
-      data: { status: 'verified', last4 }
+      message: 'Verification started. Check your bank statement for two small debits, then enter the amounts to verify.',
+      data: { status: 'pending', last4 }
     });
   } catch (e) {
+    const status = e?.status && Number.isFinite(e.status) ? e.status : 500;
+    const detail = e?.data?.detail || e?.data?.title || e?.data?.message || e?.message || 'Failed to start verification';
+
     if (DEBUG) console.error('[increase.bank-link.start] error:', e?.data || e?.message || e);
-    return res.status(500).json({ success: false, message: e?.message || 'Failed to link bank account' });
+
+    if (status >= 400 && status < 600) {
+      return res.status(status).json({ success: false, message: String(detail).slice(0, 300) });
+    }
+    return res.status(500).json({ success: false, message: 'Failed to link bank account' });
+  }
+});
+
+// Verify the two micro amounts and mark the bank link as verified.
+app.post('/api/me/increase/bank-link/microdeposits/verify', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = req.session.userId;
+
+    const amt1 = increaseParseMicroAmountToCents(
+      req.body?.amount_1 || req.body?.amount1 || req.body?.microdeposit_amount_1 || req.body?.microdepositAmount1
+    );
+    const amt2 = increaseParseMicroAmountToCents(
+      req.body?.amount_2 || req.body?.amount2 || req.body?.microdeposit_amount_2 || req.body?.microdepositAmount2
+    );
+
+    if (!amt1 || !amt2) {
+      return res.status(400).json({ success: false, message: 'Please enter the two amounts from your bank statement.' });
+    }
+
+    const [rows] = await pool.execute(
+      'SELECT status, last4, microdeposit_amount_1, microdeposit_amount_2, verify_attempts, microdeposit_sent_at FROM increase_bank_links WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'No pending bank verification found. Please start bank verification first.' });
+    }
+
+    const statusRaw = String(row.status || '').toLowerCase();
+    const last4 = row.last4 != null ? String(row.last4) : null;
+
+    if (statusRaw === 'verified') {
+      return res.json({ success: true, message: 'Bank account is already verified.', data: { status: 'verified', last4 } });
+    }
+    if (statusRaw === 'failed') {
+      return res.status(409).json({ success: false, message: 'Verification previously failed. Please restart bank verification.' });
+    }
+
+    const expected1 = Number(row.microdeposit_amount_1);
+    const expected2 = Number(row.microdeposit_amount_2);
+    if (!Number.isFinite(expected1) || !Number.isFinite(expected2) || expected1 <= 0 || expected2 <= 0) {
+      return res.status(409).json({ success: false, message: 'No pending bank verification found. Please start bank verification again.' });
+    }
+
+    // Optional: require verification within 30 days.
+    try {
+      if (row.microdeposit_sent_at) {
+        const sentAtMs = new Date(row.microdeposit_sent_at).getTime();
+        if (Number.isFinite(sentAtMs)) {
+          const ageMs = Date.now() - sentAtMs;
+          const maxAgeMs = 30 * 24 * 60 * 60 * 1000;
+          if (ageMs > maxAgeMs) {
+            return res.status(409).json({ success: false, message: 'Verification has expired. Please restart bank verification.' });
+          }
+        }
+      }
+    } catch {}
+
+    const match = (amt1 === expected1 && amt2 === expected2) || (amt1 === expected2 && amt2 === expected1);
+
+    const attemptsSoFar = Number(row.verify_attempts || 0);
+    const nextAttempts = attemptsSoFar + 1;
+
+    if (!match) {
+      const maxAttempts = 3;
+      const willFail = nextAttempts >= maxAttempts;
+
+      try {
+        await pool.execute(
+          'UPDATE increase_bank_links SET verify_attempts = verify_attempts + 1, status = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? LIMIT 1',
+          [willFail ? 'failed' : 'pending', userId]
+        );
+      } catch {}
+
+      return res.status(400).json({
+        success: false,
+        message: willFail
+          ? 'Verification failed too many times. Please restart bank verification.'
+          : 'The amounts did not match. Please try again.'
+      });
+    }
+
+    await pool.execute(
+      'UPDATE increase_bank_links SET status = ?, verify_attempts = verify_attempts + 1, verified_at = NOW(), updated_at = CURRENT_TIMESTAMP WHERE user_id = ? LIMIT 1',
+      ['verified', userId]
+    );
+
+    return res.json({ success: true, message: 'Bank account verified.', data: { status: 'verified', last4 } });
+  } catch (e) {
+    if (DEBUG) console.error('[increase.bank-link.verify] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to verify bank account' });
   }
 });
 
@@ -15986,7 +16097,7 @@ const BILLCOM_WEBHOOK_SECURITY_KEY = process.env.BILLCOM_WEBHOOK_SECURITY_KEY ||
 
 // ACH payment provider selector
 // - billcom (default): Bill.com invoice + hosted payment link
-// - increase: Increase ACH debit (verify-first via microdeposits)
+// - increase: Increase ACH debit (verify-first via micro pulls)
 const ACH_PAYMENT_PROVIDER = String(process.env.ACH_PAYMENT_PROVIDER || 'billcom').trim().toLowerCase();
 
 // Increase configuration (ACH debits + webhooks)
