@@ -12338,17 +12338,22 @@ async function handleIncreaseAchCheckout(req, res) {
     const authorizedIp = getClientIp(req);
     const authorizedUserAgent = String(req.get('user-agent') || '').trim().slice(0, 255) || null;
 
-    // Require a verified bank link
-    const [linkRows] = await pool.execute(
-      'SELECT external_account_id, last4, status FROM increase_bank_links WHERE user_id = ? LIMIT 1',
-      [userId]
-    );
-    const link = linkRows && linkRows[0] ? linkRows[0] : null;
-    const linkStatus = String(link?.status || '').toLowerCase();
-    const externalAccountId = link && link.external_account_id ? String(link.external_account_id).trim() : '';
-    if (!externalAccountId || linkStatus !== 'verified') {
-      return res.status(400).json({ success: false, message: 'Please link your bank account first.' });
+    // Bank account details (required). We do NOT store routing/account numbers.
+    const routingNumber = increaseNormalizeRoutingNumber(req.body?.routing_number || req.body?.routingNumber);
+    const accountNumber = increaseNormalizeAccountNumber(req.body?.account_number || req.body?.accountNumber);
+
+    if (!routingNumber || routingNumber.length !== 9) {
+      return res.status(400).json({ success: false, message: 'Routing number must be 9 digits' });
     }
+    if (!accountNumber || accountNumber.length < 4) {
+      return res.status(400).json({ success: false, message: 'Account number is required' });
+    }
+
+    const bankLast4 = accountNumber.slice(-4);
+
+    // Use a deterministic idempotency key to avoid creating duplicate external accounts in Increase
+    // when the user pays multiple times with the same bank account.
+    const extIdempotencyKey = `ach-extacct-${userId}-${sha256(String(routingNumber) + ':' + String(accountNumber)).slice(0, 16)}`;
 
     // Fetch user info for statement name + later crediting
     const [userRows] = await pool.execute(
@@ -12417,6 +12422,26 @@ async function handleIncreaseAchCheckout(req, res) {
     const companyName = String(INCREASE_COMPANY_NAME || 'TalkUSA').trim().substring(0, 16) || 'TalkUSA';
     const companyEntryDescription = String((process.env.INCREASE_COMPANY_ENTRY_DESCRIPTION || 'TALKUSA')).trim().substring(0, 10) || 'TALKUSA';
 
+    // Create (or reuse) the Increase external account for this bank.
+    // NOTE: Increase will maintain an external account object for ACH debits; we only store masked last4 locally.
+    const ext = await increaseApiCall({
+      method: 'POST',
+      path: '/external_accounts',
+      headers: { 'Idempotency-Key': extIdempotencyKey },
+      body: {
+        routing_number: routingNumber,
+        account_number: accountNumber,
+        description: `TalkUSA ACH u${userId} ••••${bankLast4}`,
+        account_holder: 'individual',
+        funding: 'checking'
+      }
+    });
+
+    const externalAccountId = String(ext?.id || '').trim();
+    if (!externalAccountId) {
+      return res.status(502).json({ success: false, message: 'Payment provider did not return an external account id' });
+    }
+
     const transfer = await increaseApiCall({
       method: 'POST',
       path: '/ach_transfers',
@@ -12475,7 +12500,6 @@ async function handleIncreaseAchCheckout(req, res) {
     try {
       const consentVersion = 'v1';
       const amountFixed = Number(amountNum.toFixed(2));
-      const bankLast4 = link?.last4 ? String(link.last4) : '';
       const bankMasked = bankLast4 ? `****${bankLast4}` : '****';
       const consentText = [
         `I, ${signerName}, authorize ${companyName} to initiate a one-time ACH debit from my bank account ending in ${bankMasked} for $${amountFixed.toFixed(2)}.`,
@@ -12628,7 +12652,7 @@ async function handleIncreaseAchCheckout(req, res) {
       data: {
         billing_id: billingId,
         ach_transfer_id: achTransferId,
-        bank_last4: link?.last4 ? String(link.last4) : null,
+        bank_last4: bankLast4 ? String(bankLast4) : null,
         hold_automatically_resolves_at: holdAuto || null,
         authorization_id: authorizationId,
         authorization_email_sent: authorizationEmailSent,
@@ -12644,8 +12668,16 @@ async function handleIncreaseAchCheckout(req, res) {
         );
       } catch {}
     }
+
+    const status = e?.status && Number.isFinite(e.status) ? e.status : 500;
+    const detail = e?.data?.detail || e?.data?.title || e?.data?.message || e?.message || 'Failed to create ACH debit';
+
     if (DEBUG) console.error('[increase.ach.checkout] error:', e?.data || e?.message || e);
-    return res.status(500).json({ success: false, message: e?.message || 'Failed to create ACH debit' });
+
+    if (status >= 400 && status < 600) {
+      return res.status(status).json({ success: false, message: String(detail).slice(0, 300) });
+    }
+    return res.status(500).json({ success: false, message: 'Failed to create ACH debit' });
   }
 }
 

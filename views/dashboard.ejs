@@ -963,37 +963,21 @@
           <% if (typeof achPaymentProvider !== 'undefined' && String(achPaymentProvider).toLowerCase() === 'increase') { %>
             <div id="incBankBox" style="display:none;margin-top:10px;padding:10px;border:1px solid rgba(255,255,255,.12);border-radius:10px;background:rgba(0,0,0,.22)">
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-                <div style="font-size:12px"><strong>Bank verification</strong></div>
-                <div id="incBankStatus" class="muted" style="font-size:12px"></div>
+                <div style="font-size:12px"><strong>Bank account</strong></div>
+                <div class="muted" style="font-size:12px;margin-left:auto">Required for ACH debit</div>
               </div>
-              <div id="incBankVerifiedRow" class="muted" style="display:none;font-size:12px;margin-bottom:6px">
-                Verified bank ending in <span id="incBankLast4"></span>.
-              </div>
-              <div id="incBankLinkForm" style="display:none">
-                <div id="incBankLinkInputs">
-                  <label style="display:block;margin-bottom:4px;font-size:12px">Routing number</label>
-                  <input id="incRoutingNumber" type="text" inputmode="numeric" placeholder="9 digits" style="width:100%;box-sizing:border-box">
-                  <label style="display:block;margin:8px 0 4px;font-size:12px">Account number</label>
-                  <input id="incAccountNumber" type="password" inputmode="numeric" placeholder="Account number" style="width:100%;box-sizing:border-box">
-                  <button id="incSendMicroBtn" type="button" class="btn--muted" style="margin-top:8px;width:100%">Start bank verification</button>
-                  <div class="muted" style="font-size:12px;margin-top:6px">
-                    We’ll initiate two small ACH debits (“micro pulls”). Once they appear on your statement, enter the two amounts to verify.
-                  </div>
-                </div>
 
-                <div id="incBankVerifyInputs" style="display:none;margin-top:10px">
-                  <label style="display:block;margin-bottom:4px;font-size:12px">First amount ($)</label>
-                  <input id="incVerifyAmount1" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.12" style="width:100%;box-sizing:border-box">
-                  <label style="display:block;margin:8px 0 4px;font-size:12px">Second amount ($)</label>
-                  <input id="incVerifyAmount2" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.34" style="width:100%;box-sizing:border-box">
-                  <button id="incVerifyMicroBtn" type="button" class="btn--muted" style="margin-top:8px;width:100%">Verify amounts</button>
-                  <div class="muted" style="font-size:12px;margin-top:6px">
-                    Amounts are usually under $0.50 and may take 1–2 business days to appear.
-                  </div>
+              <div id="incAchBankForm">
+                <label style="display:block;margin-bottom:4px;font-size:12px">Routing number</label>
+                <input id="incRoutingNumber" type="text" inputmode="numeric" placeholder="9 digits" style="width:100%;box-sizing:border-box">
+                <label style="display:block;margin:8px 0 4px;font-size:12px">Account number</label>
+                <input id="incAccountNumber" type="password" inputmode="numeric" placeholder="Account number" style="width:100%;box-sizing:border-box">
+                <div class="muted" style="font-size:12px;margin-top:6px">
+                  For security, we don’t store your routing/account number. You’ll enter it each time you pay by ACH.
                 </div>
               </div>
 
-              <div id="incAchConsentForm" style="display:none;margin-top:10px">
+              <div id="incAchConsentForm" style="margin-top:10px">
                 <div class="muted" style="font-size:12px;margin-bottom:8px"><strong>Authorization (required)</strong></div>
                 <div class="muted" style="font-size:12px;margin-bottom:8px">
                   Billing address on file: <span id="incAchBillingAddress"></span>
@@ -4315,50 +4299,30 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     
     // Add Fund Modal
     const isIncreaseAch = String(ACH_PAYMENT_PROVIDER || '').toLowerCase() === 'increase';
-    let incBankLink = { status: 'none' };
 
     function getSelectedFundMethod(){
       const methodInput = document.querySelector('input[name="fundMethod"]:checked');
       return methodInput ? String(methodInput.value || '') : 'card';
     }
 
-    function renderIncBankUi(){
-      const box = document.getElementById('incBankBox');
-      if (!box) return;
+    function incDigitsOnly(val) {
+      return String(val || '').replace(/[^0-9]/g, '');
+    }
 
-      const status = String(incBankLink && incBankLink.status ? incBankLink.status : 'none').toLowerCase();
-      const last4 = incBankLink && incBankLink.last4 ? String(incBankLink.last4) : '';
+    function renderIncAchUi(){
+      if (!isIncreaseAch) return;
 
-      const statusEl = document.getElementById('incBankStatus');
-      const verifiedRow = document.getElementById('incBankVerifiedRow');
-      const last4El = document.getElementById('incBankLast4');
-      const linkForm = document.getElementById('incBankLinkForm');
-      const linkInputs = document.getElementById('incBankLinkInputs');
-      const verifyInputs = document.getElementById('incBankVerifyInputs');
-
-      const consentForm = document.getElementById('incAchConsentForm');
-      const consentCheckbox = document.getElementById('incAchAuthorizeCheckbox');
-      const signerEl = document.getElementById('incAchSignerName');
-      const billingAddrEl = document.getElementById('incAchBillingAddress');
       const last4InlineEl = document.getElementById('incAchLast4Inline');
       const amountInlineEl = document.getElementById('incAchAmountInline');
+      const billingAddrEl = document.getElementById('incAchBillingAddress');
+      const signerEl = document.getElementById('incAchSignerName');
 
-      if (statusEl) {
-        statusEl.textContent =
-          status === 'verified' ? 'Verified' :
-          status === 'pending' ? 'Verification initiated' :
-          status === 'failed' ? 'Verification failed' :
-          'Not linked';
-      }
-      if (last4El) last4El.textContent = last4 ? `••••${last4}` : '';
-
-      if (verifiedRow) verifiedRow.style.display = (status === 'verified' && last4) ? 'block' : 'none';
-      if (linkForm) linkForm.style.display = (status === 'verified') ? 'none' : 'block';
-      if (linkInputs) linkInputs.style.display = (status === 'pending') ? 'none' : 'block';
-      if (verifyInputs) verifyInputs.style.display = (status === 'pending') ? 'block' : 'none';
-
-      if (consentForm) consentForm.style.display = (status === 'verified') ? 'block' : 'none';
-      if (last4InlineEl) last4InlineEl.textContent = last4 ? `••••${last4}` : '••••';
+      // Update last4 preview from account input
+      try {
+        const acctDigits = incDigitsOnly(document.getElementById('incAccountNumber')?.value || '');
+        const last4 = acctDigits.length >= 4 ? acctDigits.slice(-4) : '';
+        if (last4InlineEl) last4InlineEl.textContent = last4 ? `••••${last4}` : '••••';
+      } catch {}
 
       // Fill in amount preview (best-effort)
       if (amountInlineEl) {
@@ -4385,22 +4349,6 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           signerEl.value = name || uname || '';
         }
       }
-
-      // If no longer verified, clear the consent checkbox
-      if (consentCheckbox && status !== 'verified') {
-        consentCheckbox.checked = false;
-      }
-    }
-
-    async function loadIncBankLink(){
-      if (!isIncreaseAch) return;
-      try {
-        const r = await fetch('/api/me/increase/bank-link');
-        const j = await r.json();
-        if (!j || j.success === false) return;
-        incBankLink = j.data || { status: 'none' };
-        renderIncBankUi();
-      } catch {}
     }
 
     function updateAddFundsMethodUi(){
@@ -4409,7 +4357,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       const method = getSelectedFundMethod();
       const show = isIncreaseAch && method === 'ach';
       box.style.display = show ? 'block' : 'none';
-      if (show) loadIncBankLink();
+      if (show) renderIncAchUi();
     }
 
     // React to method selection changes
@@ -4419,91 +4367,12 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       });
     });
 
-    // Update consent amount preview as the user types
+    // Update previews as the user types
     {
       const amtEl = document.getElementById('fundAmount');
-      if (amtEl) {
-        amtEl.addEventListener('input', () => {
-          if (!isIncreaseAch) return;
-          try { renderIncBankUi(); } catch {}
-        });
-      }
-    }
-
-    // Bank link actions (only present for Increase)
-    {
-      const sendBtn = document.getElementById('incSendMicroBtn');
-      const verifyBtn = document.getElementById('incVerifyMicroBtn');
-
-      if (sendBtn) {
-        sendBtn.addEventListener('click', async () => {
-          const routing = String(document.getElementById('incRoutingNumber')?.value || '').trim();
-          const acct = String(document.getElementById('incAccountNumber')?.value || '').trim();
-          if (!routing || !acct) return showToast('Please enter your routing and account numbers.', 'error');
-
-          sendBtn.disabled = true;
-          sendBtn.textContent = 'Starting verification...';
-          try {
-            const r = await fetch('/api/me/increase/bank-link/microdeposits/start', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ routing_number: routing, account_number: acct })
-            });
-            const j = await r.json();
-            if (!j || j.success === false) {
-              showToast(j?.message || 'Failed to start bank verification', 'error');
-              return;
-            }
-            // Clear account number field after submission
-            const acctEl = document.getElementById('incAccountNumber');
-            if (acctEl) acctEl.value = '';
-            showToast(j.message || 'Verification started. Check your bank statement, then verify the two amounts.');
-            await loadIncBankLink();
-            try { document.getElementById('incVerifyAmount1')?.focus(); } catch {}
-          } catch (e) {
-            showToast('Failed to start bank verification', 'error');
-          } finally {
-            sendBtn.disabled = false;
-            sendBtn.textContent = 'Start bank verification';
-          }
-        });
-      }
-
-      if (verifyBtn) {
-        verifyBtn.addEventListener('click', async () => {
-          const a1 = String(document.getElementById('incVerifyAmount1')?.value || '').trim();
-          const a2 = String(document.getElementById('incVerifyAmount2')?.value || '').trim();
-          if (!a1 || !a2) return showToast('Please enter the two amounts from your bank statement.', 'error');
-
-          verifyBtn.disabled = true;
-          verifyBtn.textContent = 'Verifying...';
-          try {
-            const r = await fetch('/api/me/increase/bank-link/microdeposits/verify', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ amount_1: a1, amount_2: a2 })
-            });
-            const j = await r.json();
-            if (!j || j.success === false) {
-              showToast(j?.message || 'Failed to verify amounts', 'error');
-              return;
-            }
-            // Clear amount fields after success
-            const a1El = document.getElementById('incVerifyAmount1');
-            const a2El = document.getElementById('incVerifyAmount2');
-            if (a1El) a1El.value = '';
-            if (a2El) a2El.value = '';
-
-            showToast(j.message || 'Bank account verified.');
-            await loadIncBankLink();
-          } catch (e) {
-            showToast('Failed to verify bank account', 'error');
-          } finally {
-            verifyBtn.disabled = false;
-            verifyBtn.textContent = 'Verify amounts';
-          }
-        });
-      }
+      if (amtEl) amtEl.addEventListener('input', () => { try { renderIncAchUi(); } catch {} });
+      const acctEl = document.getElementById('incAccountNumber');
+      if (acctEl) acctEl.addEventListener('input', () => { try { renderIncAchUi(); } catch {} });
     }
 
     $('#addFundBtn').addEventListener('click', () => {
@@ -4537,12 +4406,22 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       const method = getSelectedFundMethod();
 
       let authorization = null;
+      let achBank = null;
 
-      // If Increase ACH is selected, require verified bank link + explicit authorization.
+      // If Increase ACH is selected, require bank details + explicit authorization.
       if (method === 'ach' && isIncreaseAch) {
-        const st = String(incBankLink && incBankLink.status ? incBankLink.status : '').toLowerCase();
-        if (st !== 'verified') {
-          showToast('Please verify your bank account first (micro pulls).', 'error');
+        const routingRaw = String(document.getElementById('incRoutingNumber')?.value || '').trim();
+        const acctRaw = String(document.getElementById('incAccountNumber')?.value || '').trim();
+        const routing = routingRaw.replace(/[^0-9]/g, '');
+        const acct = acctRaw.replace(/[^0-9]/g, '');
+
+        if (!routing || routing.length !== 9) {
+          showToast('Routing number must be 9 digits.', 'error');
+          updateAddFundsMethodUi();
+          return;
+        }
+        if (!acct || acct.length < 4) {
+          showToast('Please enter your account number.', 'error');
           updateAddFundsMethodUi();
           return;
         }
@@ -4562,6 +4441,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         }
 
         authorization = { agreed: true, signer_name: signerName };
+        achBank = { routing_number: routing, account_number: acct };
       }
 
       $('#confirmFundBtn').disabled = true;
@@ -4580,6 +4460,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
 
         const payload = { amount };
         if (authorization) payload.authorization = authorization;
+        if (achBank) Object.assign(payload, achBank);
 
         const r = await fetch(endpoint, {
           method: 'POST',
@@ -4595,7 +4476,6 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
               ? 'ACH payment'
               : 'Card payment';
           showToast(j?.message || `${label} could not be started. Please try again.`, 'error');
-          if (method === 'ach' && isIncreaseAch) await loadIncBankLink();
           return;
         }
 
