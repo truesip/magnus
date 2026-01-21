@@ -11813,31 +11813,30 @@ app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (r
     let a2 = crypto.randomInt ? crypto.randomInt(11, 50) : (11 + Math.floor(Math.random() * 39));
     if (a2 === a1) a2 = (a1 % 39) + 11;
 
-    // First micro pull: create external account from routing/account.
-    const payloadCreateExternal = {
-      account_id: String(INCREASE_ACCOUNT_ID),
-      routing_number: routingNumber,
-      account_number: accountNumber,
-      statement_descriptor: companyName,
-      company_entry_description: 'ACCTVERIFY',
-      company_name: companyName,
-      individual_name: individualName,
-      individual_id: `talkusa-${userId}`,
-      amount: -a1
-    };
+    const last4 = accountNumber.slice(-4);
 
-    const t1 = await increaseApiCall({
+    // Create an External Account in Increase for this routing/account.
+    // We can then reference external_account_id without storing bank details locally.
+    const extIdempotencyKey = `banklink-extacct-${userId}-${sha256(String(routingNumber) + ':' + String(accountNumber)).slice(0, 16)}`;
+    const ext = await increaseApiCall({
       method: 'POST',
-      path: '/ach_transfers',
-      body: payloadCreateExternal
+      path: '/external_accounts',
+      headers: { 'Idempotency-Key': extIdempotencyKey },
+      body: {
+        routing_number: routingNumber,
+        account_number: accountNumber,
+        description: `TalkUSA bank link u${userId} ••••${last4}`,
+        account_holder: 'individual',
+        funding: 'checking'
+      }
     });
 
-    const externalAccountId = String(t1?.external_account_id || '').trim();
+    const externalAccountId = String(ext?.id || '').trim();
     if (!externalAccountId) {
-      return res.status(502).json({ success: false, message: 'Increase did not return an external account identifier' });
+      return res.status(502).json({ success: false, message: 'Increase did not return an external account id' });
     }
 
-    // Second micro pull: use external_account_id (do not re-send routing/account).
+    // Two micro pulls: ACH debits from the user's bank.
     const payloadExistingExternalBase = {
       account_id: String(INCREASE_ACCOUNT_ID),
       external_account_id: externalAccountId,
@@ -11848,6 +11847,12 @@ app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (r
       individual_id: `talkusa-${userId}`
     };
 
+    const t1 = await increaseApiCall({
+      method: 'POST',
+      path: '/ach_transfers',
+      body: Object.assign({}, payloadExistingExternalBase, { amount: -a1 })
+    });
+
     const t2 = await increaseApiCall({
       method: 'POST',
       path: '/ach_transfers',
@@ -11857,8 +11862,13 @@ app.post('/api/me/increase/bank-link/microdeposits/start', requireAuth, async (r
     const transferId1 = t1 && t1.id ? String(t1.id).trim() : null;
     const transferId2 = t2 && t2.id ? String(t2.id).trim() : null;
 
-    const last4 = accountNumber.slice(-4);
-    const rawPayload = JSON.stringify({ micro_pull_1: t1, micro_pull_2: t2 });
+    // Store a redacted payload for debugging (never store account/routing numbers).
+    const rawPayload = JSON.stringify(sanitizeForLog({ external_account: ext, micro_pull_1: t1, micro_pull_2: t2 }, {
+      maxDepth: 10,
+      maxKeys: 300,
+      maxArrayLength: 100,
+      maxStringLength: 2000
+    }));
 
     await pool.execute(
       `INSERT INTO increase_bank_links (
@@ -12440,7 +12450,12 @@ async function handleIncreaseAchCheckout(req, res) {
     }
 
     const transferStatus = String(transfer?.status || 'pending');
-    const payloadJson = JSON.stringify(transfer);
+    const payloadJson = JSON.stringify(sanitizeForLog(transfer || {}, {
+      maxDepth: 10,
+      maxKeys: 300,
+      maxArrayLength: 100,
+      maxStringLength: 5000
+    }));
 
     await pool.execute(
       'INSERT INTO increase_ach_transfers (user_id, billing_history_id, ach_transfer_id, order_id, amount, currency, status, hold_automatically_resolves_at, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)',
@@ -19760,7 +19775,12 @@ async function runIncreaseReconcileTick() {
         if (Number.isFinite(ms)) holdAutoDt = new Date(ms);
       }
 
-      const payloadJson = JSON.stringify(transfer || {});
+      const payloadJson = JSON.stringify(sanitizeForLog(transfer || {}, {
+        maxDepth: 10,
+        maxKeys: 300,
+        maxArrayLength: 100,
+        maxStringLength: 5000
+      }));
 
       // Persist latest status + hold timing for debugging
       try {
