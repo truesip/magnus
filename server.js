@@ -304,6 +304,7 @@ const AI_PHYSICAL_MAIL_ENABLED = ['1', 'true', 'yes', 'on'].includes(
 // Optional: platform fees for AI tools (USD). Set to 0 to disable charging for that action.
 const AI_EMAIL_SEND_COST = Math.max(0, parseFloat(process.env.AI_EMAIL_SEND_COST || '1') || 0);
 const AI_VIDEO_MEETING_LINK_COST = Math.max(0, parseFloat(process.env.AI_VIDEO_MEETING_LINK_COST || '5') || 0);
+const AI_SMS_SEND_COST = Math.max(0, parseFloat(process.env.AI_SMS_SEND_COST || '0') || 0);
 
 const click2mailXmlParser = new XMLParser({
   ignoreAttributes: false,
@@ -1933,6 +1934,12 @@ async function initDb() {
     message_text TEXT NULL,
     provider VARCHAR(32) NOT NULL DEFAULT 'didww_http_sms_out',
     provider_message_id VARCHAR(128) NULL,
+    billing_history_id BIGINT NULL,
+    refund_status ENUM('none','pending','completed','failed') NOT NULL DEFAULT 'none',
+    refund_amount DECIMAL(18,8) NULL,
+    refund_billing_history_id BIGINT NULL,
+    refund_error TEXT NULL,
+    refunded_at DATETIME NULL,
     status ENUM('pending','completed','failed') NOT NULL DEFAULT 'pending',
     attempt_count INT NOT NULL DEFAULT 0,
     error TEXT NULL,
@@ -1942,8 +1949,10 @@ async function initDb() {
     UNIQUE KEY uniq_ai_sms_dedupe (dedupe_key),
     KEY idx_ai_sms_user (user_id),
     KEY idx_ai_sms_agent (agent_id),
+    KEY idx_ai_sms_billing (billing_history_id),
     CONSTRAINT fk_ai_sms_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
-    CONSTRAINT fk_ai_sms_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL
+    CONSTRAINT fk_ai_sms_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL,
+    CONSTRAINT fk_ai_sms_billing FOREIGN KEY (billing_history_id) REFERENCES billing_history(id) ON DELETE SET NULL
   )`);
 
   // Ensure ai_email_sends meeting-link columns exist (existing DB migrations)
@@ -2008,6 +2017,29 @@ async function initDb() {
       }
     } catch (e) {
       if (DEBUG) console.warn(`[schema] ai_email_sends.${col.name} check failed`, e.message || e);
+    }
+  }
+
+  // Ensure ai_sms_sends billing/refund columns exist (best-effort migrations)
+  for (const col of [
+    { name: 'billing_history_id', ddl: "ALTER TABLE ai_sms_sends ADD COLUMN billing_history_id BIGINT NULL AFTER provider_message_id" },
+    { name: 'refund_status', ddl: "ALTER TABLE ai_sms_sends ADD COLUMN refund_status ENUM('none','pending','completed','failed') NOT NULL DEFAULT 'none' AFTER billing_history_id" },
+    { name: 'refund_amount', ddl: "ALTER TABLE ai_sms_sends ADD COLUMN refund_amount DECIMAL(18,8) NULL AFTER refund_status" },
+    { name: 'refund_billing_history_id', ddl: "ALTER TABLE ai_sms_sends ADD COLUMN refund_billing_history_id BIGINT NULL AFTER refund_amount" },
+    { name: 'refund_error', ddl: "ALTER TABLE ai_sms_sends ADD COLUMN refund_error TEXT NULL AFTER refund_billing_history_id" },
+    { name: 'refunded_at', ddl: "ALTER TABLE ai_sms_sends ADD COLUMN refunded_at DATETIME NULL AFTER refund_error" },
+  ]) {
+    try {
+      const [rows] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_sms_sends' AND column_name=? LIMIT 1",
+        [dbName, col.name]
+      );
+      if (!rows || !rows.length) {
+        await pool.query(col.ddl);
+        if (DEBUG) console.log(`[schema] Added ai_sms_sends.${col.name} column`);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn(`[schema] ai_sms_sends.${col.name} check failed`, e.message || e);
     }
   }
 
@@ -4420,6 +4452,8 @@ app.post('/api/ai/agent/send-email', async (req, res) => {
 // Sends an outbound SMS via DIDWW HTTP SMS OUT.
 app.post('/api/ai/agent/send-sms', async (req, res) => {
   let sendRowId = null;
+  let userId = null;
+  const smsCost = AI_SMS_SEND_COST;
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
 
@@ -4434,7 +4468,7 @@ app.post('/api/ai/agent/send-sms', async (req, res) => {
     const agent = arows && arows[0];
     if (!agent) return res.status(401).json({ success: false, message: 'Invalid token' });
 
-    const userId = Number(agent.user_id);
+    userId = Number(agent.user_id);
     const agentId = Number(agent.id);
 
     const toRaw = String(req.body?.to_number || req.body?.toNumber || req.body?.to || '').trim();
@@ -4580,6 +4614,35 @@ app.post('/api/ai/agent/send-sms', async (req, res) => {
       }
     }
 
+    // Charge before sending (optional)
+    if (smsCost > 0) {
+      const chargeDesc = `AI SMS send - ${toDigits}`.substring(0, 255);
+      const charge = await chargeAiSmsSendsRow({
+        sendRowId,
+        userId,
+        amount: smsCost,
+        description: chargeDesc,
+        label: 'ai.sms'
+      });
+
+      if (!charge || charge.ok !== true) {
+        const reason = charge?.reason || 'charge_failed';
+        const short = (reason === 'insufficient_funds') ? 'Insufficient balance' : reason;
+        const errMsg = `SMS charge failed: ${short}`;
+
+        if (sendRowId) {
+          try {
+            await pool.execute(
+              'UPDATE ai_sms_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+              [String(errMsg || 'SMS charge failed').slice(0, 2000), sendRowId]
+            );
+          } catch {}
+        }
+
+        return res.status(reason === 'insufficient_funds' ? 402 : 500).json({ success: false, message: errMsg });
+      }
+    }
+
     // Provider request
     const body = {
       data: {
@@ -4625,6 +4688,19 @@ app.post('/api/ai/agent/send-sms', async (req, res) => {
           'UPDATE ai_sms_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
           [String(msg || 'Failed to send SMS').slice(0, 2000), sendRowId]
         );
+      } catch {}
+    }
+
+    // Best-effort refund if we charged before sending.
+    if (sendRowId && pool && userId && smsCost > 0) {
+      try {
+        await refundAiSmsSendsRow({
+          sendRowId,
+          userId,
+          amount: smsCost,
+          description: `Refund: AI SMS send failed (sms_id ${sendRowId})`.substring(0, 255),
+          label: 'ai.sms'
+        });
       } catch {}
     }
 
@@ -4819,6 +4895,146 @@ async function refundAiEmailSendsRow({ sendRowId, userId, amount, description, l
   try {
     await pool.execute(
       `UPDATE ai_email_sends
+       SET refund_status = 'failed',
+           refund_error = ?,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? LIMIT 1`,
+      [String(err || 'Refund failed').slice(0, 2000), sendRowId]
+    );
+  } catch {}
+
+  return { ok: false, reason: err };
+}
+
+async function chargeAiSmsSendsRow({ sendRowId, userId, amount, description, label }) {
+  const amt = Math.max(0, Number(amount) || 0);
+  if (!pool) throw new Error('Database not configured');
+  if (!sendRowId || !userId) return { ok: false, reason: 'missing_params' };
+  if (!(amt > 0)) return { ok: true, skipped: true };
+
+  // Skip if already charged
+  try {
+    const [rows] = await pool.execute(
+      'SELECT billing_history_id FROM ai_sms_sends WHERE id = ? LIMIT 1',
+      [sendRowId]
+    );
+    const existing = rows && rows[0] && rows[0].billing_history_id ? Number(rows[0].billing_history_id) : null;
+    if (existing) return { ok: true, already_charged: true, billingId: existing };
+  } catch {}
+
+  const magnusUserId = await loadMagnusUserIdByLocalUserId(userId);
+  if (!magnusUserId) return { ok: false, reason: 'magnus_user_missing' };
+
+  const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+  const charge = await applyMagnusCreditDelta({
+    localUserId: userId,
+    magnusUserId,
+    amountDelta: -Math.abs(amt),
+    description: String(description || '').substring(0, 255),
+    httpsAgent: magnusBillingAgent,
+    hostHeader,
+    label: label || 'ai.sms'
+  });
+
+  if (!charge || charge.ok !== true) {
+    return { ok: false, reason: charge?.reason || 'charge_failed', billingId: charge?.billingId || null, creditBefore: charge?.creditBefore };
+  }
+
+  const billingId = charge.billingId;
+
+  // Best-effort persist charge metadata for refunds / idempotency
+  try {
+    await pool.execute(
+      `UPDATE ai_sms_sends
+       SET billing_history_id = ?,
+           refund_status = 'none',
+           refund_amount = NULL,
+           refund_billing_history_id = NULL,
+           refund_error = NULL,
+           refunded_at = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? LIMIT 1`,
+      [billingId, sendRowId]
+    );
+  } catch {}
+
+  return { ok: true, billingId, amount: Math.abs(amt) };
+}
+
+async function refundAiSmsSendsRow({ sendRowId, userId, amount, description, label }) {
+  const amt = Math.max(0, Number(amount) || 0);
+  if (!pool) throw new Error('Database not configured');
+  if (!sendRowId || !userId) return { ok: false, reason: 'missing_params' };
+  if (!(amt > 0)) return { ok: true, skipped: true };
+
+  // Best-effort claim to avoid double refunds
+  let canRefund = true;
+  try {
+    const [r] = await pool.execute(
+      `UPDATE ai_sms_sends
+       SET refund_status = 'pending',
+           refund_amount = ?,
+           refund_error = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?
+         AND (refund_status = 'none' OR refund_status = 'failed')
+         AND billing_history_id IS NOT NULL
+       LIMIT 1`,
+      [Math.abs(amt), sendRowId]
+    );
+    canRefund = !!(r && r.affectedRows);
+  } catch {
+    canRefund = true;
+  }
+
+  if (!canRefund) return { ok: true, skipped: true };
+
+  const magnusUserId = await loadMagnusUserIdByLocalUserId(userId);
+  if (!magnusUserId) {
+    try {
+      await pool.execute(
+        `UPDATE ai_sms_sends
+         SET refund_status = 'failed',
+             refund_error = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? LIMIT 1`,
+        ['Refund failed: MagnusBilling user id not configured', sendRowId]
+      );
+    } catch {}
+    return { ok: false, reason: 'magnus_user_missing' };
+  }
+
+  const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+  const refund = await applyMagnusCreditDelta({
+    localUserId: userId,
+    magnusUserId,
+    amountDelta: Math.abs(amt),
+    description: String(description || '').substring(0, 255),
+    httpsAgent: magnusBillingAgent,
+    hostHeader,
+    label: label ? `${label}.refund` : 'ai.sms.refund'
+  });
+
+  if (refund && refund.ok === true) {
+    try {
+      await pool.execute(
+        `UPDATE ai_sms_sends
+         SET refund_status = 'completed',
+             refund_billing_history_id = ?,
+             refunded_at = NOW(),
+             billing_history_id = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? LIMIT 1`,
+        [refund.billingId, sendRowId]
+      );
+    } catch {}
+    return { ok: true, refundBillingId: refund.billingId, amount: Math.abs(amt) };
+  }
+
+  const err = refund?.reason || 'Refund failed';
+  try {
+    await pool.execute(
+      `UPDATE ai_sms_sends
        SET refund_status = 'failed',
            refund_error = ?,
            updated_at = CURRENT_TIMESTAMP
