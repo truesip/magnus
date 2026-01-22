@@ -1834,6 +1834,17 @@ async function initDb() {
     CONSTRAINT fk_user_ai_transfer_settings_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
 
+  // Per-user AI SMS settings (DIDWW outbound sender numbers)
+  await pool.query(`CREATE TABLE IF NOT EXISTS user_ai_sms_settings (
+    user_id BIGINT NOT NULL,
+    allowed_didww_did_ids JSON NULL,
+    default_didww_did_id VARCHAR(64) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id),
+    CONSTRAINT fk_user_ai_sms_settings_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
   // Per-user physical mail return address (Click2Mail)
   await pool.query(`CREATE TABLE IF NOT EXISTS user_mail_settings (
     user_id BIGINT NOT NULL,
@@ -1906,6 +1917,33 @@ async function initDb() {
     CONSTRAINT fk_ai_email_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL,
     CONSTRAINT fk_ai_email_template FOREIGN KEY (template_id) REFERENCES ai_doc_templates(id) ON DELETE SET NULL,
     CONSTRAINT fk_ai_email_billing FOREIGN KEY (billing_history_id) REFERENCES billing_history(id) ON DELETE SET NULL
+  )`);
+
+  // AI SMS send audit log + idempotency
+  await pool.query(`CREATE TABLE IF NOT EXISTS ai_sms_sends (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    agent_id BIGINT NULL,
+    dedupe_key CHAR(64) NOT NULL,
+    call_id VARCHAR(64) NULL,
+    call_domain VARCHAR(64) NULL,
+    from_didww_did_id VARCHAR(64) NULL,
+    from_number VARCHAR(32) NULL,
+    to_number VARCHAR(32) NOT NULL,
+    message_text TEXT NULL,
+    provider VARCHAR(32) NOT NULL DEFAULT 'didww_http_sms_out',
+    provider_message_id VARCHAR(128) NULL,
+    status ENUM('pending','completed','failed') NOT NULL DEFAULT 'pending',
+    attempt_count INT NOT NULL DEFAULT 0,
+    error TEXT NULL,
+    raw_payload JSON NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_ai_sms_dedupe (dedupe_key),
+    KEY idx_ai_sms_user (user_id),
+    KEY idx_ai_sms_agent (agent_id),
+    CONSTRAINT fk_ai_sms_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_ai_sms_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL
   )`);
 
   // Ensure ai_email_sends meeting-link columns exist (existing DB migrations)
@@ -4378,6 +4416,232 @@ app.post('/api/ai/agent/send-email', async (req, res) => {
   }
 });
 
+// Agent-auth endpoint called by the Pipecat agent runtime.
+// Sends an outbound SMS via DIDWW HTTP SMS OUT.
+app.post('/api/ai/agent/send-sms', async (req, res) => {
+  let sendRowId = null;
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const token = parseBearerToken(req.headers.authorization);
+    if (!token) return res.status(401).json({ success: false, message: 'Missing Authorization bearer token' });
+
+    const tokenHash = sha256(token);
+    const [arows] = await pool.execute(
+      'SELECT id, user_id FROM ai_agents WHERE agent_action_token_hash = ? LIMIT 1',
+      [tokenHash]
+    );
+    const agent = arows && arows[0];
+    if (!agent) return res.status(401).json({ success: false, message: 'Invalid token' });
+
+    const userId = Number(agent.user_id);
+    const agentId = Number(agent.id);
+
+    const toRaw = String(req.body?.to_number || req.body?.toNumber || req.body?.to || '').trim();
+    const contentRaw = (req.body?.content != null)
+      ? String(req.body.content)
+      : String(req.body?.message ?? req.body?.text ?? req.body?.body ?? '').trim();
+
+    const callId = String(req.body?.call_id || req.body?.callId || '').trim() || null;
+    const callDomain = String(req.body?.call_domain || req.body?.callDomain || '').trim() || null;
+
+    if (callId && callId.length > 64) {
+      return res.status(400).json({ success: false, message: 'call_id is too long' });
+    }
+    if (callDomain && callDomain.length > 64) {
+      return res.status(400).json({ success: false, message: 'call_domain is too long' });
+    }
+
+    if (!toRaw) {
+      return res.status(400).json({ success: false, message: 'to_number is required' });
+    }
+
+    const content = String(contentRaw || '').trim();
+    if (!content) {
+      return res.status(400).json({ success: false, message: 'content/message is required' });
+    }
+    if (content.length > 160) {
+      return res.status(400).json({ success: false, message: 'SMS content must be 160 characters or fewer' });
+    }
+
+    const toDigits = normalizeSmsE164Digits(toRaw);
+    if (!isValidSmsE164Digits(toDigits)) {
+      return res.status(400).json({ success: false, message: 'to_number must be in E.164 format (country code + number)' });
+    }
+
+    // Determine sender DID (source)
+    const settings = await getUserAiSmsSettings(userId);
+
+    const fromDidIdRaw = String(
+      req.body?.from_didww_did_id || req.body?.fromDidId || req.body?.from_did_id || ''
+    ).trim();
+
+    let fromDidId = '';
+    if (fromDidIdRaw) {
+      if (!settings.allowedDidIds.includes(fromDidIdRaw)) {
+        return res.status(403).json({ success: false, message: 'from_didww_did_id is not allowed (configure it in AI Agent → Tools → SMS)' });
+      }
+      fromDidId = fromDidIdRaw;
+    } else {
+      const preferred = (settings.defaultDidId && settings.allowedDidIds.includes(settings.defaultDidId))
+        ? settings.defaultDidId
+        : '';
+      fromDidId = preferred || (settings.allowedDidIds[0] || '');
+    }
+
+    if (!fromDidId) {
+      return res.status(400).json({ success: false, message: 'No outbound SMS DID configured (AI Agent → Tools → SMS)' });
+    }
+
+    const [drows] = await pool.execute(
+      'SELECT did_number, cancel_pending FROM user_dids WHERE user_id = ? AND didww_did_id = ? LIMIT 1',
+      [userId, fromDidId]
+    );
+    const didRow = drows && drows[0];
+
+    if (!didRow) {
+      return res.status(400).json({ success: false, message: 'Configured outbound DID was not found' });
+    }
+    if (didRow.cancel_pending) {
+      return res.status(409).json({ success: false, message: 'Configured outbound DID is being cancelled and cannot be used' });
+    }
+
+    const fromNumberRaw = didRow && didRow.did_number ? String(didRow.did_number) : '';
+    const fromDigits = normalizeSmsE164Digits(fromNumberRaw);
+    if (!isValidSmsE164Digits(fromDigits)) {
+      return res.status(400).json({ success: false, message: 'Configured outbound DID is invalid for SMS sending' });
+    }
+
+    // Idempotency
+    let dedupeKey = String(req.body?.dedupe_key || req.body?.dedupeKey || '').trim();
+    if (dedupeKey) {
+      if (!/^[a-f0-9]{64}$/i.test(dedupeKey)) {
+        return res.status(400).json({ success: false, message: 'dedupe_key must be a 64-char hex sha256' });
+      }
+      dedupeKey = dedupeKey.toLowerCase();
+    } else {
+      const clientRequestId = String(req.body?.client_request_id || req.body?.clientRequestId || req.body?.message_id || req.body?.messageId || '').trim();
+      if (clientRequestId) {
+        dedupeKey = sha256(`send-sms|agent:${agentId}|req:${clientRequestId}`);
+      } else {
+        const contentHash = sha256(`to:${toDigits}|from:${fromDigits}|content:${content}`);
+        dedupeKey = sha256(
+          `send-sms|agent:${agentId}|call:${callDomain || ''}|${callId || ''}|content:${contentHash}`
+        );
+      }
+    }
+
+    // Idempotency + audit row
+    try {
+      const [ins] = await pool.execute(
+        `INSERT INTO ai_sms_sends (
+          user_id, agent_id, dedupe_key, call_id, call_domain,
+          from_didww_did_id, from_number, to_number,
+          message_text, provider, status, attempt_count
+        ) VALUES (
+          ?,?,?,?,?,
+          ?,?,?,
+          ?, 'didww_http_sms_out', 'pending', 1
+        )`,
+        [
+          userId, agentId, dedupeKey, callId, callDomain,
+          fromDidId, fromNumberRaw, toRaw,
+          content
+        ]
+      );
+      sendRowId = ins.insertId;
+    } catch (e) {
+      if (e?.code !== 'ER_DUP_ENTRY') throw e;
+      const [erows] = await pool.execute(
+        'SELECT id, status, provider_message_id FROM ai_sms_sends WHERE dedupe_key = ? LIMIT 1',
+        [dedupeKey]
+      );
+      const existing = erows && erows[0];
+      if (existing && existing.status === 'completed') {
+        return res.json({ success: true, already_sent: true, dedupe_key: dedupeKey, provider_message_id: existing.provider_message_id || null });
+      }
+      if (existing && existing.status === 'pending') {
+        return res.status(202).json({ success: true, in_progress: true, dedupe_key: dedupeKey });
+      }
+      if (existing && existing.status === 'failed') {
+        sendRowId = existing.id;
+        try {
+          await pool.execute(
+            `UPDATE ai_sms_sends
+             SET status = 'pending', attempt_count = attempt_count + 1, error = NULL,
+                 from_didww_did_id = ?, from_number = ?, to_number = ?, message_text = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? LIMIT 1`,
+            [fromDidId, fromNumberRaw, toRaw, content, sendRowId]
+          );
+        } catch {}
+      } else {
+        return res.status(202).json({ success: true, in_progress: true, dedupe_key: dedupeKey });
+      }
+    }
+
+    // Provider request
+    const body = {
+      data: {
+        type: 'outbound_messages',
+        attributes: {
+          destination: toDigits,
+          source: fromDigits,
+          content
+        }
+      }
+    };
+
+    const resp = await didwwSmsOutApiCall({ method: 'POST', path: '/outbound_messages', body });
+
+    const providerMessageId = resp?.data?.id ? String(resp.data.id).trim() : null;
+
+    // Persist raw provider response (best-effort)
+    if (sendRowId) {
+      try {
+        await pool.execute(
+          `UPDATE ai_sms_sends
+           SET status = 'completed', provider_message_id = ?, raw_payload = ?, error = NULL, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? LIMIT 1`,
+          [providerMessageId, JSON.stringify(sanitizeForLog(resp, { maxDepth: 6, maxKeys: 200, maxArrayLength: 50, maxStringLength: 2000 })), sendRowId]
+        );
+      } catch {}
+    }
+
+    return res.json({ success: true, dedupe_key: dedupeKey, already_sent: false, provider_message_id: providerMessageId });
+  } catch (e) {
+    const upstreamStatus = e?.response?.status;
+    const didwwErrors = e?.response?.data?.errors;
+
+    let msg = e?.message || 'Failed to send SMS';
+    if (Array.isArray(didwwErrors) && didwwErrors.length) {
+      const first = didwwErrors[0];
+      msg = String(first?.detail || first?.title || msg);
+    }
+
+    if (sendRowId && pool) {
+      try {
+        await pool.execute(
+          'UPDATE ai_sms_sends SET status = \'failed\', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+          [String(msg || 'Failed to send SMS').slice(0, 2000), sendRowId]
+        );
+      } catch {}
+    }
+
+    if (DEBUG) console.warn('[ai.agent.send-sms] error:', e?.response?.data || e?.message || e);
+
+    // Treat provider validation errors as 400 so the agent can handle them.
+    if (upstreamStatus && upstreamStatus >= 400 && upstreamStatus < 500) {
+      if (upstreamStatus === 401 || upstreamStatus === 403) {
+        return res.status(502).json({ success: false, message: 'SMS provider authentication error' });
+      }
+      return res.status(400).json({ success: false, message: String(msg).slice(0, 300) });
+    }
+
+    return res.status(502).json({ success: false, message: String(msg).slice(0, 300) });
+  }
+});
+
 function parseClick2MailDateTimeToMysql(dtStr) {
   const s = String(dtStr || '').trim();
   if (!s) return null;
@@ -6660,6 +6924,161 @@ app.put('/api/me/ai/transfer-settings', requireAuth, async (req, res) => {
   }
 });
 
+// AI SMS: DID options (DIDWW numbers only; excludes Daily AI numbers)
+app.get('/api/me/ai/sms/did-options', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const [rows] = await pool.execute(
+      'SELECT didww_did_id, did_number FROM user_dids WHERE user_id = ? AND cancel_pending = 0 ORDER BY did_number ASC',
+      [userId]
+    );
+
+    return res.json({ success: true, data: rows || [] });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.sms.did-options] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load SMS DID options' });
+  }
+});
+
+// AI SMS settings (outbound sender IDs)
+app.get('/api/me/ai/sms-settings', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const s = await getUserAiSmsSettings(userId);
+    return res.json({
+      success: true,
+      data: {
+        allowed_didww_did_ids: s.allowedDidIds,
+        default_didww_did_id: s.defaultDidId || null
+      }
+    });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.sms.settings.get] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load SMS settings' });
+  }
+});
+
+app.put('/api/me/ai/sms-settings', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const allowedRaw = (req.body && (req.body.allowed_didww_did_ids ?? req.body.allowedDidIds)) ?? [];
+    const allowed = (Array.isArray(allowedRaw) ? allowedRaw : parseJsonArrayValue(allowedRaw))
+      .map(x => String(x || '').trim())
+      .filter(Boolean)
+      .slice(0, 50);
+
+    const defaultRaw = (req.body && (req.body.default_didww_did_id ?? req.body.defaultDidId)) ?? null;
+    const defaultDidId = defaultRaw != null ? String(defaultRaw || '').trim() : '';
+
+    // Verify ownership of selected DIDs
+    if (allowed.length) {
+      const uniq = Array.from(new Set(allowed));
+      const ph = uniq.map(() => '?').join(',');
+      const [rows] = await pool.execute(
+        `SELECT didww_did_id FROM user_dids WHERE user_id = ? AND cancel_pending = 0 AND didww_did_id IN (${ph})`,
+        [userId, ...uniq]
+      );
+      const owned = new Set((rows || []).map(r => String(r.didww_did_id || '').trim()).filter(Boolean));
+      const missing = uniq.filter(id => !owned.has(id));
+      if (missing.length) {
+        return res.status(403).json({ success: false, message: 'One or more selected DIDs are not owned by this account.' });
+      }
+    }
+
+    const normalizedDefault = (defaultDidId && allowed.includes(defaultDidId)) ? defaultDidId : null;
+
+    await pool.execute(
+      `INSERT INTO user_ai_sms_settings (user_id, allowed_didww_did_ids, default_didww_did_id)
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         allowed_didww_did_ids = VALUES(allowed_didww_did_ids),
+         default_didww_did_id = VALUES(default_didww_did_id),
+         updated_at = CURRENT_TIMESTAMP`,
+      [userId, allowed.length ? JSON.stringify(allowed) : null, normalizedDefault]
+    );
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.sms.settings.put] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to save SMS settings' });
+  }
+});
+
+// List AI SMS sends for the logged-in user.
+app.get('/api/me/ai/sms', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const page = Math.max(0, parseInt(String(req.query.page || '0'), 10) || 0);
+    const pageSizeRaw = parseInt(String(req.query.pageSize || '25'), 10) || 25;
+    const pageSize = Math.max(1, Math.min(100, pageSizeRaw));
+    const offset = page * pageSize;
+
+    const agentIdRaw = String(req.query.agent_id || req.query.agentId || '').trim();
+    const agentId = agentIdRaw ? agentIdRaw : '';
+
+    const statusRaw = String(req.query.status || '').trim().toLowerCase();
+    let status = '';
+    if (statusRaw) {
+      if (!['pending', 'completed', 'failed'].includes(statusRaw)) {
+        return res.status(400).json({ success: false, message: 'status must be one of: pending, completed, failed' });
+      }
+      status = statusRaw;
+    }
+
+    const where = [`s.user_id = ?`];
+    const params = [userId];
+
+    if (agentId) {
+      where.push('s.agent_id = ?');
+      params.push(agentId);
+    }
+
+    if (status) {
+      where.push('s.status = ?');
+      params.push(status);
+    }
+
+    const whereSql = where.length ? ('WHERE ' + where.join(' AND ')) : '';
+
+    const [cntRows] = await pool.execute(
+      `SELECT COUNT(*) AS total
+       FROM ai_sms_sends s
+       ${whereSql}`,
+      params
+    );
+    const total = Number(cntRows && cntRows[0] ? (cntRows[0].total || 0) : 0);
+
+    const [rows] = await pool.query(
+      `SELECT s.id, s.created_at, s.updated_at,
+              s.agent_id,
+              a.display_name AS agent_name,
+              s.from_number, s.to_number,
+              s.message_text,
+              s.status,
+              s.error
+       FROM ai_sms_sends s
+       LEFT JOIN ai_agents a ON a.id = s.agent_id
+       ${whereSql}
+       ORDER BY s.created_at DESC, s.id DESC
+       LIMIT ${parseInt(pageSize, 10)} OFFSET ${parseInt(offset, 10)}`,
+      params
+    );
+
+    return res.json({ success: true, data: rows || [], total });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.sms.list] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load SMS' });
+  }
+});
+
 function slugifyName(s) {
   return String(s || '')
     .toLowerCase()
@@ -6853,6 +7272,15 @@ function isValidAiTransferDestination(s) {
   return /^\+\d{8,16}$/.test(v);
 }
 
+function normalizeSmsE164Digits(val) {
+  return String(val || '').replace(/\D/g, '');
+}
+
+function isValidSmsE164Digits(digits) {
+  // E.164 max is 15 digits (without the leading '+').
+  return /^\d{8,15}$/.test(String(digits || ''));
+}
+
 async function getUserAiTransferDestination(userId) {
   try {
     if (!pool) return '';
@@ -6864,6 +7292,48 @@ async function getUserAiTransferDestination(userId) {
     return row && row.transfer_to_number ? String(row.transfer_to_number) : '';
   } catch {
     return '';
+  }
+}
+
+function parseJsonArrayValue(v) {
+  try {
+    if (v == null) return [];
+    if (Array.isArray(v)) return v;
+    if (typeof v === 'string') {
+      const s = v.trim();
+      if (!s) return [];
+      const parsed = JSON.parse(s);
+      return Array.isArray(parsed) ? parsed : [];
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+async function getUserAiSmsSettings(userId) {
+  try {
+    if (!pool) return { allowedDidIds: [], defaultDidId: '' };
+    const [rows] = await pool.execute(
+      'SELECT allowed_didww_did_ids, default_didww_did_id FROM user_ai_sms_settings WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+
+    const allowedRaw = row ? row.allowed_didww_did_ids : null;
+    const allowed = parseJsonArrayValue(allowedRaw)
+      .map(x => String(x || '').trim())
+      .filter(Boolean);
+
+    const allowedUniq = Array.from(new Set(allowed)).slice(0, 50);
+    const def = row && row.default_didww_did_id ? String(row.default_didww_did_id).trim() : '';
+
+    return {
+      allowedDidIds: allowedUniq,
+      defaultDidId: def
+    };
+  } catch {
+    return { allowedDidIds: [], defaultDidId: '' };
   }
 }
 
@@ -15970,6 +16440,11 @@ app.put('/api/me/sip-users/:id', requireAuth, async (req, res) => {
 const DIDWW_API_KEY = process.env.DIDWW_API_KEY;
 const DIDWW_API_URL = process.env.DIDWW_API_URL || 'https://api.didww.com/v3';
 
+// DIDWW HTTP SMS OUT (Outbound SMS)
+const DIDWW_SMS_OUT_BASE_URL = process.env.DIDWW_SMS_OUT_BASE_URL || 'https://sms-out.didww.com';
+const DIDWW_SMS_OUT_USERNAME = process.env.DIDWW_SMS_OUT_USERNAME || '';
+const DIDWW_SMS_OUT_PASSWORD = process.env.DIDWW_SMS_OUT_PASSWORD || '';
+
 // Pipecat Cloud (Control plane)
 // NOTE: Pipecat Cloud API details can vary; keep URLs configurable via env.
 // Private key is used for control-plane operations (create agents, manage secrets, etc.)
@@ -16626,6 +17101,44 @@ async function didwwApiCall({ method, path, body }) {
       data: e.response?.data
     };
     if (DEBUG) console.error('[didwwApiCall] Request failed:', errDetails);
+    throw e;
+  }
+}
+
+async function didwwSmsOutApiCall({ method, path, body }) {
+  const base = String(DIDWW_SMS_OUT_BASE_URL || '').trim().replace(/\/$/, '');
+  if (!base) throw new Error('DIDWW_SMS_OUT_BASE_URL not configured');
+  if (!DIDWW_SMS_OUT_USERNAME || !DIDWW_SMS_OUT_PASSWORD) {
+    throw new Error('DIDWW SMS OUT credentials not configured (DIDWW_SMS_OUT_USERNAME / DIDWW_SMS_OUT_PASSWORD)');
+  }
+
+  const url = `${base}${path}`;
+  const headers = {
+    'Content-Type': 'application/vnd.api+json',
+    'Accept': 'application/vnd.api+json'
+  };
+
+  try {
+    const resp = await axios({
+      method,
+      url,
+      headers,
+      auth: { username: DIDWW_SMS_OUT_USERNAME, password: DIDWW_SMS_OUT_PASSWORD },
+      timeout: 30000,
+      ...(body ? { data: body } : {})
+    });
+    return resp.data;
+  } catch (e) {
+    const errDetails = {
+      url,
+      method,
+      status: e.response?.status,
+      statusText: e.response?.statusText,
+      code: e.code,
+      message: e.message,
+      data: e.response?.data
+    };
+    if (DEBUG) console.error('[didwwSmsOutApiCall] Request failed:', errDetails);
     throw e;
   }
 }

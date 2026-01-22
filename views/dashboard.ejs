@@ -684,6 +684,7 @@
           <button id="ai-subtab-agents" type="button" class="ai-subtab active">Agents</button>
           <button id="ai-subtab-conversations" type="button" class="ai-subtab">Conversations</button>
           <button id="ai-subtab-emails" type="button" class="ai-subtab">Emails</button>
+          <button id="ai-subtab-sms" type="button" class="ai-subtab">SMS</button>
           <button id="ai-subtab-meetings" type="button" class="ai-subtab">Meeting</button>
           <button id="ai-subtab-mail" type="button" class="ai-subtab">Mail</button>
           <button id="ai-subtab-tools" type="button" class="ai-subtab">Tools</button>
@@ -754,6 +755,24 @@
               <div class="toolbar" style="margin-top:10px">
                 <button id="saveAiTransferBtn">Save Transfer</button>
                 <span id="aiTransferStatus" class="muted" style="margin-left:auto"></span>
+              </div>
+            </div>
+
+            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+              <h3 style="margin:0 0 10px 0">SMS (DIDWW)</h3>
+              <div class="muted" style="margin-bottom:10px">Outbound SMS sender numbers used by your AI agent.</div>
+              <div style="display:grid;grid-template-columns:1fr;gap:8px">
+                <div class="muted" style="font-size:12px">Allowed outbound SMS DIDs</div>
+                <select id="aiSmsAllowedDidIds" multiple size="5" style="width:100%;box-sizing:border-box"></select>
+                <div class="muted" style="font-size:12px">Default outbound DID</div>
+                <select id="aiSmsDefaultDidId" style="width:100%;box-sizing:border-box">
+                  <option value="">Auto (first allowed)</option>
+                </select>
+                <div class="muted" style="font-size:12px">Tip: hold Ctrl (Windows) / ⌘ (Mac) to select multiple.</div>
+              </div>
+              <div class="toolbar" style="margin-top:10px">
+                <button id="saveAiSmsSettingsBtn">Save SMS</button>
+                <span id="aiSmsSettingsStatus" class="muted" style="margin-left:auto"></span>
               </div>
             </div>
 
@@ -855,6 +874,36 @@
               <button id="aiEmailsPrev">Prev</button>
               <span id="aiEmailsPageInfo" class="muted"></span>
               <button id="aiEmailsNext">Next</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="ai-pane-sms" style="display:none">
+          <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+              <h3 style="margin:0">SMS</h3>
+              <div style="margin-left:auto"></div>
+              <select id="aiSmsAgentFilter" style="width:170px">
+                <option value="">All agents</option>
+              </select>
+              <select id="aiSmsStatusFilter" style="width:150px">
+                <option value="">All statuses</option>
+                <option value="completed">Completed</option>
+                <option value="pending">Pending</option>
+                <option value="failed">Failed</option>
+              </select>
+              <button id="aiSmsRefreshBtn" type="button" class="btn--muted">Refresh</button>
+            </div>
+
+            <table id="ai-sms-table" style="display:none">
+              <thead><tr><th>Sent</th><th>To</th><th>From</th><th>Agent</th><th>Message</th><th>Status</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div id="ai-sms-empty" class="muted">Loading…</div>
+            <div class="toolbar" id="ai-sms-pager" style="display:none">
+              <button id="aiSmsPrev">Prev</button>
+              <span id="aiSmsPageInfo" class="muted"></span>
+              <button id="aiSmsNext">Next</button>
             </div>
           </div>
         </div>
@@ -1169,6 +1218,7 @@
       agents: document.getElementById('ai-subtab-agents'),
       conversations: document.getElementById('ai-subtab-conversations'),
       emails: document.getElementById('ai-subtab-emails'),
+      sms: document.getElementById('ai-subtab-sms'),
       meetings: document.getElementById('ai-subtab-meetings'),
       mail: document.getElementById('ai-subtab-mail'),
       tools: document.getElementById('ai-subtab-tools'),
@@ -1177,6 +1227,7 @@
       agents: document.getElementById('ai-pane-agents'),
       conversations: document.getElementById('ai-pane-conversations'),
       emails: document.getElementById('ai-pane-emails'),
+      sms: document.getElementById('ai-pane-sms'),
       meetings: document.getElementById('ai-pane-meetings'),
       mail: document.getElementById('ai-pane-mail'),
       tools: document.getElementById('ai-pane-tools'),
@@ -1184,7 +1235,7 @@
 
     function activateAiSubtab(name){
       const n = String(name || '').toLowerCase();
-      const active = (n === 'tools' || n === 'conversations' || n === 'emails' || n === 'meetings' || n === 'mail') ? n : 'agents';
+      const active = (n === 'tools' || n === 'conversations' || n === 'emails' || n === 'sms' || n === 'meetings' || n === 'mail') ? n : 'agents';
       Object.keys(aiSubtabs).forEach(k => {
         const el = aiSubtabs[k];
         if (!el) return;
@@ -1211,6 +1262,8 @@
         activateAiSubtab('tools');
         loadSmtpSettings();
         loadAiTransferSettings();
+        loadAiSmsDidOptions();
+        loadAiSmsSettings();
         loadMailSettings();
         loadDocTemplates();
       });
@@ -1227,6 +1280,13 @@
         e.preventDefault();
         activateAiSubtab('emails');
         openAiEmailsTab();
+      });
+    }
+    if (aiSubtabs.sms) {
+      aiSubtabs.sms.addEventListener('click', (e) => {
+        e.preventDefault();
+        activateAiSubtab('sms');
+        openAiSmsTab();
       });
     }
     if (aiSubtabs.meetings) {
@@ -1293,6 +1353,17 @@
     const aiEmailsPageSize = 25;
     let aiEmailsTotal = 0;
     let aiEmailsData = [];
+
+    // AI SMS
+    let aiSmsUiInit = false;
+    let aiSmsPage = 0;
+    const aiSmsPageSize = 25;
+    let aiSmsTotal = 0;
+    let aiSmsData = [];
+
+    // AI Tools: SMS settings
+    let aiSmsDidOptions = [];
+    let aiSmsSettings = { allowedDidIds: [], defaultDidId: '' };
 
     // AI Mail
     let aiMailUiInit = false;
@@ -2084,6 +2155,197 @@
       }
     }
 
+    // ========== AI SMS ==========
+    function renderAiSmsAgentFilter(){
+      const sel = $('#aiSmsAgentFilter');
+      if (!sel) return;
+      const current = String(sel.value || '');
+      sel.innerHTML = '';
+      sel.appendChild(new Option('All agents', ''));
+      for (const a of (aiAgentsData || [])) {
+        const id = a && a.id != null ? String(a.id) : '';
+        if (!id) continue;
+        const name = String(a.display_name || '').trim();
+        sel.appendChild(new Option(name || `Agent ${id}`, id));
+      }
+      const still = Array.from(sel.options || []).some(o => String(o.value) === current);
+      sel.value = still ? current : '';
+    }
+
+    function initAiSmsUI(){
+      if (aiSmsUiInit) return;
+      aiSmsUiInit = true;
+
+      const refreshBtn = $('#aiSmsRefreshBtn');
+      if (refreshBtn) refreshBtn.addEventListener('click', (e) => { e.preventDefault(); loadAiSms(); });
+
+      const agentSel = $('#aiSmsAgentFilter');
+      if (agentSel) agentSel.addEventListener('change', () => {
+        aiSmsPage = 0;
+        loadAiSms();
+      });
+
+      const statusSel = $('#aiSmsStatusFilter');
+      if (statusSel) statusSel.addEventListener('change', () => {
+        aiSmsPage = 0;
+        loadAiSms();
+      });
+
+      const prev = $('#aiSmsPrev');
+      if (prev) prev.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (aiSmsPage > 0) {
+          aiSmsPage -= 1;
+          loadAiSms();
+        }
+      });
+
+      const next = $('#aiSmsNext');
+      if (next) next.addEventListener('click', (e) => {
+        e.preventDefault();
+        if ((aiSmsPage + 1) * aiSmsPageSize < aiSmsTotal) {
+          aiSmsPage += 1;
+          loadAiSms();
+        }
+      });
+    }
+
+    async function openAiSmsTab(){
+      initAiSmsUI();
+
+      try {
+        if (!Array.isArray(aiAgentsData) || aiAgentsData.length === 0) {
+          await loadAiAgents();
+        }
+      } catch {}
+      renderAiSmsAgentFilter();
+
+      loadAiSms();
+    }
+
+    function renderAiSms(){
+      const table = $('#ai-sms-table');
+      const empty = $('#ai-sms-empty');
+      const pager = $('#ai-sms-pager');
+      const pageInfo = $('#aiSmsPageInfo');
+      const prev = $('#aiSmsPrev');
+      const next = $('#aiSmsNext');
+      if (!table || !empty) return;
+      const tbody = table.querySelector('tbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+
+      if (!aiSmsData || !aiSmsData.length) {
+        table.style.display = 'none';
+        if (pager) pager.style.display = 'none';
+        if (pageInfo) pageInfo.textContent = '';
+        empty.style.display = 'block';
+        empty.textContent = 'No SMS yet.';
+        return;
+      }
+
+      for (const s of aiSmsData) {
+        const sent = s.created_at ? fmtDateTime(s.created_at) : '';
+        const to = String(s.to_number || '-');
+        const from = String(s.from_number || '-');
+        const agentName = String(s.agent_name || '-');
+        const msgRaw = String(s.message_text || s.content || '').trim();
+        const msg = msgRaw.length > 120 ? (msgRaw.slice(0, 120) + '…') : msgRaw;
+        const statusRaw = String(s.status || '').toLowerCase();
+        const statusLabel = statusRaw ? (statusRaw.charAt(0).toUpperCase() + statusRaw.slice(1)) : 'Unknown';
+
+        const tr = document.createElement('tr');
+
+        const tdSent = document.createElement('td');
+        tdSent.textContent = sent;
+        tr.appendChild(tdSent);
+
+        const tdTo = document.createElement('td');
+        tdTo.textContent = to;
+        tr.appendChild(tdTo);
+
+        const tdFrom = document.createElement('td');
+        tdFrom.textContent = from;
+        tr.appendChild(tdFrom);
+
+        const tdAgent = document.createElement('td');
+        tdAgent.textContent = agentName;
+        tr.appendChild(tdAgent);
+
+        const tdMsg = document.createElement('td');
+        tdMsg.textContent = msg || '-';
+        if (msgRaw && msgRaw.length > msg.length) tdMsg.title = msgRaw;
+        tr.appendChild(tdMsg);
+
+        const tdStatus = document.createElement('td');
+        tdStatus.textContent = statusLabel;
+        tdStatus.style.fontWeight = '600';
+        tdStatus.style.color = (statusRaw === 'completed') ? '#16a34a' : (statusRaw === 'failed' ? '#ef4444' : '#6b7280');
+        if (s.error) tdStatus.title = String(s.error);
+        tr.appendChild(tdStatus);
+
+        tbody.appendChild(tr);
+      }
+
+      empty.style.display = 'none';
+      table.style.display = 'table';
+
+      const totalPages = aiSmsTotal > 0 ? Math.max(1, Math.ceil(aiSmsTotal / aiSmsPageSize)) : 1;
+      if (pageInfo) pageInfo.textContent = `Page ${aiSmsPage + 1} of ${totalPages}`;
+
+      if (pager) {
+        pager.style.display = (aiSmsTotal > aiSmsPageSize) ? 'flex' : 'none';
+      }
+      if (prev) prev.disabled = (aiSmsPage <= 0);
+      if (next) next.disabled = ((aiSmsPage + 1) * aiSmsPageSize >= aiSmsTotal);
+    }
+
+    async function loadAiSms(){
+      const table = $('#ai-sms-table');
+      const empty = $('#ai-sms-empty');
+      const pager = $('#ai-sms-pager');
+      if (empty) { empty.style.display = 'block'; empty.textContent = 'Loading…'; }
+      if (table) table.style.display = 'none';
+      if (pager) pager.style.display = 'none';
+
+      try {
+        const agentSel = $('#aiSmsAgentFilter');
+        const statusSel = $('#aiSmsStatusFilter');
+        const agentId = agentSel ? String(agentSel.value || '').trim() : '';
+        const status = statusSel ? String(statusSel.value || '').trim().toLowerCase() : '';
+
+        const url = `/api/me/ai/sms?page=${aiSmsPage}&pageSize=${aiSmsPageSize}`
+          + (agentId ? `&agent_id=${encodeURIComponent(agentId)}` : '')
+          + (status ? `&status=${encodeURIComponent(status)}` : '');
+
+        const r = await fetch(url);
+        const j = await r.json();
+        if (!j || j.success === false) {
+          aiSmsData = [];
+          aiSmsTotal = 0;
+          renderAiSms();
+          if (empty) empty.textContent = j?.message || 'Failed to load SMS';
+          return;
+        }
+
+        aiSmsData = Array.isArray(j.data) ? j.data : [];
+        const total = Number(j.total);
+        aiSmsTotal = Number.isFinite(total) ? total : aiSmsData.length;
+
+        if (aiSmsTotal > 0 && aiSmsPage > 0 && aiSmsPage * aiSmsPageSize >= aiSmsTotal) {
+          aiSmsPage = 0;
+          return loadAiSms();
+        }
+
+        renderAiSms();
+      } catch (e) {
+        aiSmsData = [];
+        aiSmsTotal = 0;
+        renderAiSms();
+        if (empty) empty.textContent = 'Failed to load SMS';
+      }
+    }
+
     // ========== AI Mail ==========
     function renderAiMailAgentFilter(){
       const sel = $('#aiMailAgentFilter');
@@ -2655,6 +2917,156 @@
       }
     }
 
+    // AI SMS settings (outbound sender IDs)
+    function getSelectedMultiValues(sel){
+      const el = sel || null;
+      if (!el) return [];
+      return Array.from(el.selectedOptions || []).map(o => String(o.value || '').trim()).filter(Boolean);
+    }
+
+    function refreshAiSmsDefaultDidOptions(){
+      const allowedSel = $('#aiSmsAllowedDidIds');
+      const defaultSel = $('#aiSmsDefaultDidId');
+      if (!allowedSel || !defaultSel) return;
+
+      const allowedIds = getSelectedMultiValues(allowedSel);
+      const current = String(defaultSel.value || '').trim();
+
+      defaultSel.innerHTML = '';
+      defaultSel.appendChild(new Option('Auto (first allowed)', ''));
+      for (const id of allowedIds) {
+        const opt = aiSmsDidOptions.find(d => String(d.didww_did_id || d.id || '') === id);
+        const label = opt ? String(opt.did_number || opt.number || id) : id;
+        defaultSel.appendChild(new Option(label, id));
+      }
+
+      // Preserve selection if still present
+      const still = Array.from(defaultSel.options || []).some(o => String(o.value) === current);
+      defaultSel.value = still ? current : '';
+    }
+
+    function renderAiSmsSettingsUI(){
+      const allowedSel = $('#aiSmsAllowedDidIds');
+      const defaultSel = $('#aiSmsDefaultDidId');
+      const status = $('#aiSmsSettingsStatus');
+      if (!allowedSel || !defaultSel) return;
+
+      const currentAllowed = new Set((aiSmsSettings && aiSmsSettings.allowedDidIds) ? aiSmsSettings.allowedDidIds.map(String) : []);
+      const currentDefault = (aiSmsSettings && aiSmsSettings.defaultDidId) ? String(aiSmsSettings.defaultDidId) : '';
+
+      allowedSel.innerHTML = '';
+
+      if (!aiSmsDidOptions || aiSmsDidOptions.length === 0) {
+        if (status) status.textContent = 'No DIDWW numbers found.';
+        defaultSel.innerHTML = '';
+        defaultSel.appendChild(new Option('Auto (first allowed)', ''));
+        return;
+      }
+
+      for (const d of aiSmsDidOptions) {
+        const id = String(d.didww_did_id || d.id || '').trim();
+        const num = String(d.did_number || d.number || '').trim();
+        if (!id) continue;
+        const opt = new Option(num || id, id);
+        if (currentAllowed.has(id)) opt.selected = true;
+        allowedSel.appendChild(opt);
+      }
+
+      refreshAiSmsDefaultDidOptions();
+
+      try { defaultSel.value = currentDefault || ''; } catch {}
+
+      if (status) {
+        const allowedCount = getSelectedMultiValues(allowedSel).length;
+        status.textContent = allowedCount ? 'Configured' : 'Not configured';
+      }
+    }
+
+    async function loadAiSmsDidOptions(){
+      const status = $('#aiSmsSettingsStatus');
+      if (status) status.textContent = 'Loading…';
+      try {
+        const r = await fetch('/api/me/ai/sms/did-options');
+        const j = await r.json();
+        if (!j || j.success === false) {
+          aiSmsDidOptions = [];
+          renderAiSmsSettingsUI();
+          if (status) status.textContent = j?.message || 'Failed to load';
+          return;
+        }
+        aiSmsDidOptions = Array.isArray(j.data) ? j.data : [];
+        renderAiSmsSettingsUI();
+      } catch (e) {
+        aiSmsDidOptions = [];
+        renderAiSmsSettingsUI();
+        if (status) status.textContent = 'Failed to load';
+      }
+    }
+
+    async function loadAiSmsSettings(){
+      const status = $('#aiSmsSettingsStatus');
+      if (status) status.textContent = 'Loading…';
+      try {
+        const r = await fetch('/api/me/ai/sms-settings');
+        const j = await r.json();
+        if (!j || j.success === false) {
+          aiSmsSettings = { allowedDidIds: [], defaultDidId: '' };
+          renderAiSmsSettingsUI();
+          if (status) status.textContent = j?.message || 'Failed to load';
+          return;
+        }
+        const d = j.data || {};
+        const allowed = Array.isArray(d.allowed_didww_did_ids) ? d.allowed_didww_did_ids : [];
+        const defId = d.default_didww_did_id ? String(d.default_didww_did_id) : '';
+        aiSmsSettings = { allowedDidIds: allowed.map(x => String(x)), defaultDidId: defId };
+        renderAiSmsSettingsUI();
+      } catch (e) {
+        aiSmsSettings = { allowedDidIds: [], defaultDidId: '' };
+        renderAiSmsSettingsUI();
+        if (status) status.textContent = 'Failed to load';
+      }
+    }
+
+    async function saveAiSmsSettings(){
+      const btn = $('#saveAiSmsSettingsBtn');
+      if (!btn) return;
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = 'Saving...';
+
+      try {
+        const allowedSel = $('#aiSmsAllowedDidIds');
+        const defaultSel = $('#aiSmsDefaultDidId');
+
+        const allowed_didww_did_ids = getSelectedMultiValues(allowedSel);
+        const default_didww_did_id = defaultSel ? String(defaultSel.value || '').trim() : '';
+
+        const payload = {
+          allowed_didww_did_ids,
+          default_didww_did_id: default_didww_did_id || null
+        };
+
+        const r = await fetch('/api/me/ai/sms-settings', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const j = await r.json();
+        if (!j || j.success === false) {
+          showToast(j?.message || 'Failed to save SMS settings', 'error');
+          return;
+        }
+
+        showToast('SMS settings saved.');
+        await loadAiSmsSettings();
+      } catch (e) {
+        showToast('Failed to save SMS settings', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    }
+
     // AI Mail settings (return address)
     async function loadMailSettings(){
       const status = $('#mailSettingsStatus');
@@ -3207,6 +3619,8 @@
     $('#saveSmtpBtn').addEventListener('click', (e) => { e.preventDefault(); saveSmtpSettings(); });
     $('#testSmtpBtn').addEventListener('click', (e) => { e.preventDefault(); testSmtpSettings(); });
     $('#saveAiTransferBtn').addEventListener('click', (e) => { e.preventDefault(); saveAiTransferSettings(); });
+    $('#saveAiSmsSettingsBtn').addEventListener('click', (e) => { e.preventDefault(); saveAiSmsSettings(); });
+    $('#aiSmsAllowedDidIds').addEventListener('change', () => { refreshAiSmsDefaultDidOptions(); });
     $('#saveMailSettingsBtn').addEventListener('click', (e) => { e.preventDefault(); saveMailSettings(); });
 
     $('#uploadDocTemplateBtn').addEventListener('click', async (e) => {
