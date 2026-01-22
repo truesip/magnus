@@ -335,6 +335,7 @@ async def bot(session_args: Any):
     tools = []
     has_send_document_tool = False
     has_send_custom_email_tool = False
+    has_send_sms_tool = False
     has_send_video_meeting_tool = False
     has_send_physical_mail_tool = False
     has_send_custom_physical_mail_tool = False
@@ -426,6 +427,31 @@ async def bot(session_args: Any):
             }
         )
         has_send_custom_email_tool = True
+
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_sms",
+                    "description": "Send an SMS/text message to the caller using the business owner's configured outbound SMS sender number.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "to_number": {
+                                "type": "string",
+                                "description": "Recipient phone number in E.164 format (e.g. +18005551234)",
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "SMS body text (160 chars max)",
+                            },
+                        },
+                        "required": ["to_number", "content"],
+                    },
+                },
+            }
+        )
+        has_send_sms_tool = True
 
         tools.append(
             {
@@ -525,6 +551,12 @@ async def bot(session_args: Any):
             "\n\nIf the caller asks for a formal document attachment that must be generated from a template, "
             "collect their email and any details needed for template placeholders, then call the send_document tool. "
             "After the tool returns, confirm whether the email was sent."
+        )
+    if has_send_sms_tool:
+        prompt += (
+            "\n\nIf the caller asks you to send them an SMS/text message, ask for their mobile number in E.164 format "
+            "(for example +18005551234) and confirm the exact message (keep it under 160 characters). "
+            "Then call the send_sms tool with to_number and content. After the tool returns, confirm whether the SMS was sent."
         )
     if has_send_video_meeting_tool:
         prompt += (
@@ -854,6 +886,96 @@ async def bot(session_args: Any):
                 await params.result_callback({"success": False, "message": str(e)})
 
         llm.register_function("send_custom_email", _send_custom_email)
+
+    if has_send_sms_tool:
+        async def _send_sms(params: FunctionCallParams) -> None:
+            args = dict(params.arguments or {})
+            to_number = str(
+                args.get("to_number")
+                or args.get("toNumber")
+                or args.get("to")
+                or args.get("phone")
+                or args.get("phone_number")
+                or args.get("phoneNumber")
+                or ""
+            ).strip()
+            content = str(args.get("content") or args.get("message") or args.get("text") or args.get("body") or "").strip()
+
+            from_didww_did_id = str(
+                args.get("from_didww_did_id")
+                or args.get("fromDidwwDidId")
+                or args.get("from_did_id")
+                or args.get("fromDidId")
+                or ""
+            ).strip()
+
+            if not to_number:
+                await params.result_callback({"success": False, "message": "to_number is required"})
+                return
+            if not content:
+                await params.result_callback({"success": False, "message": "content is required"})
+                return
+
+            if not portal_base_url or not portal_token:
+                await params.result_callback({
+                    "success": False,
+                    "message": "Portal integration not configured (missing PORTAL_BASE_URL or PORTAL_AGENT_ACTION_TOKEN)",
+                })
+                return
+
+            payload: dict[str, Any] = {
+                "to_number": to_number,
+                "content": content,
+            }
+            if from_didww_did_id:
+                payload["from_didww_did_id"] = from_didww_did_id
+
+            if dialin_settings:
+                payload["call_id"] = str(dialin_settings.call_id)
+                payload["call_domain"] = str(dialin_settings.call_domain)
+
+            url = f"{portal_base_url}/api/ai/agent/send-sms"
+            headers = {
+                "Authorization": f"Bearer {portal_token}",
+                "Accept": "application/json",
+            }
+
+            try:
+                async with httpx.AsyncClient(timeout=25.0) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = {"success": False, "message": resp.text}
+
+                if resp.status_code >= 400 or (isinstance(data, dict) and data.get("success") is False):
+                    err_msg = ""
+                    if isinstance(data, dict):
+                        err_msg = str(data.get("message") or data.get("error") or "").strip()
+                    if not err_msg:
+                        err_msg = str(resp.text or "").strip()
+                    if not err_msg:
+                        err_msg = "SMS request failed"
+
+                    await params.result_callback({
+                        "success": False,
+                        "status_code": resp.status_code,
+                        "message": err_msg,
+                    })
+                    return
+
+                out: dict[str, Any] = {"success": True}
+                if isinstance(data, dict):
+                    out["already_sent"] = bool(data.get("already_sent") or data.get("alreadySent") or False)
+                    provider_message_id = data.get("provider_message_id") or data.get("providerMessageId")
+                    if provider_message_id:
+                        out["provider_message_id"] = str(provider_message_id)
+
+                await params.result_callback(out)
+            except Exception as e:
+                await params.result_callback({"success": False, "message": str(e)})
+
+        llm.register_function("send_sms", _send_sms)
 
     if has_send_video_meeting_tool:
         async def _send_video_meeting_link(params: FunctionCallParams) -> None:
