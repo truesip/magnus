@@ -761,7 +761,7 @@
             </div>
 
             <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-              <h3 style="margin:0 0 10px 0">SMS (DIDWW)</h3>
+              <h3 style="margin:0 0 10px 0">SMS</h3>
               <div class="muted" style="margin-bottom:10px">Outbound SMS sender numbers used by your AI agent.</div>
               <div style="display:grid;grid-template-columns:1fr;gap:8px">
                 <div class="muted" style="font-size:12px">Allowed outbound SMS DIDs</div>
@@ -898,7 +898,7 @@
             </div>
 
             <table id="ai-sms-table" style="display:none">
-              <thead><tr><th>Sent</th><th>To</th><th>From</th><th>Agent</th><th>Message</th><th>Status</th></tr></thead>
+              <thead><tr><th>Sent</th><th>To</th><th>From</th><th>Agent</th><th>Message</th><th>Status</th><th>Delivery</th></tr></thead>
               <tbody></tbody>
             </table>
             <div id="ai-sms-empty" class="muted">Loading…</div>
@@ -2285,6 +2285,24 @@
         tdStatus.style.color = (statusRaw === 'completed') ? '#16a34a' : (statusRaw === 'failed' ? '#ef4444' : '#6b7280');
         if (s.error) tdStatus.title = String(s.error);
         tr.appendChild(tdStatus);
+
+        const dlrRaw = String(s.dlr_status || '').trim();
+        let dlrLabel = '-';
+        let dlrColor = '#6b7280';
+        if (dlrRaw) {
+          const up = dlrRaw.toUpperCase();
+          if (up === 'DELIVERED') { dlrLabel = 'Delivered'; dlrColor = '#16a34a'; }
+          else if (up === 'FAILED') { dlrLabel = 'Failed'; dlrColor = '#ef4444'; }
+          else if (up === 'EXPIRED') { dlrLabel = 'Expired'; dlrColor = '#f59e0b'; }
+          else { dlrLabel = dlrRaw; dlrColor = '#6b7280'; }
+        }
+        const tdDlr = document.createElement('td');
+        tdDlr.textContent = dlrLabel;
+        tdDlr.style.fontWeight = '600';
+        tdDlr.style.color = dlrColor;
+        const providerStatus = String(s.provider_status || '').trim();
+        if (!dlrRaw && providerStatus) tdDlr.title = `Provider status: ${providerStatus}`;
+        tr.appendChild(tdDlr);
 
         tbody.appendChild(tr);
       }

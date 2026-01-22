@@ -336,6 +336,7 @@ async def bot(session_args: Any):
     has_send_document_tool = False
     has_send_custom_email_tool = False
     has_send_sms_tool = False
+    has_sms_status_tool = False
     has_send_video_meeting_tool = False
     has_send_physical_mail_tool = False
     has_send_custom_physical_mail_tool = False
@@ -457,6 +458,27 @@ async def bot(session_args: Any):
             {
                 "type": "function",
                 "function": {
+                    "name": "get_sms_status",
+                    "description": "Check delivery status for a previously sent SMS by provider_message_id.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "provider_message_id": {
+                                "type": "string",
+                                "description": "The provider message id returned by send_sms (DIDWW outbound_message id)",
+                            },
+                        },
+                        "required": ["provider_message_id"],
+                    },
+                },
+            }
+        )
+        has_sms_status_tool = True
+
+        tools.append(
+            {
+                "type": "function",
+                "function": {
                     "name": "send_video_meeting_link",
                     "description": "Start a live video meeting and email the caller a Daily room link to join.",
                     "parameters": {
@@ -557,6 +579,11 @@ async def bot(session_args: Any):
             "\n\nIf the caller asks you to send them an SMS/text message, ask for their mobile number in E.164 format "
             "(for example +18005551234) and confirm the exact message (keep it under 160 characters). "
             "Then call the send_sms tool with to_number and content. After the tool returns, confirm whether the SMS was sent."
+        )
+    if has_sms_status_tool:
+        prompt += (
+            "\n\nIf the caller asks whether a previously sent SMS was delivered, you can call get_sms_status with the "
+            "provider_message_id returned by send_sms. Use dlr_status when available (e.g. DELIVERED/FAILED/EXPIRED)."
         )
     if has_send_video_meeting_tool:
         prompt += (
@@ -976,6 +1003,65 @@ async def bot(session_args: Any):
                 await params.result_callback({"success": False, "message": str(e)})
 
         llm.register_function("send_sms", _send_sms)
+
+    if has_sms_status_tool:
+        async def _get_sms_status(params: FunctionCallParams) -> None:
+            args = dict(params.arguments or {})
+            provider_message_id = str(
+                args.get("provider_message_id")
+                or args.get("providerMessageId")
+                or args.get("message_id")
+                or args.get("messageId")
+                or args.get("id")
+                or ""
+            ).strip()
+
+            if not provider_message_id:
+                await params.result_callback({"success": False, "message": "provider_message_id is required"})
+                return
+
+            if not portal_base_url or not portal_token:
+                await params.result_callback({
+                    "success": False,
+                    "message": "Portal integration not configured (missing PORTAL_BASE_URL or PORTAL_AGENT_ACTION_TOKEN)",
+                })
+                return
+
+            url = f"{portal_base_url}/api/ai/agent/sms-status"
+            headers = {
+                "Authorization": f"Bearer {portal_token}",
+                "Accept": "application/json",
+            }
+
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.get(url, params={"provider_message_id": provider_message_id}, headers=headers)
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = {"success": False, "message": resp.text}
+
+                if resp.status_code >= 400 or (isinstance(data, dict) and data.get("success") is False):
+                    err_msg = ""
+                    if isinstance(data, dict):
+                        err_msg = str(data.get("message") or data.get("error") or "").strip()
+                    if not err_msg:
+                        err_msg = str(resp.text or "").strip()
+                    if not err_msg:
+                        err_msg = "SMS status request failed"
+
+                    await params.result_callback({
+                        "success": False,
+                        "status_code": resp.status_code,
+                        "message": err_msg,
+                    })
+                    return
+
+                await params.result_callback({"success": True, "response": data})
+            except Exception as e:
+                await params.result_callback({"success": False, "message": str(e)})
+
+        llm.register_function("get_sms_status", _get_sms_status)
 
     if has_send_video_meeting_tool:
         async def _send_video_meeting_link(params: FunctionCallParams) -> None:

@@ -998,6 +998,9 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   if (req.path === '/webhooks/didww/voice-in-cdr') return next();
   return bodyParser.json({
+    // DIDWW and other providers may send JSON using vendor media types like application/vnd.api+json.
+    // Accept both application/json and application/*+json.
+    type: ['application/json', 'application/*+json'],
     verify: (req, res, buf) => {
       // Store raw body buffer for routes that need HMAC verification (e.g., NOWPayments IPN)
       req.rawBody = buf;
@@ -1934,6 +1937,22 @@ async function initDb() {
     message_text TEXT NULL,
     provider VARCHAR(32) NOT NULL DEFAULT 'didww_http_sms_out',
     provider_message_id VARCHAR(128) NULL,
+
+    -- DIDWW callback (HTTP OUT status callback)
+    provider_status VARCHAR(32) NULL,
+    provider_code_id INT NULL,
+    provider_fragments_sent INT NULL,
+    provider_price DECIMAL(18,8) NULL,
+    provider_time_start DATETIME NULL,
+    provider_time_end DATETIME NULL,
+
+    -- DIDWW DLR callback (delivery receipt)
+    dlr_status VARCHAR(32) NULL,
+    dlr_time_start DATETIME NULL,
+
+    provider_status_payload JSON NULL,
+    dlr_payload JSON NULL,
+
     billing_history_id BIGINT NULL,
     refund_status ENUM('none','pending','completed','failed') NOT NULL DEFAULT 'none',
     refund_amount DECIMAL(18,8) NULL,
@@ -1949,6 +1968,7 @@ async function initDb() {
     UNIQUE KEY uniq_ai_sms_dedupe (dedupe_key),
     KEY idx_ai_sms_user (user_id),
     KEY idx_ai_sms_agent (agent_id),
+    KEY idx_ai_sms_provider_message_id (provider_message_id),
     KEY idx_ai_sms_billing (billing_history_id),
     CONSTRAINT fk_ai_sms_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
     CONSTRAINT fk_ai_sms_agent FOREIGN KEY (agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL,
@@ -2041,6 +2061,40 @@ async function initDb() {
     } catch (e) {
       if (DEBUG) console.warn(`[schema] ai_sms_sends.${col.name} check failed`, e.message || e);
     }
+  }
+
+  // Ensure ai_sms_sends DIDWW callback status columns exist (best-effort migrations)
+  for (const col of [
+    { name: 'provider_status', ddl: "ALTER TABLE ai_sms_sends ADD COLUMN provider_status VARCHAR(32) NULL AFTER provider_message_id" },
+    { name: 'provider_code_id', ddl: "ALTER TABLE ai_sms_sends ADD COLUMN provider_code_id INT NULL AFTER provider_status" },
+    { name: 'provider_fragments_sent', ddl: "ALTER TABLE ai_sms_sends ADD COLUMN provider_fragments_sent INT NULL AFTER provider_code_id" },
+    { name: 'provider_price', ddl: "ALTER TABLE ai_sms_sends ADD COLUMN provider_price DECIMAL(18,8) NULL AFTER provider_fragments_sent" },
+    { name: 'provider_time_start', ddl: "ALTER TABLE ai_sms_sends ADD COLUMN provider_time_start DATETIME NULL AFTER provider_price" },
+    { name: 'provider_time_end', ddl: "ALTER TABLE ai_sms_sends ADD COLUMN provider_time_end DATETIME NULL AFTER provider_time_start" },
+    { name: 'dlr_status', ddl: "ALTER TABLE ai_sms_sends ADD COLUMN dlr_status VARCHAR(32) NULL AFTER provider_time_end" },
+    { name: 'dlr_time_start', ddl: "ALTER TABLE ai_sms_sends ADD COLUMN dlr_time_start DATETIME NULL AFTER dlr_status" },
+    { name: 'provider_status_payload', ddl: "ALTER TABLE ai_sms_sends ADD COLUMN provider_status_payload JSON NULL AFTER dlr_time_start" },
+    { name: 'dlr_payload', ddl: "ALTER TABLE ai_sms_sends ADD COLUMN dlr_payload JSON NULL AFTER provider_status_payload" },
+  ]) {
+    try {
+      const [rows] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_sms_sends' AND column_name=? LIMIT 1",
+        [dbName, col.name]
+      );
+      if (!rows || !rows.length) {
+        await pool.query(col.ddl);
+        if (DEBUG) console.log(`[schema] Added ai_sms_sends.${col.name} column`);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn(`[schema] ai_sms_sends.${col.name} check failed`, e.message || e);
+    }
+  }
+
+  // Ensure ai_sms_sends provider_message_id index exists (best-effort)
+  try {
+    await pool.query('ALTER TABLE ai_sms_sends ADD INDEX idx_ai_sms_provider_message_id (provider_message_id)');
+  } catch (e) {
+    // Ignore if already exists.
   }
 
   // AI physical mail send audit log + idempotency (Click2Mail)
@@ -4776,6 +4830,54 @@ app.post('/api/ai/agent/send-sms', async (req, res) => {
   }
 });
 
+// Agent-auth endpoint: check SMS delivery status (DIDWW callbacks)
+app.get('/api/ai/agent/sms-status', async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const token = parseBearerToken(req.headers.authorization);
+    if (!token) return res.status(401).json({ success: false, message: 'Missing Authorization bearer token' });
+
+    const tokenHash = sha256(token);
+    const [arows] = await pool.execute(
+      'SELECT id, user_id FROM ai_agents WHERE agent_action_token_hash = ? LIMIT 1',
+      [tokenHash]
+    );
+    const agent = arows && arows[0];
+    if (!agent) return res.status(401).json({ success: false, message: 'Invalid token' });
+
+    const agentId = Number(agent.id);
+    const userId = Number(agent.user_id);
+
+    const providerMessageId = String(req.query.provider_message_id || req.query.providerMessageId || '').trim();
+    if (!providerMessageId) {
+      return res.status(400).json({ success: false, message: 'provider_message_id is required' });
+    }
+
+    const [rows] = await pool.execute(
+      `SELECT id, created_at, updated_at,
+              from_number, to_number, message_text,
+              status, error,
+              provider_message_id, provider_status, provider_code_id, provider_fragments_sent, provider_price, provider_time_start, provider_time_end,
+              dlr_status, dlr_time_start
+       FROM ai_sms_sends
+       WHERE user_id = ? AND agent_id = ? AND provider_message_id = ?
+       LIMIT 1`,
+      [userId, agentId, providerMessageId]
+    );
+
+    const row = rows && rows[0];
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'SMS not found' });
+    }
+
+    return res.json({ success: true, data: row });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.agent.sms-status] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load SMS status' });
+  }
+});
+
 function parseClick2MailDateTimeToMysql(dtStr) {
   const s = String(dtStr || '').trim();
   if (!s) return null;
@@ -7337,6 +7439,9 @@ app.get('/api/me/ai/sms', requireAuth, async (req, res) => {
               s.from_number, s.to_number,
               s.message_text,
               s.status,
+              s.provider_message_id,
+              s.provider_status,
+              s.dlr_status,
               s.error
        FROM ai_sms_sends s
        LEFT JOIN ai_agents a ON a.id = s.agent_id
@@ -16238,6 +16343,142 @@ app.post('/webhooks/daily/events', async (req, res) => {
     return res.status(200).json({ success: true, processed, updated, ignored });
   } catch (e) {
     if (DEBUG) console.error('[daily.webhook] Unhandled error:', e.message || e);
+    return res.status(200).json({ success: true });
+  }
+});
+
+// DIDWW HTTP SMS OUT callbacks (status + DLR)
+// Configure DIDWW HTTP OUT trunk callback URL to:
+//   PUBLIC_BASE_URL + /webhooks/didww/sms-out?token=... (recommended)
+// DIDWW may send callbacks as JSON:API with Content-Type application/vnd.api+json.
+app.post('/webhooks/didww/sms-out', async (req, res) => {
+  try {
+    if (!pool) {
+      if (DEBUG) console.warn('[didww.sms-out] Database not configured');
+      // Acknowledge to avoid endless retries if the app is misconfigured.
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const expectedToken = String(process.env.DIDWW_SMS_OUT_WEBHOOK_TOKEN || '').trim();
+    const gotToken = String(req.query.token || '').trim();
+    if (expectedToken && gotToken !== expectedToken) {
+      if (DEBUG) console.warn('[didww.sms-out] Invalid token');
+      return res.status(403).json({ success: false });
+    }
+
+    // Accept parsed JSON body (preferred) or fallback to rawBody.
+    let payload = req.body;
+    if ((!payload || typeof payload !== 'object') && req.rawBody) {
+      try { payload = JSON.parse(req.rawBody.toString('utf8')); } catch {}
+    }
+
+    const data = payload && typeof payload === 'object' ? payload.data : null;
+    const type = data && typeof data === 'object' ? String(data.type || '').trim() : '';
+    const providerMessageId = data && typeof data === 'object' ? String(data.id || '').trim() : '';
+    const attrs = data && typeof data === 'object' && data.attributes && typeof data.attributes === 'object' ? data.attributes : {};
+
+    if (!type || !providerMessageId) {
+      if (DEBUG) console.warn('[didww.sms-out] Missing type/id');
+      return res.status(400).json({ success: false, message: 'Invalid payload' });
+    }
+
+    // Locate the SMS send row by provider_message_id (DIDWW outbound_message id)
+    const [rows] = await pool.execute(
+      'SELECT id, status FROM ai_sms_sends WHERE provider_message_id = ? LIMIT 1',
+      [providerMessageId]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    if (!row) {
+      if (DEBUG) console.warn('[didww.sms-out] Unknown provider_message_id; ignoring', { providerMessageId, type });
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const sendRowId = Number(row.id);
+
+    if (type === 'outbound_message_callbacks') {
+      const providerStatus = String(attrs.status || '').trim();
+      const codeIdRaw = attrs.code_id;
+      const fragmentsRaw = attrs.fragments_sent;
+      const priceRaw = attrs.price;
+
+      const providerCodeId = (codeIdRaw === undefined || codeIdRaw === null || String(codeIdRaw).trim() === '')
+        ? null
+        : (parseInt(String(codeIdRaw), 10) || null);
+      const providerFragmentsSent = (fragmentsRaw === undefined || fragmentsRaw === null || String(fragmentsRaw).trim() === '')
+        ? null
+        : (parseInt(String(fragmentsRaw), 10) || null);
+      const providerPrice = (priceRaw === undefined || priceRaw === null || String(priceRaw).trim() === '')
+        ? null
+        : (parseFloat(String(priceRaw)) || null);
+
+      const timeStart = toMysqlDatetime(attrs.time_start);
+      const timeEnd = toMysqlDatetime(attrs.time_end);
+
+      const payloadJson = JSON.stringify(sanitizeForLog(payload, { maxDepth: 6, maxKeys: 200, maxArrayLength: 50, maxStringLength: 2000 }));
+
+      // Update status fields (best-effort)
+      try {
+        await pool.execute(
+          `UPDATE ai_sms_sends
+           SET provider_status = ?, provider_code_id = ?, provider_fragments_sent = ?, provider_price = ?,
+               provider_time_start = ?, provider_time_end = ?,
+               provider_status_payload = ?,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? LIMIT 1`,
+          [
+            providerStatus || null,
+            providerCodeId,
+            providerFragmentsSent,
+            providerPrice,
+            timeStart,
+            timeEnd,
+            payloadJson,
+            sendRowId
+          ]
+        );
+      } catch {}
+
+      // If DIDWW reports a hard failure, reflect it in our send status.
+      if (providerStatus && providerStatus.toLowerCase() !== 'success') {
+        const msg = `DIDWW status: ${providerStatus}` + (providerCodeId ? ` (code_id ${providerCodeId})` : '');
+        try {
+          await pool.execute(
+            `UPDATE ai_sms_sends
+             SET status = 'failed',
+                 error = COALESCE(NULLIF(error,''), ?),
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? LIMIT 1`,
+            [msg.slice(0, 2000), sendRowId]
+          );
+        } catch {}
+      }
+
+      return res.status(200).json({ success: true });
+    }
+
+    if (type === 'dlr_event') {
+      const dlrStatus = String(attrs.status || '').trim();
+      const timeStart = toMysqlDatetime(attrs.time_start);
+
+      const payloadJson = JSON.stringify(sanitizeForLog(payload, { maxDepth: 6, maxKeys: 200, maxArrayLength: 50, maxStringLength: 2000 }));
+
+      try {
+        await pool.execute(
+          `UPDATE ai_sms_sends
+           SET dlr_status = ?, dlr_time_start = ?, dlr_payload = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? LIMIT 1`,
+          [dlrStatus || null, timeStart, payloadJson, sendRowId]
+        );
+      } catch {}
+
+      return res.status(200).json({ success: true });
+    }
+
+    // Unknown callback type
+    return res.status(200).json({ success: true, ignored: true });
+  } catch (e) {
+    if (DEBUG) console.warn('[didww.sms-out] Unhandled error:', e?.message || e);
+    // Acknowledge to prevent repeated retries.
     return res.status(200).json({ success: true });
   }
 });
