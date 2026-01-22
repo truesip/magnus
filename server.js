@@ -11411,15 +11411,29 @@ async function createMbCampaignAuto({ userId, name, phonebookId, startingdate, e
   return { ok: false, errors };
 }
 
-async function tryStartMbCampaign({ module, campaignId, httpsAgent, hostHeader }) {
+async function tryStartMbCampaign({ module, campaignId, startingdate, expirationdate, httpsAgent, hostHeader }) {
   const id = String(campaignId || '').trim();
   if (!id) return { ok: false, reason: 'missing_campaign_id' };
+
+  // IMPORTANT: do not override the caller-provided schedule.
+  // Some installs do not expose explicit start/run/process actions; in that case we
+  // fall back to a status update using the same starting/expiration dates.
+  const safeStart = startingdate ? String(startingdate) : null;
+  const safeExpire = expirationdate ? String(expirationdate) : null;
 
   const actions = [
     { action: 'start', fields: { id } },
     { action: 'run', fields: { id } },
     { action: 'process', fields: { id } },
-    { action: 'save', fields: { id, status: '1', startingdate: formatMagnusDateTime(new Date()) } }
+    {
+      action: 'save',
+      fields: {
+        id,
+        status: '1',
+        ...(safeStart ? { startingdate: safeStart } : {}),
+        ...(safeExpire ? { expirationdate: safeExpire } : {})
+      }
+    }
   ];
 
   const attempts = [];
@@ -11546,7 +11560,14 @@ app.post('/api/me/outbound-dialer/campaigns', requireAuth, async (req, res) => {
     // 4) Start (optional)
     let startResult = null;
     if (startRequested && camp.id) {
-      startResult = await tryStartMbCampaign({ module: camp.module, campaignId: camp.id, httpsAgent, hostHeader });
+      startResult = await tryStartMbCampaign({
+        module: camp.module,
+        campaignId: camp.id,
+        startingdate,
+        expirationdate,
+        httpsAgent,
+        hostHeader
+      });
     }
 
     return res.json({
