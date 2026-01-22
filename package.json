@@ -7,7 +7,8 @@
     "start": "node server.js",
     "dev": "node server.js",
     "clean-db": "node scripts/clean-db.js",
-    "fix-duplicate-markups": "node scripts/fix-duplicate-markups.js"
+    "fix-duplicate-markups": "node scripts/fix-duplicate-markups.js",
+    "mb-quick-campaign": "node scripts/mb-voice-broadcast-quick-campaign.js"
   },
   "keywords": [
     "magnusbilling",

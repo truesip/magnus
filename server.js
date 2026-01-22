@@ -11047,6 +11047,536 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
   }
 });
 
+// ========== Outbound Dialer (MagnusBilling Voice Broadcast) ==========
+
+function truncateText(s, maxLen) {
+  const str = String(s ?? '');
+  const max = Math.max(1, parseInt(String(maxLen || 0), 10) || 1);
+  if (str.length <= max) return str;
+  return str.slice(0, max);
+}
+
+function safePreview(data, max = 800) {
+  try {
+    if (data == null) return '';
+    if (typeof data === 'string') return data.slice(0, max);
+    return JSON.stringify(data).slice(0, max);
+  } catch {
+    return '';
+  }
+}
+
+function extractMbErrors(data) {
+  try {
+    if (!data) return null;
+    if (typeof data === 'string') return data;
+    if (typeof data === 'object') return data.errors ?? data.error ?? data.message ?? null;
+  } catch {}
+  return null;
+}
+
+function mbErrorText(data) {
+  const e = extractMbErrors(data);
+  if (e == null) return '';
+  if (typeof e === 'string') return e;
+  try { return JSON.stringify(e); } catch { return String(e); }
+}
+
+function mbIsLikelySuccess(resp) {
+  const status = Number(resp?.status || 0);
+  if (!(status >= 200 && status < 300)) return false;
+
+  const d = resp?.data;
+  if (d == null) return true;
+  if (typeof d === 'string') {
+    // Some installs return plain text; treat 2xx as success unless it clearly says error.
+    return !/\berror\b|\bfail\b|\bexception\b/i.test(d);
+  }
+  if (typeof d === 'object') {
+    if (d.success === true) return true;
+    if (d.success === false) return false;
+    if (String(d.status || '').toLowerCase() === 'success') return true;
+    if (d.errors) return false;
+    return true;
+  }
+  return true;
+}
+
+function mbExtractIdFromSaveResponse(data) {
+  try {
+    if (!data) return null;
+    if (typeof data === 'object') {
+      const direct = data.id ?? data.insertId ?? data.insert_id ?? data.last_id;
+      if (direct != null && String(direct).trim() !== '') return String(direct).trim();
+
+      const nested = data.data?.id ?? data.data?.insertId;
+      if (nested != null && String(nested).trim() !== '') return String(nested).trim();
+
+      const rows = data.rows || data.data || [];
+      if (Array.isArray(rows) && rows[0]) {
+        const r = rows[0];
+        const rid = r.id ?? r.id_campaign ?? r.idCampaign ?? r.id_phonebook ?? r.idPhonebook;
+        if (rid != null && String(rid).trim() !== '') return String(rid).trim();
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function parseOutboundDialerNumbers(raw) {
+  const out = [];
+
+  const parts = String(raw || '')
+    .split(/[\n,]/g)
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  for (const p of parts) {
+    const d = digitsOnly(p);
+    if (!d) continue;
+    out.push(d);
+  }
+
+  // De-dup while preserving order
+  const seen = new Set();
+  const uniq = [];
+  for (const n of out) {
+    if (seen.has(n)) continue;
+    seen.add(n);
+    uniq.push(n);
+  }
+
+  return uniq;
+}
+
+function parseLocalDateTimeInput(raw, { endOfDay = false } = {}) {
+  const s = String(raw ?? '').trim();
+  if (!s) return null;
+
+  // YYYY-MM-DD (date only)
+  const mDate = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (mDate) {
+    const y = parseInt(mDate[1], 10);
+    const mo = parseInt(mDate[2], 10);
+    const d = parseInt(mDate[3], 10);
+    const h = endOfDay ? 23 : 0;
+    const mi = endOfDay ? 59 : 0;
+    const se = endOfDay ? 59 : 0;
+    const dt = new Date(y, mo - 1, d, h, mi, se, 0);
+    return Number.isFinite(dt.getTime()) ? dt : null;
+  }
+
+  // YYYY-MM-DDTHH:MM(:SS)? or YYYY-MM-DD HH:MM(:SS)?
+  const mDt = s.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (mDt) {
+    const y = parseInt(mDt[1], 10);
+    const mo = parseInt(mDt[2], 10);
+    const d = parseInt(mDt[3], 10);
+    const h = parseInt(mDt[4], 10);
+    const mi = parseInt(mDt[5], 10);
+    const se = mDt[6] != null ? parseInt(mDt[6], 10) : 0;
+    const dt = new Date(y, mo - 1, d, h, mi, se, 0);
+    return Number.isFinite(dt.getTime()) ? dt : null;
+  }
+
+  // Fallback to JS Date parse (best-effort)
+  const dt = new Date(s);
+  if (!Number.isFinite(dt.getTime())) return null;
+  return dt;
+}
+
+async function mbCallModuleAction({ module, action, fields, httpsAgent, hostHeader, validateStatus }) {
+  const m = String(module || '').trim();
+  const a = String(action || '').trim();
+  if (!m || !a) throw new Error('mbCallModuleAction missing module/action');
+
+  const params = new URLSearchParams();
+  params.append('module', m);
+  params.append('action', a);
+
+  const obj = fields && typeof fields === 'object' ? fields : {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === undefined || v === null) continue;
+    params.append(String(k), String(v));
+  }
+
+  return mbSignedCall({
+    relPath: `/index.php/${m}/${a}`,
+    params,
+    httpsAgent,
+    hostHeader,
+    validateStatus: validateStatus || (() => true)
+  });
+}
+
+async function createMbPhonebookAuto({ userId, name, httpsAgent, hostHeader }) {
+  const phonebookCandidates = [
+    String(process.env.MB_PHONEBOOK_MODULE || '').trim(),
+    'phoneBook',
+    'phonebook',
+    'pkg_phonebook'
+  ].filter(Boolean);
+
+  const safeName = truncateText(String(name || '').trim(), 30);
+
+  const errors = [];
+  for (const module of phonebookCandidates) {
+    const attempts = [
+      { label: 'id_user', fields: { id: '0', status: '1', name: safeName, id_user: userId } },
+      { label: 'idUser', fields: { id: '0', status: '1', name: safeName, idUser: userId } },
+      { label: 'no_user', fields: { id: '0', status: '1', name: safeName } }
+    ];
+
+    for (const a of attempts) {
+      try {
+        const resp = await mbCallModuleAction({ module, action: 'save', fields: a.fields, httpsAgent, hostHeader, validateStatus: () => true });
+        if (mbIsLikelySuccess(resp)) {
+          const id = mbExtractIdFromSaveResponse(resp.data);
+          return { ok: true, module, id, respStatus: resp.status };
+        }
+        errors.push({ module, attempt: a.label, status: resp.status, error: mbErrorText(resp.data), preview: safePreview(resp.data) });
+      } catch (e) {
+        errors.push({ module, attempt: a.label, error: e?.message || e });
+      }
+    }
+  }
+
+  return { ok: false, errors };
+}
+
+async function addMbPhoneNumber({ module, userId, phonebookId, number, httpsAgent, hostHeader }) {
+  const attempts = [
+    () => ({ id: '0', status: '1', id_phonebook: phonebookId, number, name: number, id_user: userId }),
+    () => ({ id: '0', status: '1', idPhonebook: phonebookId, number, name: number, idUser: userId }),
+    () => ({ id: '0', status: '1', id_phonebook: phonebookId, phonenumber: number, name: number, id_user: userId }),
+    () => ({ id: '0', status: '1', id_phonebook: phonebookId, number, name: number })
+  ];
+
+  const errors = [];
+  for (const build of attempts) {
+    try {
+      const fields = build();
+      const resp = await mbCallModuleAction({ module, action: 'save', fields, httpsAgent, hostHeader, validateStatus: () => true });
+      if (mbIsLikelySuccess(resp)) {
+        const id = mbExtractIdFromSaveResponse(resp.data);
+        return { ok: true, id, respStatus: resp.status };
+      }
+      errors.push({ status: resp.status, error: mbErrorText(resp.data), preview: safePreview(resp.data) });
+    } catch (e) {
+      errors.push({ error: e?.message || e });
+    }
+  }
+
+  return { ok: false, errors };
+}
+
+async function addMbPhoneNumbersAuto({ userId, phonebookId, numbers, httpsAgent, hostHeader, concurrency = 6 }) {
+  const candidates = [
+    String(process.env.MB_PHONENUMBER_MODULE || '').trim(),
+    'phoneNumber',
+    'phonenumber',
+    'pkg_phonenumber'
+  ].filter(Boolean);
+
+  const list = Array.isArray(numbers) ? numbers : [];
+  if (!list.length) return { ok: false, message: 'no_numbers' };
+
+  // Resolve module by trying the first number
+  let chosenModule = null;
+  let firstError = null;
+
+  for (const m of candidates) {
+    const r = await addMbPhoneNumber({ module: m, userId, phonebookId, number: list[0], httpsAgent, hostHeader });
+    if (r.ok) {
+      chosenModule = m;
+      break;
+    }
+    if (!firstError) firstError = { module: m, errors: r.errors };
+  }
+
+  if (!chosenModule) {
+    return { ok: false, message: 'Failed to add phone numbers (module not detected)', firstError };
+  }
+
+  const mapLimit = async (items, limit, fn) => {
+    const results = new Array(items.length);
+    let idx = 0;
+    const workers = Array.from({ length: Math.max(1, limit) }, async () => {
+      while (true) {
+        const i = idx;
+        idx += 1;
+        if (i >= items.length) return;
+        results[i] = await fn(items[i], i);
+      }
+    });
+    await Promise.all(workers);
+    return results;
+  };
+
+  // Note: list[0] has already been added during module detection
+  let added = 1;
+  let failed = 0;
+  const failures = [];
+
+  const rest = list.slice(1);
+  const limit = Math.max(1, Math.min(12, parseInt(String(concurrency || 6), 10) || 6));
+
+  const results = await mapLimit(rest, limit, async (num) => {
+    const r = await addMbPhoneNumber({ module: chosenModule, userId, phonebookId, number: num, httpsAgent, hostHeader });
+    return { num, r };
+  });
+
+  for (const item of results) {
+    if (item && item.r && item.r.ok) {
+      added += 1;
+    } else {
+      failed += 1;
+      const errPreview = item?.r?.errors ? safePreview(item.r.errors) : safePreview(item?.r);
+      failures.push({ number: item?.num || null, error: errPreview });
+    }
+  }
+
+  return { ok: true, module: chosenModule, added, failed, failures };
+}
+
+async function createMbCampaignAuto({ userId, name, phonebookId, startingdate, expirationdate, tts, extra, httpsAgent, hostHeader }) {
+  const campaignCandidates = [
+    String(process.env.MB_CAMPAIGN_MODULE || '').trim(),
+    'campaign',
+    'pkg_campaign'
+  ].filter(Boolean);
+
+  const safeName = String(name || '').trim();
+
+  const baseFields = {
+    id: '0',
+    status: '1',
+    name: safeName,
+    id_user: userId,
+
+    ...(extra && typeof extra === 'object' && !Array.isArray(extra) ? extra : {}),
+
+    // Default scheduling + pacing
+    type: '1',
+    frequency: '10',
+    max_frequency: '10',
+    daily_start_time: '00:00:00',
+    daily_stop_time: '23:59:59',
+    monday: '1',
+    tuesday: '1',
+    wednesday: '1',
+    thursday: '1',
+    friday: '1',
+    saturday: '1',
+    sunday: '1',
+
+    ...(phonebookId ? { 'id_phonebook[0]': String(phonebookId) } : {}),
+    ...(startingdate ? { startingdate: String(startingdate) } : {}),
+    ...(tts ? { tts_audio: String(tts) } : {})
+  };
+
+  const expiryKeys = expirationdate
+    ? ['expirationdate', 'expiration_date', 'expirationDate', 'stopdate', 'stop_date', 'stopDate']
+    : [null];
+
+  const errors = [];
+
+  for (const module of campaignCandidates) {
+    for (const expKey of expiryKeys) {
+      const fieldsWithExpiry = {
+        ...baseFields,
+        ...(expKey ? { [expKey]: String(expirationdate) } : {})
+      };
+
+      const attempts = [
+        { label: 'id_user', fields: fieldsWithExpiry },
+        { label: 'idUser', fields: { ...fieldsWithExpiry, idUser: fieldsWithExpiry.id_user } }
+      ];
+
+      for (const a of attempts) {
+        try {
+          const resp = await mbCallModuleAction({ module, action: 'save', fields: a.fields, httpsAgent, hostHeader, validateStatus: () => true });
+          if (mbIsLikelySuccess(resp)) {
+            const id = mbExtractIdFromSaveResponse(resp.data);
+            return { ok: true, module, id, respStatus: resp.status };
+          }
+          errors.push({ module, attempt: a.label, expiryKey: expKey || null, status: resp.status, error: mbErrorText(resp.data), preview: safePreview(resp.data) });
+        } catch (e) {
+          errors.push({ module, attempt: a.label, expiryKey: expKey || null, error: e?.message || e });
+        }
+      }
+    }
+  }
+
+  return { ok: false, errors };
+}
+
+async function tryStartMbCampaign({ module, campaignId, httpsAgent, hostHeader }) {
+  const id = String(campaignId || '').trim();
+  if (!id) return { ok: false, reason: 'missing_campaign_id' };
+
+  const actions = [
+    { action: 'start', fields: { id } },
+    { action: 'run', fields: { id } },
+    { action: 'process', fields: { id } },
+    { action: 'save', fields: { id, status: '1', startingdate: formatMagnusDateTime(new Date()) } }
+  ];
+
+  const attempts = [];
+  for (const a of actions) {
+    try {
+      const resp = await mbCallModuleAction({ module, action: a.action, fields: a.fields, httpsAgent, hostHeader, validateStatus: () => true });
+      attempts.push({ action: a.action, status: resp.status, preview: safePreview(resp.data) });
+      if (mbIsLikelySuccess(resp)) return { ok: true, action: a.action, attempts };
+    } catch (e) {
+      attempts.push({ action: a.action, error: e?.message || e });
+    }
+  }
+
+  return { ok: false, attempts };
+}
+
+app.post('/api/me/outbound-dialer/campaigns', requireAuth, async (req, res) => {
+  try {
+    const httpsAgent = magnusBillingAgent;
+    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+
+    const idUser = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
+    if (!idUser) {
+      return res.status(400).json({ success: false, message: 'Magnus user id not found for this account' });
+    }
+
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const nameRaw = String(body.name || '').trim();
+    const numbersRaw = body.numbers;
+    const tts = body.tts != null ? String(body.tts) : '';
+
+    const startDateRaw = String(body.startDate || '').trim();
+    const expireDateRaw = String(body.expireDate || '').trim();
+
+    const startRequested = String(body.start || '0') === '1' || body.start === true;
+
+    let extra = null;
+    if (body.extra != null) {
+      if (typeof body.extra === 'object' && !Array.isArray(body.extra)) {
+        extra = body.extra;
+      } else {
+        return res.status(400).json({ success: false, message: 'extra must be a JSON object' });
+      }
+    }
+
+    const numbers = parseOutboundDialerNumbers(numbersRaw);
+    if (!numbers.length) {
+      return res.status(400).json({ success: false, message: 'No valid phone numbers provided' });
+    }
+
+    const MAX_NUMBERS = 2000;
+    if (numbers.length > MAX_NUMBERS) {
+      return res.status(400).json({ success: false, message: `Too many numbers (max ${MAX_NUMBERS}).` });
+    }
+
+    const now = new Date();
+    const stamp = now.toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const campaignName = nameRaw || `VoiceBroadcast-${stamp}`;
+
+    // Start date
+    const startParsed = startDateRaw ? parseLocalDateTimeInput(startDateRaw, { endOfDay: false }) : null;
+    if (startDateRaw && !startParsed) {
+      return res.status(400).json({ success: false, message: 'Invalid startDate (expected YYYY-MM-DD or YYYY-MM-DDTHH:MM)' });
+    }
+
+    // Expire date
+    const expireParsed = expireDateRaw ? parseLocalDateTimeInput(expireDateRaw, { endOfDay: true }) : null;
+    if (expireDateRaw && !expireParsed) {
+      return res.status(400).json({ success: false, message: 'Invalid expireDate (expected YYYY-MM-DD or YYYY-MM-DDTHH:MM)' });
+    }
+
+    const startDt = startParsed || now;
+    const expireDt = expireParsed || null;
+
+    if (expireDt && startDt && expireDt.getTime() < startDt.getTime()) {
+      return res.status(400).json({ success: false, message: 'Expire date must be on/after the start date' });
+    }
+
+    const startingdate = formatMagnusDateTime(startDt);
+    const expirationdate = expireDt ? formatMagnusDateTime(expireDt) : null;
+
+    // 1) Phonebook
+    const pbName = `${campaignName} Phonebook`;
+    const pb = await createMbPhonebookAuto({ userId: String(idUser), name: pbName, httpsAgent, hostHeader });
+    if (!pb.ok || !pb.id) {
+      return res.status(502).json({
+        success: false,
+        message: 'Failed to create phonebook in MagnusBilling',
+        errors: pb.errors || null
+      });
+    }
+
+    // 2) Add numbers
+    const numsRes = await addMbPhoneNumbersAuto({ userId: String(idUser), phonebookId: pb.id, numbers, httpsAgent, hostHeader, concurrency: 8 });
+    if (!numsRes.ok || numsRes.added === 0) {
+      return res.status(502).json({
+        success: false,
+        message: 'Failed to add phone numbers to phonebook',
+        data: numsRes || null
+      });
+    }
+
+    // 3) Campaign
+    const camp = await createMbCampaignAuto({
+      userId: String(idUser),
+      name: campaignName,
+      phonebookId: pb.id,
+      startingdate,
+      expirationdate,
+      tts: tts || undefined,
+      extra,
+      httpsAgent,
+      hostHeader
+    });
+
+    if (!camp.ok) {
+      return res.status(502).json({
+        success: false,
+        message: 'Failed to create campaign in MagnusBilling',
+        errors: camp.errors || null
+      });
+    }
+
+    // 4) Start (optional)
+    let startResult = null;
+    if (startRequested && camp.id) {
+      startResult = await tryStartMbCampaign({ module: camp.module, campaignId: camp.id, httpsAgent, hostHeader });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        campaignId: camp.id || null,
+        phonebookId: pb.id,
+        startingdate,
+        expirationdate,
+        numbers: {
+          total: numbers.length,
+          added: numsRes.added,
+          failed: numsRes.failed,
+          failures: numsRes.failures || []
+        },
+        modules: {
+          phonebook: pb.module,
+          phonenumber: numsRes.module,
+          campaign: camp.module
+        },
+        startRequested,
+        startResult
+      }
+    });
+  } catch (e) {
+    if (DEBUG) console.warn('[outbound.dialer] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Outbound dialer failed' });
+  }
+});
+
 // Debug: CDR health snapshot for the logged-in user (helps diagnose "history not updating")
 app.get('/api/me/cdrs/health', requireAuth, async (req, res) => {
   try {
