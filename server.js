@@ -3433,6 +3433,64 @@ app.get('/api/me/profile', requireAuth, async (req, res) => {
   } catch (e) { return res.status(500).json({ success: false, message: 'Profile fetch failed' }); }
 });
 
+// Save user address fields (stored in signup_users)
+app.put('/api/me/profile/address', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const address1Raw = (req.body && (req.body.address1 ?? req.body.address ?? req.body.street_address ?? req.body.streetAddress)) ?? '';
+    const cityRaw = (req.body && (req.body.city ?? req.body.town ?? req.body.locality)) ?? '';
+    const stateRaw = (req.body && (req.body.state ?? req.body.state_province ?? req.body.stateProvince ?? req.body.province)) ?? '';
+    const postalRaw = (req.body && (req.body.postalCode ?? req.body.postal_code ?? req.body.zip ?? req.body.zip_code ?? req.body.zipCode)) ?? '';
+    const countryRaw = (req.body && (req.body.country ?? req.body.countryCode ?? req.body.country_code)) ?? '';
+
+    const address1 = String(address1Raw || '').trim();
+    const city = String(cityRaw || '').trim();
+    const state = String(stateRaw || '').trim();
+
+    // Country is stored as 2-letter code (CHAR(2)). Allow empty.
+    const rawCountry = String(countryRaw || '').trim();
+    let country = '';
+    if (rawCountry) {
+      const up = rawCountry.toUpperCase();
+      const mapped = normalizeSignupCountry(up);
+      if (mapped) country = mapped;
+      else if (/^[A-Z]{2}$/.test(up)) country = up;
+      else {
+        return res.status(400).json({ success: false, message: 'Country must be a 2-letter code like US or CA' });
+      }
+    }
+
+    const postalCode = normalizePostalCode(postalRaw, { country });
+
+    if (address1.length > 255) return res.status(400).json({ success: false, message: 'Street address is too long' });
+    if (city.length > 100) return res.status(400).json({ success: false, message: 'City is too long' });
+    if (state.length > 100) return res.status(400).json({ success: false, message: 'State/Province is too long' });
+    if (postalCode.length > 32) return res.status(400).json({ success: false, message: 'ZIP/Postal Code is too long' });
+
+    await pool.execute(
+      'UPDATE signup_users SET address1 = ?, city = ?, state = ?, postal_code = ?, country = ? WHERE id = ? LIMIT 1',
+      [
+        address1 ? address1 : null,
+        city ? city : null,
+        state ? state : null,
+        postalCode ? postalCode : null,
+        country ? country : null,
+        userId
+      ]
+    );
+
+    return res.json({
+      success: true,
+      data: { address1, city, state, postalCode, country }
+    });
+  } catch (e) {
+    if (DEBUG) console.warn('[profile.address.put] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to save address' });
+  }
+});
+
 // ========== Per-user SMTP settings (for AI agent document emails) ==========
 function isValidEmail(email) {
   const s = String(email || '').trim();

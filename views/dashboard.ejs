@@ -564,10 +564,12 @@
       </section>
       <section id="view-profile" style="display:none">
         <h2>Profile</h2>
-        <table id="profile-table" style="display:none"><tbody></tbody></table>
-        <div class="toolbar">
+        <div class="toolbar" id="profile-toolbar" style="display:none">
+          <button id="saveProfileAddressBtn" class="btn--primary" disabled>Save Address</button>
+          <div class="muted" style="margin-left:auto">Country must be a 2-letter code (e.g. US)</div>
           <button id="deleteAccountBtn" disabled title="Deleting the primary signup user is disabled">Delete Account</button>
         </div>
+        <table id="profile-table" style="display:none"><tbody></tbody></table>
         <div id="profile-empty" class="muted">Loading…</div>
       </section>
       <section id="view-sip" style="display:none">
@@ -3942,11 +3944,20 @@
 
     async function loadProfile(){
       try{
-        const r = await fetch('/api/me/profile'); const j = await r.json();
+        const r = await fetch('/api/me/profile');
+        const j = await r.json();
         const d = j?.data || {};
         meProfile = d || null;
+
+        const toolbar = document.getElementById('profile-toolbar');
+        const saveBtn = document.getElementById('saveProfileAddressBtn');
+        if (toolbar) toolbar.style.display = 'none';
+        if (saveBtn) saveBtn.disabled = true;
+
         if (j.success){
-          const body = $('#profile-table tbody'); body.innerHTML = '';
+          const body = $('#profile-table tbody');
+          if (body) body.innerHTML = '';
+
           const balanceDisplay = d.balance !== null && d.balance !== undefined ? `$${Number(d.balance).toFixed(2)}` : 'Loading...';
           // Update header balance if element exists
           if (d.balance !== null && d.balance !== undefined && $('#currentBalance')) {
@@ -3954,32 +3965,167 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           }
           const callLimitDisplay = d.callLimit !== null && d.callLimit !== undefined ? String(d.callLimit) : '0';
           const cpsLimitDisplay = d.cpsLimit !== null && d.cpsLimit !== undefined ? String(d.cpsLimit) : '0';
-          const fields = [
-            ['Name', d.name||''],
-            ['Email', d.email||''],
-            ['Phone', d.phone||''],
-            ['Username', d.username||''],
-            ['Street Address', d.address1||''],
-            ['City', d.city||''],
-            ['State / Province', d.state||''],
-            ['ZIP / Postal Code', d.postalCode||''],
-            ['Country', d.country||''],
-            ['Signup IP', d.signupIp||''],
-            ['SIP Domain', d.sipDomain||new URL(location.href).hostname],
-            ['Balance', balanceDisplay],
-            ['Channel Limit', callLimitDisplay],
-            ['CPS Limit', cpsLimitDisplay]
-          ];
-          for (const [k,v] of fields){
-            const tr=document.createElement('tr');
-            tr.innerHTML = `<th>${escapeHtml(k)}</th><td>${escapeHtml(String(v||''))}</td>`;
+
+          const addRowText = (label, value) => {
+            if (!body) return;
+            const tr = document.createElement('tr');
+            const th = document.createElement('th');
+            th.textContent = String(label || '');
+            const td = document.createElement('td');
+            td.textContent = String(value ?? '');
+            tr.appendChild(th);
+            tr.appendChild(td);
             body.appendChild(tr);
+          };
+
+          const addRowInput = (label, id, value, opts) => {
+            if (!body) return;
+            const options = opts || {};
+            const tr = document.createElement('tr');
+            const th = document.createElement('th');
+            th.textContent = String(label || '');
+            const td = document.createElement('td');
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.id = String(id || '');
+            input.value = String(value ?? '');
+            input.placeholder = String(options.placeholder || '');
+            if (options.maxLength != null) input.maxLength = Number(options.maxLength);
+            input.style.width = '100%';
+            input.style.boxSizing = 'border-box';
+            if (options.uppercase) {
+              input.addEventListener('input', () => {
+                input.value = String(input.value || '').toUpperCase();
+              });
+            }
+            td.appendChild(input);
+            tr.appendChild(th);
+            tr.appendChild(td);
+            body.appendChild(tr);
+          };
+
+          addRowText('Name', d.name || '');
+          addRowText('Email', d.email || '');
+          addRowText('Phone', d.phone || '');
+          addRowText('Username', d.username || '');
+
+          // Editable address
+          addRowInput('Street Address', 'profileAddress1', d.address1 || '', { placeholder: 'Street address' });
+          addRowInput('City', 'profileCity', d.city || '', { placeholder: 'City' });
+          addRowInput('State / Province', 'profileState', d.state || '', { placeholder: 'State / Province' });
+          addRowInput('ZIP / Postal Code', 'profilePostalCode', d.postalCode || '', { placeholder: 'ZIP / Postal Code' });
+          addRowInput('Country', 'profileCountry', d.country || '', { placeholder: 'US', maxLength: 2, uppercase: true });
+
+          const initialAddress = {
+            address1: String(d.address1 || '').trim(),
+            city: String(d.city || '').trim(),
+            state: String(d.state || '').trim(),
+            postalCode: String(d.postalCode || '').trim(),
+            country: String(d.country || '').trim().toUpperCase(),
+          };
+
+          const getCurrentAddress = () => ({
+            address1: String(document.getElementById('profileAddress1')?.value || '').trim(),
+            city: String(document.getElementById('profileCity')?.value || '').trim(),
+            state: String(document.getElementById('profileState')?.value || '').trim(),
+            postalCode: String(document.getElementById('profilePostalCode')?.value || '').trim(),
+            country: String(document.getElementById('profileCountry')?.value || '').trim().toUpperCase(),
+          });
+
+          const updateSaveState = () => {
+            if (!saveBtn) return;
+            const cur = getCurrentAddress();
+            const dirty = cur.address1 !== initialAddress.address1
+              || cur.city !== initialAddress.city
+              || cur.state !== initialAddress.state
+              || cur.postalCode !== initialAddress.postalCode
+              || cur.country !== initialAddress.country;
+            saveBtn.disabled = !dirty;
+          };
+
+          for (const inputId of ['profileAddress1','profileCity','profileState','profilePostalCode','profileCountry']) {
+            const el = document.getElementById(inputId);
+            if (!el) continue;
+            el.addEventListener('input', updateSaveState);
+            el.addEventListener('change', updateSaveState);
           }
-          $('#profile-empty').style.display='none'; $('#profile-table').style.display='table';
+          updateSaveState();
+
+          addRowText('Signup IP', d.signupIp || '');
+          addRowText('SIP Domain', d.sipDomain || new URL(location.href).hostname);
+          addRowText('Balance', balanceDisplay);
+          addRowText('Channel Limit', callLimitDisplay);
+          addRowText('CPS Limit', cpsLimitDisplay);
+
+          $('#profile-empty').style.display='none';
+          $('#profile-table').style.display='table';
+          if (toolbar) toolbar.style.display = 'flex';
           try { renderIncBankUi(); } catch {}
-        } else { $('#profile-empty').textContent='No profile'; }
-      }catch{ $('#profile-empty').textContent='Failed to load profile'; }
+        } else {
+          $('#profile-empty').textContent='No profile';
+          $('#profile-empty').style.display = 'block';
+          $('#profile-table').style.display = 'none';
+        }
+      } catch (e) {
+        $('#profile-empty').textContent='Failed to load profile';
+        $('#profile-empty').style.display = 'block';
+        $('#profile-table').style.display = 'none';
+      }
     }
+
+    async function saveProfileAddress(){
+      const btn = document.getElementById('saveProfileAddressBtn');
+      if (!btn) return;
+
+      const payload = {
+        address1: String(document.getElementById('profileAddress1')?.value || '').trim(),
+        city: String(document.getElementById('profileCity')?.value || '').trim(),
+        state: String(document.getElementById('profileState')?.value || '').trim(),
+        postalCode: String(document.getElementById('profilePostalCode')?.value || '').trim(),
+        country: String(document.getElementById('profileCountry')?.value || '').trim(),
+      };
+
+      btn.disabled = true;
+      const oldText = btn.textContent;
+      btn.textContent = 'Saving...';
+      let reloaded = false;
+
+      try {
+        const r = await fetch('/api/me/profile/address', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        let j;
+        try { j = await r.json(); } catch { j = null; }
+
+        if (!r.ok || !j || j.success !== true) {
+          const msg = (j && j.message) ? String(j.message) : 'Failed to save address';
+          showToast(msg, 'error');
+          return;
+        }
+
+        showToast('Address saved');
+        await loadProfile();
+        reloaded = true;
+      } catch (e) {
+        showToast('Failed to save address', 'error');
+      } finally {
+        if (!reloaded) btn.disabled = false;
+        btn.textContent = oldText || 'Save Address';
+      }
+    }
+
+    (function bindProfileHandlers(){
+      const btn = document.getElementById('saveProfileAddressBtn');
+      if (btn && !btn._bound) {
+        btn._bound = true;
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          saveProfileAddress();
+        });
+      }
+    })();
     let sipPage = 0; const sipPageSize = 20;
     let sipSearchQuery = '';
     let allSipData = []; // Cache SIP data for current page (used for search within the page)
