@@ -11339,7 +11339,7 @@ async function addMbPhoneNumbersAuto({ userId, phonebookId, numbers, httpsAgent,
   return { ok: true, module: chosenModule, added, failed, failures };
 }
 
-async function createMbCampaignAuto({ userId, name, phonebookId, startingdate, expirationdate, tts, extra, httpsAgent, hostHeader }) {
+async function createMbCampaignAuto({ userId, name, phonebookId, planId, startingdate, expirationdate, tts, extra, httpsAgent, hostHeader }) {
   const campaignCandidates = [
     String(process.env.MB_CAMPAIGN_MODULE || '').trim(),
     'campaign',
@@ -11355,6 +11355,10 @@ async function createMbCampaignAuto({ userId, name, phonebookId, startingdate, e
     id_user: userId,
 
     ...(extra && typeof extra === 'object' && !Array.isArray(extra) ? extra : {}),
+
+    // Some MagnusBilling installs require id_plan for campaigns.
+    // We apply this after extra so explicit plan selection wins.
+    ...(planId ? { id_plan: String(planId) } : {}),
 
     // Default scheduling + pacing
     type: '1',
@@ -11376,7 +11380,7 @@ async function createMbCampaignAuto({ userId, name, phonebookId, startingdate, e
   };
 
   const expiryKeys = expirationdate
-    ? ['expirationdate', 'expiration_date', 'expirationDate', 'stopdate', 'stop_date', 'stopDate']
+    ? ['expirationdate', 'expiration_date', 'expirationDate', 'stopdate', 'stop_date', 'stopDate', 'endingdate', 'ending_date', 'endingDate']
     : [null];
 
   const errors = [];
@@ -11470,6 +11474,10 @@ app.post('/api/me/outbound-dialer/campaigns', requireAuth, async (req, res) => {
 
     const startRequested = String(body.start || '0') === '1' || body.start === true;
 
+    // Optional: allow client to override the plan used for the campaign.
+    // If omitted, we will try to use the user's current id_plan from MagnusBilling.
+    const planIdRaw = body.planId ?? body.id_plan ?? body.idPlan ?? null;
+
     let extra = null;
     if (body.extra != null) {
       if (typeof body.extra === 'object' && !Array.isArray(body.extra)) {
@@ -11515,6 +11523,36 @@ app.post('/api/me/outbound-dialer/campaigns', requireAuth, async (req, res) => {
     const startingdate = formatMagnusDateTime(startDt);
     const expirationdate = expireDt ? formatMagnusDateTime(expireDt) : null;
 
+    // Determine plan id
+    // Priority:
+    //  1) request.planId
+    //  2) extra.id_plan (advanced)
+    //  3) user's configured plan in Magnus
+    let planId = null;
+
+    const planIdStr = String(planIdRaw ?? '').trim();
+    if (planIdStr) {
+      if (!/^\d+$/.test(planIdStr)) {
+        return res.status(400).json({ success: false, message: 'planId must be a numeric id' });
+      }
+      planId = planIdStr;
+    } else {
+      const extraPlanRaw = extra?.id_plan ?? extra?.idPlan ?? extra?.plan_id ?? extra?.planId ?? null;
+      const extraPlanStr = String(extraPlanRaw ?? '').trim();
+      if (extraPlanStr && /^\d+$/.test(extraPlanStr)) {
+        planId = extraPlanStr;
+      } else {
+        try {
+          const userRow = await fetchUserRow({ idUser, httpsAgent, hostHeader });
+          const uPlan = userRow?.id_plan ?? userRow?.idPlan ?? userRow?.plan_id ?? userRow?.planId ?? null;
+          const uPlanStr = String(uPlan ?? '').trim();
+          if (uPlanStr && /^\d+$/.test(uPlanStr)) planId = uPlanStr;
+        } catch (e) {
+          if (DEBUG) console.warn('[outbound.dialer] Failed to fetch user plan:', e?.message || e);
+        }
+      }
+    }
+
     // 1) Phonebook
     const pbName = `${campaignName} Phonebook`;
     const pb = await createMbPhonebookAuto({ userId: String(idUser), name: pbName, httpsAgent, hostHeader });
@@ -11541,6 +11579,7 @@ app.post('/api/me/outbound-dialer/campaigns', requireAuth, async (req, res) => {
       userId: String(idUser),
       name: campaignName,
       phonebookId: pb.id,
+      planId,
       startingdate,
       expirationdate,
       tts: tts || undefined,
@@ -11570,6 +11609,11 @@ app.post('/api/me/outbound-dialer/campaigns', requireAuth, async (req, res) => {
       });
     }
 
+    const warnings = [];
+    if (!planId) {
+      warnings.push('Campaign planId is missing. Some MagnusBilling installs require a Plan for outbound campaigns to run. Set Plan ID or include {"id_plan":<id>} in Advanced fields.');
+    }
+
     return res.json({
       success: true,
       data: {
@@ -11588,8 +11632,10 @@ app.post('/api/me/outbound-dialer/campaigns', requireAuth, async (req, res) => {
           phonenumber: numsRes.module,
           campaign: camp.module
         },
+        planId: planId || null,
         startRequested,
-        startResult
+        startResult,
+        warnings
       }
     });
   } catch (e) {

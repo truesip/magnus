@@ -628,6 +628,9 @@
           <label>Campaign
             <input type="text" id="dialerCampaignName" placeholder="My outbound campaign" style="width:220px">
           </label>
+          <label>Plan ID
+            <input type="number" id="dialerPlanId" placeholder="(auto)" style="width:110px">
+          </label>
           <label>Start Date <input type="date" id="dialerStartDate"></label>
           <label>Expire Date <input type="date" id="dialerExpireDate"></label>
           <label style="flex:1;min-width:220px">TTS Message
@@ -1356,10 +1359,8 @@
 
     // Outbound Dialer
     function initOutboundDialer(){
-      try {
-        const start = document.getElementById('dialerStartDate');
-        if (start && !start.value) start.value = new Date().toISOString().slice(0,10);
-      } catch {}
+      // Intentionally do not auto-fill Start Date.
+      // Leaving it blank makes the backend use "now" (prevents unintentionally scheduling at 00:00:00).
     }
 
     async function createOutboundDialerCampaign(){
@@ -1370,6 +1371,7 @@
       const name = String(document.getElementById('dialerCampaignName')?.value || '').trim();
       const numbers = String(document.getElementById('dialerNumbers')?.value || '').trim();
       const tts = String(document.getElementById('dialerTts')?.value || '').trim();
+      const planId = String(document.getElementById('dialerPlanId')?.value || '').trim();
       const startDate = String(document.getElementById('dialerStartDate')?.value || '').trim();
       const expireDate = String(document.getElementById('dialerExpireDate')?.value || '').trim();
       const autoStart = !!document.getElementById('dialerAutoStart')?.checked;
@@ -1410,6 +1412,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             name,
+            planId,
             numbers,
             tts,
             startDate,
