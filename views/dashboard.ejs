@@ -24,7 +24,6 @@
       --shadow-sm:0 10px 28px rgba(0,0,0,.40);
       --radius:14px;
       --radius2:18px;
-      --ui-scale: .9;
     }
 
     *{box-sizing:border-box}
@@ -41,7 +40,16 @@
       display:flex;
       flex-direction:column;
       overflow-x:hidden;
-      zoom: var(--ui-scale);
+    }
+
+    #appRoot{display:flex;flex-direction:column;flex:1;min-height:0;}
+
+    /* Make the platform dashboard ~10% smaller overall. */
+    @supports (zoom: 1) {
+      #appRoot{zoom:90%;}
+    }
+    @supports not (zoom: 1) {
+      #appRoot{transform:scale(0.9);transform-origin:top left;width:calc(100% / 0.9);}
     }
 
     a{color:var(--accent);text-decoration:none}
@@ -495,6 +503,7 @@
   </script>
 </head>
 <body>
+  <div id="appRoot">
   <header>
     <a class="brand" href="/" aria-label="TalkUSA home">
       <span class="brand__mark" aria-hidden="true"></span>
@@ -5539,5 +5548,6 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
 <noscript><a href="https://www.livechat.com/chat-with/18919976/" rel="nofollow">Chat with us</a>, powered by <a href="https://www.livechat.com/?welcome" rel="noopener nofollow" target="_blank">LiveChat</a></noscript>
 <!-- End of LiveChat code -->
 
+  </div>
 </body>
 </html>
