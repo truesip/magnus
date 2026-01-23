@@ -29,6 +29,7 @@ const MySQLStore = require('express-mysql-session')(session);
 const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 const { XMLParser } = require('fast-xml-parser');
+const { telecomCenterApiCall } = require('./lib/telecomCenter');
 
 // Optional dependency used to generate PDFs for AI physical mail without DOCX templates.
 // Loaded lazily to avoid crashing older deployments that haven't installed it yet.
@@ -1284,8 +1285,13 @@ async function initDb() {
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     user_id BIGINT NOT NULL,
     didww_trunk_id VARCHAR(64) NOT NULL,
+    kind VARCHAR(16) NOT NULL DEFAULT 'pstn',
     name VARCHAR(255) NOT NULL,
     dst VARCHAR(32) NULL,
+    sip_username VARCHAR(255) NULL,
+    sip_host VARCHAR(255) NULL,
+    sip_port INT NULL,
+    transport_protocol_id INT NULL,
     description TEXT NULL,
     capacity_limit INT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1294,6 +1300,29 @@ async function initDb() {
     KEY idx_user_id (user_id),
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
+
+  // Ensure user_trunks columns exist even if table was created on an older schema
+  for (const colDef of [
+    { name: 'kind', ddl: "ALTER TABLE user_trunks ADD COLUMN kind VARCHAR(16) NOT NULL DEFAULT 'pstn' AFTER didww_trunk_id" },
+    { name: 'sip_username', ddl: "ALTER TABLE user_trunks ADD COLUMN sip_username VARCHAR(255) NULL AFTER dst" },
+    { name: 'sip_host', ddl: "ALTER TABLE user_trunks ADD COLUMN sip_host VARCHAR(255) NULL AFTER sip_username" },
+    { name: 'sip_port', ddl: "ALTER TABLE user_trunks ADD COLUMN sip_port INT NULL AFTER sip_host" },
+    { name: 'transport_protocol_id', ddl: "ALTER TABLE user_trunks ADD COLUMN transport_protocol_id INT NULL AFTER sip_port" }
+  ]) {
+    try {
+      const [hasCol] = await pool.query(
+        'SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name=\'user_trunks\' AND column_name=? LIMIT 1',
+        [dbName, colDef.name]
+      );
+      if (!hasCol || !hasCol.length) {
+        await pool.query(colDef.ddl);
+        if (DEBUG) console.log('[schema] Added user_trunks column:', colDef.name);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] user_trunks column check failed:', colDef.name, e.message || e);
+    }
+  }
+
   // User DIDs table - stores purchased phone numbers per user
   await pool.query(`CREATE TABLE IF NOT EXISTS user_dids (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -1367,6 +1396,76 @@ async function initDb() {
       if (DEBUG) console.warn(`[schema] user_dids.${col.name} check failed`, e.message || e);
     }
   }
+
+  // Phone.System (telecom.center) mappings
+  await pool.query(`CREATE TABLE IF NOT EXISTS phonesystem_customers (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    tc_customer_id VARCHAR(64) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_user_tc_customer (user_id, tc_customer_id),
+    KEY idx_user_id (user_id),
+    CONSTRAINT fk_phonesystem_customers_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS phonesystem_incoming_trunks (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    tc_customer_id VARCHAR(64) NOT NULL,
+    tc_incoming_trunk_id VARCHAR(64) NOT NULL,
+    domain VARCHAR(255) NULL,
+    destination_field VARCHAR(64) NULL,
+    didww_forwarding_trunk_id VARCHAR(64) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_user_tc_incoming_trunk (user_id, tc_incoming_trunk_id),
+    KEY idx_user_customer (user_id, tc_customer_id),
+    CONSTRAINT fk_phonesystem_incoming_trunks_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS phonesystem_dids (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    tc_customer_id VARCHAR(64) NOT NULL,
+    tc_available_did_number_id VARCHAR(64) NOT NULL,
+    didww_did_id VARCHAR(64) NOT NULL,
+    did_number VARCHAR(32) NOT NULL,
+    enabled TINYINT(1) NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_user_didww_did (user_id, didww_did_id),
+    UNIQUE KEY uniq_user_tc_did (user_id, tc_available_did_number_id),
+    KEY idx_user_customer (user_id, tc_customer_id),
+    CONSTRAINT fk_phonesystem_dids_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS phonesystem_termination_gateways (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    tc_customer_id VARCHAR(64) NOT NULL,
+    tc_termination_gateway_id VARCHAR(64) NOT NULL,
+    host VARCHAR(255) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_user_tc_gateway (user_id, tc_termination_gateway_id),
+    KEY idx_user_customer (user_id, tc_customer_id),
+    CONSTRAINT fk_phonesystem_term_gateways_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS phonesystem_termination_routes (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    tc_customer_id VARCHAR(64) NOT NULL,
+    tc_termination_route_id VARCHAR(64) NOT NULL,
+    name VARCHAR(255) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_user_tc_route (user_id, tc_termination_route_id),
+    KEY idx_user_customer (user_id, tc_customer_id),
+    CONSTRAINT fk_phonesystem_term_routes_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
 
   // DID markup tracking table - stores last billed cycle per DID per user (for reporting/debugging)
   await pool.query(`CREATE TABLE IF NOT EXISTS user_did_markups (
@@ -18741,10 +18840,11 @@ app.patch('/api/me/didww/dids/:id/trunk', requireAuth, async (req, res) => {
       }
     }
 
-    // If assigning a trunk, verify the trunk is owned by the user and is PSTN (call forwarding).
+    // If assigning a trunk, verify the trunk is owned by the user.
+    // This supports PSTN forwarding trunks and SIP forwarding trunks (used by Phone.System).
     if (trunkId) {
       const [tRows] = await pool.execute(
-        'SELECT dst FROM user_trunks WHERE user_id = ? AND didww_trunk_id = ? LIMIT 1',
+        'SELECT dst, kind FROM user_trunks WHERE user_id = ? AND didww_trunk_id = ? LIMIT 1',
         [userId, trunkId]
       );
       const tRow = tRows && tRows[0] ? tRows[0] : null;
@@ -18752,9 +18852,13 @@ app.patch('/api/me/didww/dids/:id/trunk', requireAuth, async (req, res) => {
         return res.status(403).json({ success: false, message: 'You do not own this trunk' });
       }
 
+      const kind = String(tRow.kind || '').trim().toLowerCase();
       const dst = tRow.dst != null ? String(tRow.dst).trim() : '';
-      if (!dst) {
-        return res.status(400).json({ success: false, message: 'SIP trunks are not supported' });
+      const isSip = kind === 'sip';
+
+      // Backward-compatible safety: if kind is unknown and dst is empty, treat it as unsupported.
+      if (!dst && !isSip) {
+        return res.status(400).json({ success: false, message: 'Unsupported trunk type' });
       }
 
       // Balance gate: prevent enabling inbound call forwarding when credit is below threshold
@@ -18854,6 +18958,649 @@ app.delete('/api/me/didww/dids/:id', requireAuth, async (req, res) => {
   } catch (e) {
     if (DEBUG) console.error('[didww.did.cancel] error:', e.response?.data || e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to cancel DID' });
+  }
+});
+
+// ========== Phone.System (telecom.center) ==========
+const PHONE_SYSTEM_MAX_CUSTOMERS = Math.max(1, parseInt(process.env.PHONE_SYSTEM_MAX_CUSTOMERS || '5', 10) || 5);
+
+function tcId(val) {
+  return String(val || '').trim();
+}
+
+function toE164Plus(digits) {
+  const d = digitsOnly(digits);
+  if (!d) return '';
+  return d.startsWith('1') && d.length === 11 ? `+${d}` : `+${d}`;
+}
+
+function getMagnusSipHost() {
+  const direct = String(process.env.SIP_DOMAIN || '').trim();
+  if (direct) return direct;
+  const tls = String(process.env.MAGNUSBILLING_TLS_SERVERNAME || '').trim();
+  if (tls) return tls;
+  const hostHeader = String(process.env.MAGNUSBILLING_HOST_HEADER || '').trim();
+  if (hostHeader) return hostHeader;
+  const raw = String(process.env.MAGNUSBILLING_URL || '').trim();
+  if (!raw) return '';
+  try { return new URL(raw).hostname || ''; } catch { return ''; }
+}
+
+async function getPhoneSystemCustomerMapping({ userId, tcCustomerId }) {
+  const [rows] = await pool.execute(
+    'SELECT tc_customer_id, name, created_at, updated_at FROM phonesystem_customers WHERE user_id = ? AND tc_customer_id = ? LIMIT 1',
+    [userId, tcCustomerId]
+  );
+  return rows && rows[0] ? rows[0] : null;
+}
+
+async function getPhoneSystemIncomingTrunkMapping({ userId, tcCustomerId }) {
+  const [rows] = await pool.execute(
+    'SELECT id, tc_incoming_trunk_id, domain, destination_field, didww_forwarding_trunk_id FROM phonesystem_incoming_trunks WHERE user_id = ? AND tc_customer_id = ? ORDER BY id DESC LIMIT 1',
+    [userId, tcCustomerId]
+  );
+  return rows && rows[0] ? rows[0] : null;
+}
+
+async function ensureDidwwSipForwardingTrunk({ userId, trunkName, sipHost, sipPort = 5060, transportProtocolId = 2 }) {
+  if (!pool) throw new Error('Database not configured');
+
+  const host = String(sipHost || '').trim();
+  if (!host) throw new Error('Missing SIP host for forwarding trunk');
+
+  // Create DIDWW SIP forwarding trunk
+  const body = {
+    data: {
+      type: 'voice_in_trunks',
+      attributes: {
+        name: String(trunkName || 'Phone.System Forwarding').trim().slice(0, 255),
+        configuration: {
+          type: 'sip_configurations',
+          attributes: {
+            // DIDWW supports {DID} substitution. +{DID} routes in +E164 format.
+            username: '+{DID}',
+            host,
+            port: Number(sipPort) || 5060,
+            transport_protocol_id: Number(transportProtocolId) || 2
+          }
+        }
+      }
+    }
+  };
+
+  const data = await didwwApiCall({ method: 'POST', path: '/voice_in_trunks', body });
+  const created = data && data.data ? data.data : null;
+  const trunkId = created && created.id ? String(created.id) : '';
+  if (!trunkId) throw new Error('Failed to create DIDWW SIP trunk (missing id)');
+
+  // Persist trunk ownership locally (kind=sip). Keep dst NULL so legacy UI doesn't treat it as PSTN.
+  try {
+    await pool.execute(
+      'INSERT INTO user_trunks (user_id, didww_trunk_id, kind, name, dst, sip_username, sip_host, sip_port, transport_protocol_id, description, capacity_limit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+      'ON DUPLICATE KEY UPDATE kind=VALUES(kind), name=VALUES(name), sip_username=VALUES(sip_username), sip_host=VALUES(sip_host), sip_port=VALUES(sip_port), transport_protocol_id=VALUES(transport_protocol_id)',
+      [
+        userId,
+        trunkId,
+        'sip',
+        (created.attributes && created.attributes.name) ? String(created.attributes.name) : String(trunkName || 'Phone.System Forwarding'),
+        null,
+        '+{DID}',
+        host,
+        Number(sipPort) || 5060,
+        Number(transportProtocolId) || 2,
+        (created.attributes && created.attributes.description) ? String(created.attributes.description) : null,
+        (created.attributes && created.attributes.capacity_limit != null) ? Number(created.attributes.capacity_limit) : null
+      ]
+    );
+  } catch (e) {
+    if (DEBUG) console.warn('[phonesystem.didww.trunk] Failed to persist trunk ownership:', e.message || e);
+  }
+
+  return trunkId;
+}
+
+app.get('/api/me/phonesystem/customers', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = req.session.userId;
+
+    const [rows] = await pool.execute(
+      `SELECT 
+         c.tc_customer_id,
+         c.name,
+         c.created_at,
+         t.tc_incoming_trunk_id,
+         t.domain,
+         t.destination_field,
+         t.didww_forwarding_trunk_id,
+         (SELECT COUNT(*) FROM phonesystem_dids d WHERE d.user_id = c.user_id AND d.tc_customer_id = c.tc_customer_id) AS did_count
+       FROM phonesystem_customers c
+       LEFT JOIN phonesystem_incoming_trunks t
+         ON t.user_id = c.user_id AND t.tc_customer_id = c.tc_customer_id
+       WHERE c.user_id = ?
+       ORDER BY c.id DESC`,
+      [userId]
+    );
+
+    return res.json({ success: true, data: rows || [] });
+  } catch (e) {
+    if (DEBUG) console.error('[phonesystem.customers.list] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load Phone.System customers' });
+  }
+});
+
+app.post('/api/me/phonesystem/customers', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = req.session.userId;
+    const nameRaw = String(req.body?.name || '').trim();
+    const name = (nameRaw || `TalkUSA-${String(req.session.username || 'customer')}`)
+      .trim()
+      .slice(0, 255);
+
+    const [cntRows] = await pool.execute(
+      'SELECT COUNT(*) AS cnt FROM phonesystem_customers WHERE user_id = ?',
+      [userId]
+    );
+    const cnt = cntRows && cntRows[0] && cntRows[0].cnt != null ? Number(cntRows[0].cnt) : 0;
+    if (cnt >= PHONE_SYSTEM_MAX_CUSTOMERS) {
+      return res.status(409).json({
+        success: false,
+        message: `You can only create up to ${PHONE_SYSTEM_MAX_CUSTOMERS} Phone.System accounts.`
+      });
+    }
+
+    const payload = {
+      data: {
+        type: 'customers',
+        attributes: {
+          name,
+          // Allow operator-managed termination plus customer-managed if needed.
+          trm_mode: 'operator_customer'
+        }
+      }
+    };
+
+    const tc = await telecomCenterApiCall({ method: 'POST', path: '/customers', body: payload });
+    const tcIdVal = tcId(tc?.data?.id);
+    if (!tcIdVal) return res.status(502).json({ success: false, message: 'telecom.center customer create succeeded but returned no id' });
+
+    await pool.execute(
+      'INSERT INTO phonesystem_customers (user_id, tc_customer_id, name) VALUES (?, ?, ?)',
+      [userId, tcIdVal, name]
+    );
+
+    return res.json({ success: true, data: { tc_customer_id: tcIdVal, name } });
+  } catch (e) {
+    const msg = e?.message || 'Failed to create Phone.System customer';
+    const status = e?.status && Number.isFinite(Number(e.status)) ? Number(e.status) : 500;
+    if (DEBUG) console.error('[phonesystem.customers.create] error:', { status, msg, data: e?.data });
+    return res.status(status >= 400 && status < 600 ? status : 500).json({ success: false, message: msg });
+  }
+});
+
+app.delete('/api/me/phonesystem/customers/:customerId', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = req.session.userId;
+    const tcCustomerId = tcId(req.params.customerId);
+    if (!tcCustomerId) return res.status(400).json({ success: false, message: 'Missing customerId' });
+
+    const row = await getPhoneSystemCustomerMapping({ userId, tcCustomerId });
+    if (!row) return res.status(404).json({ success: false, message: 'Phone.System customer not found' });
+
+    // Only delete local mappings by default (safer). Remote deletion can be added later if desired.
+    await pool.execute('DELETE FROM phonesystem_customers WHERE user_id = ? AND tc_customer_id = ? LIMIT 1', [userId, tcCustomerId]);
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[phonesystem.customers.delete] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to delete Phone.System customer' });
+  }
+});
+
+app.get('/api/me/phonesystem/did-options', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = req.session.userId;
+    const [rows] = await pool.execute(
+      'SELECT didww_did_id, did_number FROM user_dids WHERE user_id = ? AND cancel_pending = 0 ORDER BY created_at DESC',
+      [userId]
+    );
+
+    const options = (rows || []).map(r => ({
+      didww_did_id: String(r.didww_did_id),
+      did_number: String(r.did_number)
+    }));
+
+    return res.json({ success: true, data: options });
+  } catch (e) {
+    if (DEBUG) console.error('[phonesystem.did-options] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load DID options' });
+  }
+});
+
+app.get('/api/me/phonesystem/sip-options', requireAuth, async (req, res) => {
+  try {
+    const httpsAgent = magnusBillingAgent;
+    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+    const idUser = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
+    if (!idUser) return res.json({ success: true, data: [] });
+
+    const rows = await fetchSipUsersForUserAll({ idUser, httpsAgent, hostHeader, maxPages: 10, pageSize: 500 });
+    const opts = (rows || []).map(r => ({
+      id: sipRowId(r),
+      username: String(r?.username || r?.name || r?.sipuser || '').trim()
+    })).filter(x => x.id && x.username);
+
+    return res.json({ success: true, data: opts });
+  } catch (e) {
+    if (DEBUG) console.warn('[phonesystem.sip-options] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load SIP options' });
+  }
+});
+
+app.post('/api/me/phonesystem/customers/:customerId/incoming-trunks', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = req.session.userId;
+    const tcCustomerId = tcId(req.params.customerId);
+    if (!tcCustomerId) return res.status(400).json({ success: false, message: 'Missing customerId' });
+
+    const customer = await getPhoneSystemCustomerMapping({ userId, tcCustomerId });
+    if (!customer) return res.status(404).json({ success: false, message: 'Phone.System customer not found' });
+
+    // Enforce one incoming trunk per customer for now
+    const existing = await getPhoneSystemIncomingTrunkMapping({ userId, tcCustomerId });
+    if (existing && existing.tc_incoming_trunk_id) {
+      // Ensure DIDWW SIP forwarding trunk exists
+      if (!existing.didww_forwarding_trunk_id && existing.domain) {
+        const didwwTrunkId = await ensureDidwwSipForwardingTrunk({
+          userId,
+          trunkName: `Phone.System ${customer.name}`,
+          sipHost: String(existing.domain)
+        });
+        await pool.execute(
+          'UPDATE phonesystem_incoming_trunks SET didww_forwarding_trunk_id = ? WHERE id = ? LIMIT 1',
+          [didwwTrunkId, existing.id]
+        );
+        existing.didww_forwarding_trunk_id = didwwTrunkId;
+      }
+
+      return res.json({ success: true, data: existing, reused: true });
+    }
+
+    const destinationField = 'RURI_USERPART';
+
+    const payload = {
+      data: {
+        type: 'incoming_trunks',
+        attributes: {
+          destination_field: destinationField
+        },
+        relationships: {
+          customer: { data: { type: 'customers', id: tcCustomerId } }
+        }
+      }
+    };
+
+    const tc = await telecomCenterApiCall({ method: 'POST', path: '/incoming_trunks', body: payload });
+    const tcIncomingId = tcId(tc?.data?.id);
+    const domain = String(tc?.data?.attributes?.domain || '').trim();
+    if (!tcIncomingId) return res.status(502).json({ success: false, message: 'telecom.center incoming trunk create returned no id' });
+
+    const didwwTrunkId = await ensureDidwwSipForwardingTrunk({
+      userId,
+      trunkName: `Phone.System ${customer.name}`,
+      sipHost: domain
+    });
+
+    await pool.execute(
+      'INSERT INTO phonesystem_incoming_trunks (user_id, tc_customer_id, tc_incoming_trunk_id, domain, destination_field, didww_forwarding_trunk_id) VALUES (?, ?, ?, ?, ?, ?)',
+      [userId, tcCustomerId, tcIncomingId, domain || null, destinationField, didwwTrunkId]
+    );
+
+    return res.json({
+      success: true,
+      data: {
+        tc_incoming_trunk_id: tcIncomingId,
+        domain: domain || null,
+        destination_field: destinationField,
+        didww_forwarding_trunk_id: didwwTrunkId
+      }
+    });
+  } catch (e) {
+    const msg = e?.message || 'Failed to create incoming trunk';
+    const status = e?.status && Number.isFinite(Number(e.status)) ? Number(e.status) : 500;
+    if (DEBUG) console.error('[phonesystem.incoming-trunks.create] error:', { status, msg, data: e?.data });
+    return res.status(status >= 400 && status < 600 ? status : 500).json({ success: false, message: msg });
+  }
+});
+
+app.post('/api/me/phonesystem/customers/:customerId/dids', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = req.session.userId;
+    const tcCustomerId = tcId(req.params.customerId);
+    if (!tcCustomerId) return res.status(400).json({ success: false, message: 'Missing customerId' });
+
+    const didIds = Array.isArray(req.body?.did_ids) ? req.body.did_ids.map(v => String(v || '').trim()).filter(Boolean) : [];
+    if (!didIds.length) return res.status(400).json({ success: false, message: 'did_ids is required' });
+
+    const customer = await getPhoneSystemCustomerMapping({ userId, tcCustomerId });
+    if (!customer) return res.status(404).json({ success: false, message: 'Phone.System customer not found' });
+
+    const incoming = await getPhoneSystemIncomingTrunkMapping({ userId, tcCustomerId });
+    if (!incoming || !incoming.domain) {
+      return res.status(409).json({ success: false, message: 'Create an incoming trunk first.' });
+    }
+
+    const forwardTrunkId = incoming.didww_forwarding_trunk_id
+      ? String(incoming.didww_forwarding_trunk_id)
+      : await ensureDidwwSipForwardingTrunk({
+          userId,
+          trunkName: `Phone.System ${customer.name}`,
+          sipHost: String(incoming.domain)
+        });
+
+    // Ensure phonesystem_incoming_trunks has the forwarding trunk id stored
+    if (!incoming.didww_forwarding_trunk_id) {
+      try {
+        await pool.execute(
+          'UPDATE phonesystem_incoming_trunks SET didww_forwarding_trunk_id = ? WHERE id = ? LIMIT 1',
+          [forwardTrunkId, incoming.id]
+        );
+      } catch {}
+    }
+
+    const created = [];
+    const errors = [];
+
+    for (const didwwDidId of didIds) {
+      try {
+        // Ensure DID belongs to user and is active
+        const [dRows] = await pool.execute(
+          'SELECT id, did_number, cancel_pending FROM user_dids WHERE user_id = ? AND didww_did_id = ? LIMIT 1',
+          [userId, didwwDidId]
+        );
+        const dRow = dRows && dRows[0] ? dRows[0] : null;
+        if (!dRow) throw new Error('You do not own this DID');
+        if (dRow.cancel_pending) throw new Error('This DID is being cancelled and cannot be assigned');
+
+        const didNumber = digitsOnly(dRow.did_number);
+        if (!didNumber) throw new Error('Invalid DID number');
+
+        // Prevent re-assigning the same DID to multiple customers
+        const [existingRows] = await pool.execute(
+          'SELECT tc_customer_id, tc_available_did_number_id FROM phonesystem_dids WHERE user_id = ? AND didww_did_id = ? LIMIT 1',
+          [userId, didwwDidId]
+        );
+        const existing = existingRows && existingRows[0] ? existingRows[0] : null;
+        if (existing) {
+          if (String(existing.tc_customer_id) !== tcCustomerId) {
+            throw new Error('This DID is already assigned to another Phone.System customer');
+          }
+        } else {
+          const externalId = parseInt(didNumber, 10);
+
+          const payload = {
+            data: {
+              type: 'available_did_numbers',
+              attributes: {
+                number: didNumber,
+                enabled: true,
+                external_id: Number.isFinite(externalId) ? externalId : undefined
+              },
+              relationships: {
+                customer: { data: { type: 'customers', id: tcCustomerId } }
+              }
+            }
+          };
+
+          // Remove undefined keys (JSON:API params must be strict)
+          if (payload.data.attributes.external_id === undefined) {
+            delete payload.data.attributes.external_id;
+          }
+
+          const tc = await telecomCenterApiCall({ method: 'POST', path: '/available_did_numbers', body: payload });
+          const tcDidId = tcId(tc?.data?.id);
+          if (!tcDidId) throw new Error('telecom.center DID create returned no id');
+
+          await pool.execute(
+            'INSERT INTO phonesystem_dids (user_id, tc_customer_id, tc_available_did_number_id, didww_did_id, did_number, enabled) VALUES (?, ?, ?, ?, ?, 1)',
+            [userId, tcCustomerId, tcDidId, didwwDidId, didNumber]
+          );
+
+          created.push({ didww_did_id: didwwDidId, did_number: didNumber, tc_available_did_number_id: tcDidId });
+        }
+
+        // Assign DIDWW forwarding trunk to the DID
+        const didwwBody = {
+          data: {
+            type: 'dids',
+            id: didwwDidId,
+            relationships: {
+              voice_in_trunk: { data: { type: 'voice_in_trunks', id: forwardTrunkId } }
+            }
+          }
+        };
+
+        // Balance gate (same logic as /api/me/didww/dids/:id/trunk)
+        let credit = null;
+        try {
+          const httpsAgent = magnusBillingAgent;
+          const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+          const magnusUserId = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
+          if (magnusUserId) {
+            const info = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+            credit = info && Number.isFinite(info.credit) ? Number(info.credit) : null;
+          }
+        } catch {
+          credit = null;
+        }
+
+        if (credit != null) {
+          if (credit < DIDWW_INBOUND_MIN_CREDIT) {
+            throw new Error('Insufficient balance to enable inbound forwarding. Please add funds and try again.');
+          }
+        } else if (DIDWW_INBOUND_BALANCE_FAIL_CLOSED) {
+          throw new Error('Unable to verify balance to enable inbound forwarding. Please try again later.');
+        }
+
+        await didwwApiCall({ method: 'PATCH', path: `/dids/${didwwDidId}`, body: didwwBody });
+
+        // Persist trunk assignment locally
+        try {
+          await pool.execute(
+            'UPDATE user_dids SET trunk_id = ? WHERE user_id = ? AND didww_did_id = ? LIMIT 1',
+            [forwardTrunkId, userId, didwwDidId]
+          );
+        } catch {}
+      } catch (err) {
+        errors.push({ didww_did_id: didwwDidId, message: err?.message || String(err) });
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        domain: String(incoming.domain),
+        sip_uri_example: `${toE164Plus('1' + '0'.repeat(10))}@${String(incoming.domain)}`,
+        didww_forwarding_trunk_id: forwardTrunkId,
+        created,
+        errors
+      }
+    });
+  } catch (e) {
+    const msg = e?.message || 'Failed to assign DIDs';
+    const status = e?.status && Number.isFinite(Number(e.status)) ? Number(e.status) : 500;
+    if (DEBUG) console.error('[phonesystem.dids.assign] error:', { status, msg, data: e?.data });
+    return res.status(status >= 400 && status < 600 ? status : 500).json({ success: false, message: msg });
+  }
+});
+
+app.post('/api/me/phonesystem/customers/:customerId/outbound', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = req.session.userId;
+    const tcCustomerId = tcId(req.params.customerId);
+    if (!tcCustomerId) return res.status(400).json({ success: false, message: 'Missing customerId' });
+
+    const sipId = String(req.body?.sip_id || '').trim();
+    if (!sipId) return res.status(400).json({ success: false, message: 'sip_id is required' });
+
+    const customer = await getPhoneSystemCustomerMapping({ userId, tcCustomerId });
+    if (!customer) return res.status(404).json({ success: false, message: 'Phone.System customer not found' });
+
+    // Idempotency: if we already have a gateway+route for this customer, return it.
+    const [gwRows] = await pool.execute(
+      'SELECT tc_termination_gateway_id, host FROM phonesystem_termination_gateways WHERE user_id = ? AND tc_customer_id = ? ORDER BY id DESC LIMIT 1',
+      [userId, tcCustomerId]
+    );
+    const [rtRows] = await pool.execute(
+      'SELECT tc_termination_route_id, name FROM phonesystem_termination_routes WHERE user_id = ? AND tc_customer_id = ? ORDER BY id DESC LIMIT 1',
+      [userId, tcCustomerId]
+    );
+    const existingGw = gwRows && gwRows[0] ? gwRows[0] : null;
+    const existingRt = rtRows && rtRows[0] ? rtRows[0] : null;
+    if (existingGw && existingRt) {
+      return res.json({
+        success: true,
+        reused: true,
+        data: {
+          tc_termination_gateway_id: String(existingGw.tc_termination_gateway_id),
+          tc_termination_route_id: String(existingRt.tc_termination_route_id),
+          host: existingGw.host || null,
+          name: existingRt.name || null
+        }
+      });
+    }
+
+    // Fetch SIP user details from MagnusBilling
+    const httpsAgent = magnusBillingAgent;
+    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+    const magnusUserId = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
+    if (!magnusUserId) return res.status(400).json({ success: false, message: 'MagnusBilling user id not found' });
+
+    const sipRows = await fetchSipUsersForUserAll({ magnusUserId, idUser: magnusUserId, httpsAgent, hostHeader, maxPages: 10, pageSize: 500 });
+    const selected = (sipRows || []).find(r => String(sipRowId(r) || '') === sipId);
+    if (!selected) return res.status(404).json({ success: false, message: 'SIP account not found' });
+
+    const sipUsername = String(selected?.username || selected?.name || selected?.sipuser || '').trim();
+    const sipPassword = String(selected?.secret || selected?.password || '').trim();
+    if (!sipUsername || !sipPassword) return res.status(400).json({ success: false, message: 'Selected SIP account is missing credentials' });
+
+    const sipHost = getMagnusSipHost();
+    if (!sipHost) return res.status(500).json({ success: false, message: 'SIP_DOMAIN (or MAGNUSBILLING_URL) not configured' });
+
+    const gwName = `TalkUSA-${sipUsername}`.slice(0, 255);
+    const gatewayPayload = {
+      data: {
+        type: 'termination_gateways',
+        attributes: {
+          operator: true,
+          active: true,
+          name: gwName,
+          host: sipHost,
+          port: 5060,
+          protocol: 'udp',
+          user: sipUsername,
+          pass: sipPassword
+        },
+        relationships: {
+          customer: { data: { type: 'customers', id: tcCustomerId } }
+        }
+      }
+    };
+
+    const gw = await telecomCenterApiCall({ method: 'POST', path: '/termination_gateways', body: gatewayPayload });
+    const tcGatewayId = tcId(gw?.data?.id);
+    if (!tcGatewayId) return res.status(502).json({ success: false, message: 'telecom.center termination gateway create returned no id' });
+
+    await pool.execute(
+      'INSERT INTO phonesystem_termination_gateways (user_id, tc_customer_id, tc_termination_gateway_id, host) VALUES (?, ?, ?, ?)',
+      [userId, tcCustomerId, tcGatewayId, sipHost]
+    );
+
+    const routeName = `Default route (${gwName})`.slice(0, 255);
+    const routePayload = {
+      data: {
+        type: 'termination_routes',
+        attributes: {
+          name: routeName,
+          regex: true,
+          regex_code: '.*'
+        },
+        relationships: {
+          customer: { data: { type: 'customers', id: tcCustomerId } },
+          gateway: { data: { type: 'termination_gateways', id: tcGatewayId } }
+        }
+      }
+    };
+
+    const rt = await telecomCenterApiCall({ method: 'POST', path: '/termination_routes', body: routePayload });
+    const tcRouteId = tcId(rt?.data?.id);
+    if (!tcRouteId) return res.status(502).json({ success: false, message: 'telecom.center termination route create returned no id' });
+
+    await pool.execute(
+      'INSERT INTO phonesystem_termination_routes (user_id, tc_customer_id, tc_termination_route_id, name) VALUES (?, ?, ?, ?)',
+      [userId, tcCustomerId, tcRouteId, routeName]
+    );
+
+    return res.json({
+      success: true,
+      data: {
+        tc_termination_gateway_id: tcGatewayId,
+        tc_termination_route_id: tcRouteId,
+        host: sipHost,
+        name: routeName
+      }
+    });
+  } catch (e) {
+    const msg = e?.message || 'Failed to configure outbound trunk';
+    const status = e?.status && Number.isFinite(Number(e.status)) ? Number(e.status) : 500;
+    if (DEBUG) console.error('[phonesystem.outbound] error:', { status, msg, data: e?.data });
+    return res.status(status >= 400 && status < 600 ? status : 500).json({ success: false, message: msg });
+  }
+});
+
+app.post('/api/me/phonesystem/customers/:customerId/session', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = req.session.userId;
+    const tcCustomerId = tcId(req.params.customerId);
+    if (!tcCustomerId) return res.status(400).json({ success: false, message: 'Missing customerId' });
+
+    const customer = await getPhoneSystemCustomerMapping({ userId, tcCustomerId });
+    if (!customer) return res.status(404).json({ success: false, message: 'Phone.System customer not found' });
+
+    const payload = {
+      data: {
+        type: 'sessions',
+        attributes: {
+          customer_id: tcCustomerId
+        }
+      }
+    };
+
+    const tc = await telecomCenterApiCall({ method: 'POST', path: '/sessions', body: payload });
+    const uri = String(tc?.data?.attributes?.uri || '').trim();
+    if (!uri) return res.status(502).json({ success: false, message: 'telecom.center session create returned no uri' });
+
+    return res.json({ success: true, data: { uri } });
+  } catch (e) {
+    const msg = e?.message || 'Failed to create phone.systems session';
+    const status = e?.status && Number.isFinite(Number(e.status)) ? Number(e.status) : 500;
+    if (DEBUG) console.error('[phonesystem.session] error:', { status, msg, data: e?.data });
+    return res.status(status >= 400 && status < 600 ? status : 500).json({ success: false, message: msg });
   }
 });
 
