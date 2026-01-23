@@ -18986,6 +18986,13 @@ function getMagnusSipHost() {
   try { return new URL(raw).hostname || ''; } catch { return ''; }
 }
 
+function genTcCustomerCreateId() {
+  // telecom.center Customer create requires a client-supplied id (numeric).
+  // Keep it within signed 32-bit range to be safe.
+  const n = Math.floor(1000000000 + Math.random() * 1000000000);
+  return String(n);
+}
+
 async function getPhoneSystemCustomerMapping({ userId, tcCustomerId }) {
   const [rows] = await pool.execute(
     'SELECT tc_customer_id, name, created_at, updated_at FROM phonesystem_customers WHERE user_id = ? AND tc_customer_id = ? LIMIT 1',
@@ -19112,18 +19119,37 @@ app.post('/api/me/phonesystem/customers', requireAuth, async (req, res) => {
       });
     }
 
-    const payload = {
-      data: {
-        type: 'customers',
-        attributes: {
-          name,
-          // Allow operator-managed termination plus customer-managed if needed.
-          trm_mode: 'operator_customer'
-        }
-      }
-    };
+    // telecom.center Customer create requires data.id (client-supplied).
+    let tc = null;
+    let lastErr = null;
 
-    const tc = await telecomCenterApiCall({ method: 'POST', path: '/customers', body: payload });
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const customerId = genTcCustomerCreateId();
+      const payload = {
+        data: {
+          type: 'customers',
+          id: customerId,
+          attributes: {
+            name,
+            // Allow operator-managed termination plus customer-managed if needed.
+            trm_mode: 'operator_customer'
+          }
+        }
+      };
+
+      try {
+        tc = await telecomCenterApiCall({ method: 'POST', path: '/customers', body: payload });
+        break;
+      } catch (err) {
+        lastErr = err;
+        const msg = String(err?.message || '').toLowerCase();
+        const canRetry = msg.includes('has already been taken') || msg.includes('already exists');
+        if (!canRetry) throw err;
+      }
+    }
+
+    if (!tc) throw lastErr || new Error('Failed to create telecom.center customer');
+
     const tcIdVal = tcId(tc?.data?.id);
     if (!tcIdVal) return res.status(502).json({ success: false, message: 'telecom.center customer create succeeded but returned no id' });
 
@@ -19501,18 +19527,16 @@ app.post('/api/me/phonesystem/customers/:customerId/outbound', requireAuth, asyn
     if (!sipHost) return res.status(500).json({ success: false, message: 'SIP_DOMAIN (or MAGNUSBILLING_URL) not configured' });
 
     const gwName = `TalkUSA-${sipUsername}`.slice(0, 255);
+    // telecom.center expects `authorization_name`/`authorization_password`.
     const gatewayPayload = {
       data: {
         type: 'termination_gateways',
         attributes: {
-          operator: true,
-          active: true,
           name: gwName,
           host: sipHost,
           port: 5060,
-          protocol: 'udp',
-          user: sipUsername,
-          pass: sipPassword
+          authorization_name: sipUsername,
+          authorization_password: sipPassword
         },
         relationships: {
           customer: { data: { type: 'customers', id: tcCustomerId } }
@@ -19534,9 +19558,7 @@ app.post('/api/me/phonesystem/customers/:customerId/outbound', requireAuth, asyn
       data: {
         type: 'termination_routes',
         attributes: {
-          name: routeName,
-          regex: true,
-          regex_code: '.*'
+          name: routeName
         },
         relationships: {
           customer: { data: { type: 'customers', id: tcCustomerId } },
@@ -19585,8 +19607,8 @@ app.post('/api/me/phonesystem/customers/:customerId/session', requireAuth, async
     const payload = {
       data: {
         type: 'sessions',
-        attributes: {
-          customer_id: tcCustomerId
+        relationships: {
+          customer: { data: { type: 'customers', id: tcCustomerId } }
         }
       }
     };
