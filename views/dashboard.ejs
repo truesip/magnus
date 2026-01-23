@@ -635,6 +635,96 @@
       </section>
       <section id="view-phonesystem" style="display:none">
         <h2>Phone.System</h2>
+        <div class="muted" style="margin-bottom:10px">
+          Create Phone.System customer accounts, auto-forward your TalkUSA numbers (DIDWW “My Numbers”) to phone.systems,
+          and set outbound termination using a Magnus SIP account.
+        </div>
+
+        <div id="phonesystem-status" class="muted" style="margin-bottom:10px"></div>
+
+        <div style="display:flex;gap:16px;flex-wrap:wrap">
+          <div style="flex:1;min-width:360px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.10);border-radius:16px;padding:12px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+              <h3 style="margin:0">Customers <span id="phonesystemCustomersCount" class="muted"></span></h3>
+              <div style="margin-left:auto"></div>
+              <button id="phonesystemRefreshBtn" class="btn--muted">Refresh</button>
+            </div>
+
+            <div class="toolbar">
+              <input type="text" id="phonesystemNewCustomerName" placeholder="Customer name (optional)" style="width:240px">
+              <button id="phonesystemCreateCustomerBtn" class="btn--primary">➕ Create</button>
+            </div>
+
+            <table id="phonesystem-customers-table" style="display:none;table-layout:fixed">
+              <thead><tr><th>Name</th><th>Customer ID</th><th>Incoming Domain</th><th>DIDs</th><th>Actions</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div id="phonesystem-customers-empty" class="muted">Loading…</div>
+          </div>
+
+          <div style="flex:1;min-width:360px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.10);border-radius:16px;padding:12px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+              <h3 style="margin:0">Provisioning</h3>
+              <div style="margin-left:auto"></div>
+              <button id="phonesystemOpenUiBtn" class="btn--success" disabled>Open phone.systems UI</button>
+            </div>
+
+            <div id="phonesystemSelectedWrap" class="muted" style="margin-bottom:10px">Select a customer to manage provisioning.</div>
+
+            <div id="phonesystemProvisioningForm" style="display:none">
+              <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+                <div style="flex:1;min-width:220px">
+                  <div class="muted" style="margin-bottom:4px">Selected customer</div>
+                  <div style="font-weight:800" id="phonesystemSelectedName">—</div>
+                  <div class="muted" id="phonesystemSelectedId">—</div>
+                </div>
+                <div style="flex:1;min-width:220px">
+                  <div class="muted" style="margin-bottom:4px">Incoming domain</div>
+                  <div style="font-weight:800" id="phonesystemSelectedDomain">—</div>
+                  <div class="muted" id="phonesystemSipUriHint" style="margin-top:4px"></div>
+                </div>
+              </div>
+
+              <div style="margin-bottom:12px">
+                <div class="toolbar">
+                  <button id="phonesystemCreateIncomingTrunkBtn" class="btn--primary">Create / Ensure Incoming Trunk</button>
+                  <span class="muted">Creates the phone.systems incoming trunk + DIDWW SIP forwarding trunk.</span>
+                </div>
+              </div>
+
+              <div style="display:flex;gap:16px;flex-wrap:wrap">
+                <div style="flex:1;min-width:260px">
+                  <div class="muted" style="margin-bottom:6px">Assign inbound DIDs (from My Numbers)</div>
+                  <select id="phonesystemDidSelect" multiple size="8" style="width:100%;box-sizing:border-box"></select>
+                  <div class="toolbar" style="margin-top:8px">
+                    <button id="phonesystemAssignDidsBtn" class="btn--primary">Assign Selected DIDs</button>
+                    <span class="muted">Tip: hold Ctrl (Windows) to multi-select.</span>
+                  </div>
+                  <div id="phonesystemDidAssignResult" class="muted" style="margin-top:6px"></div>
+                </div>
+
+                <div style="flex:1;min-width:260px">
+                  <div class="muted" style="margin-bottom:6px">Outbound termination (Magnus SIP account)</div>
+                  <select id="phonesystemSipSelect" style="width:100%;box-sizing:border-box">
+                    <option value="">Loading…</option>
+                  </select>
+                  <div class="toolbar" style="margin-top:8px">
+                    <button id="phonesystemConfigureOutboundBtn" class="btn--primary">Configure Outbound</button>
+                    <span class="muted">Uses the selected SIP username/password.</span>
+                  </div>
+                  <div class="muted" style="margin-top:10px">Caller ID selection is managed inside phone.systems UI.</div>
+                </div>
+              </div>
+
+              <div style="margin-top:14px;border-top:1px solid rgba(255,255,255,.10);padding-top:12px">
+                <div class="toolbar">
+                  <button id="phonesystemDeleteCustomerBtn" class="btn--danger">Delete local mapping</button>
+                  <span class="muted">This does not delete the customer in telecom.center.</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section id="view-trunk" style="display:none">
@@ -1287,7 +1377,7 @@
     tabs.sip.addEventListener('click',e=>{e.preventDefault();activate('sip');sipPage=0;loadSip();});
     tabs.trunk.addEventListener('click',e=>{e.preventDefault();activate('trunk');trunkPage=0;loadTrunks();});
     tabs.dialer.addEventListener('click',e=>{e.preventDefault();activate('dialer');});
-    tabs.phonesystem.addEventListener('click',e=>{e.preventDefault();activate('phonesystem');});
+    tabs.phonesystem.addEventListener('click',e=>{e.preventDefault();activate('phonesystem');openPhoneSystemTab();});
     tabs.billing.addEventListener('click',e=>{e.preventDefault();activate('billing');billingPage=0;loadBillingHistory();});
     tabs.buydid.addEventListener('click',e=>{e.preventDefault();activate('buydid');loadCountries();});
     tabs.mydids.addEventListener('click',e=>{e.preventDefault();activate('mydids');mydidsPage=0;loadMyDids();});
@@ -1301,6 +1391,583 @@
       if (payload && Array.isArray(payload.rows)) return payload.rows;
       if (Array.isArray(payload)) return payload;
       return [];
+    }
+
+    // ========== Phone.System ==========
+    let phonesystemUiInit = false;
+    let phonesystemCustomers = [];
+    let phonesystemSelectedCustomerId = '';
+    let phonesystemDidOptions = [];
+    let phonesystemSipOptions = [];
+
+    function setPhoneSystemStatus(msg, isError){
+      const el = $('#phonesystem-status');
+      if (!el) return;
+      el.textContent = msg || '';
+      el.style.color = isError ? '#b91c1c' : 'rgba(255,255,255,.60)';
+    }
+
+    function setPhoneSystemDidAssignResult(msg, isError){
+      const el = $('#phonesystemDidAssignResult');
+      if (!el) return;
+      el.textContent = msg || '';
+      el.style.color = isError ? '#b91c1c' : 'rgba(255,255,255,.60)';
+    }
+
+    function getSelectedPhoneSystemCustomer(){
+      const id = String(phonesystemSelectedCustomerId || '').trim();
+      if (!id) return null;
+      return (phonesystemCustomers || []).find(c => String(c.tc_customer_id || '') === id) || null;
+    }
+
+    async function psFetchJson(url, opts){
+      const r = await fetch(url, opts);
+      const j = await r.json().catch(() => null);
+      if (!r.ok || !j || j.success === false) {
+        const msg = j?.message || `Request failed (${r.status})`;
+        const e = new Error(msg);
+        e.status = r.status;
+        e.body = j;
+        throw e;
+      }
+      return j;
+    }
+
+    function renderPhoneSystemCustomers(){
+      const table = $('#phonesystem-customers-table');
+      const empty = $('#phonesystem-customers-empty');
+      const count = $('#phonesystemCustomersCount');
+      if (!table || !empty) return;
+
+      const rows = Array.isArray(phonesystemCustomers) ? phonesystemCustomers : [];
+      if (count) count.textContent = rows.length ? `(${rows.length})` : '';
+
+      const tbody = table.querySelector('tbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+
+      if (!rows.length) {
+        table.style.display = 'none';
+        empty.style.display = 'block';
+        empty.textContent = 'No Phone.System customers yet.';
+        return;
+      }
+
+      for (const c of rows) {
+        const name = String(c.name || '').trim() || '—';
+        const cid = String(c.tc_customer_id || '').trim();
+        const domain = String(c.domain || '').trim();
+        const didCount = (c.did_count != null && Number.isFinite(Number(c.did_count))) ? Number(c.did_count) : 0;
+
+        const tr = document.createElement('tr');
+        if (cid && phonesystemSelectedCustomerId && cid === phonesystemSelectedCustomerId) {
+          tr.style.background = 'rgba(79,70,229,.12)';
+        }
+
+        const tdName = document.createElement('td');
+        tdName.textContent = name;
+        tdName.style.overflowWrap = 'anywhere';
+        tr.appendChild(tdName);
+
+        const tdId = document.createElement('td');
+        tdId.textContent = cid || '—';
+        tdId.style.overflowWrap = 'anywhere';
+        tr.appendChild(tdId);
+
+        const tdDomain = document.createElement('td');
+        tdDomain.textContent = domain || '—';
+        tdDomain.style.overflowWrap = 'anywhere';
+        tr.appendChild(tdDomain);
+
+        const tdDids = document.createElement('td');
+        tdDids.textContent = String(didCount);
+        tr.appendChild(tdDids);
+
+        const tdActions = document.createElement('td');
+        tdActions.style.whiteSpace = 'nowrap';
+
+        const selectBtn = document.createElement('button');
+        selectBtn.className = 'btn--muted ps-select';
+        selectBtn.textContent = 'Select';
+        selectBtn.setAttribute('data-id', cid);
+        tdActions.appendChild(selectBtn);
+
+        const openBtn = document.createElement('button');
+        openBtn.className = 'btn--success ps-open-ui';
+        openBtn.textContent = 'Open UI';
+        openBtn.setAttribute('data-id', cid);
+        openBtn.style.marginLeft = '6px';
+        tdActions.appendChild(openBtn);
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'btn--danger ps-delete';
+        delBtn.textContent = 'Delete';
+        delBtn.setAttribute('data-id', cid);
+        delBtn.style.marginLeft = '6px';
+        tdActions.appendChild(delBtn);
+
+        tr.appendChild(tdActions);
+        tbody.appendChild(tr);
+      }
+
+      empty.style.display = 'none';
+      table.style.display = 'table';
+    }
+
+    function renderPhoneSystemSelected(){
+      const wrap = $('#phonesystemSelectedWrap');
+      const form = $('#phonesystemProvisioningForm');
+      const openBtn = $('#phonesystemOpenUiBtn');
+      const createTrunkBtn = $('#phonesystemCreateIncomingTrunkBtn');
+      const assignDidsBtn = $('#phonesystemAssignDidsBtn');
+      const outboundBtn = $('#phonesystemConfigureOutboundBtn');
+
+      const nameEl = $('#phonesystemSelectedName');
+      const idEl = $('#phonesystemSelectedId');
+      const domainEl = $('#phonesystemSelectedDomain');
+      const hintEl = $('#phonesystemSipUriHint');
+
+      const sel = getSelectedPhoneSystemCustomer();
+      if (!sel) {
+        if (wrap) wrap.style.display = 'block';
+        if (wrap) wrap.textContent = 'Select a customer to manage provisioning.';
+        if (form) form.style.display = 'none';
+        if (openBtn) openBtn.disabled = true;
+        if (createTrunkBtn) createTrunkBtn.disabled = true;
+        if (assignDidsBtn) assignDidsBtn.disabled = true;
+        if (outboundBtn) outboundBtn.disabled = true;
+        if (nameEl) nameEl.textContent = '—';
+        if (idEl) idEl.textContent = '—';
+        if (domainEl) domainEl.textContent = '—';
+        if (hintEl) hintEl.textContent = '';
+        return;
+      }
+
+      const cid = String(sel.tc_customer_id || '').trim();
+      const name = String(sel.name || '').trim();
+      const domain = String(sel.domain || '').trim();
+
+      if (wrap) wrap.style.display = 'none';
+      if (form) form.style.display = 'block';
+
+      if (nameEl) nameEl.textContent = name || `Customer ${cid}`;
+      if (idEl) idEl.textContent = cid ? `Customer ID: ${cid}` : 'Customer ID: —';
+      if (domainEl) domainEl.textContent = domain || '—';
+
+      if (hintEl) {
+        hintEl.textContent = domain
+          ? `Inbound forwarding target: +{DID}@${domain}`
+          : 'Create an incoming trunk to generate the domain.';
+      }
+
+      if (openBtn) openBtn.disabled = !cid;
+      if (createTrunkBtn) createTrunkBtn.disabled = !cid;
+      if (assignDidsBtn) assignDidsBtn.disabled = !cid || !domain;
+      if (outboundBtn) outboundBtn.disabled = !cid;
+    }
+
+    function renderPhoneSystemDidOptions(){
+      const sel = $('#phonesystemDidSelect');
+      if (!sel) return;
+
+      const prev = Array.from(sel.selectedOptions || []).map(o => String(o.value || '')).filter(Boolean);
+
+      sel.innerHTML = '';
+      const rows = Array.isArray(phonesystemDidOptions) ? phonesystemDidOptions : [];
+      if (!rows.length) {
+        const opt = new Option('No numbers found in My Numbers', '');
+        opt.disabled = true;
+        sel.appendChild(opt);
+        return;
+      }
+
+      for (const r of rows) {
+        const id = String(r.didww_did_id || '').trim();
+        const num = String(r.did_number || '').trim();
+        if (!id) continue;
+        const label = num || id;
+        const opt = new Option(label, id);
+        if (prev.includes(id)) opt.selected = true;
+        sel.appendChild(opt);
+      }
+    }
+
+    function renderPhoneSystemSipOptions(){
+      const sel = $('#phonesystemSipSelect');
+      if (!sel) return;
+
+      const prev = String(sel.value || '').trim();
+      sel.innerHTML = '';
+      sel.appendChild(new Option('Select SIP account…', ''));
+
+      const rows = Array.isArray(phonesystemSipOptions) ? phonesystemSipOptions : [];
+      for (const r of rows) {
+        const id = String(r.id || '').trim();
+        const username = String(r.username || '').trim();
+        if (!id) continue;
+        sel.appendChild(new Option(username || `SIP ${id}`, id));
+      }
+
+      const still = Array.from(sel.options || []).some(o => String(o.value) === prev);
+      sel.value = still ? prev : '';
+    }
+
+    async function loadPhoneSystemCustomers(){
+      const table = $('#phonesystem-customers-table');
+      const empty = $('#phonesystem-customers-empty');
+      if (empty) { empty.style.display = 'block'; empty.textContent = 'Loading…'; }
+      if (table) table.style.display = 'none';
+
+      try {
+        const j = await psFetchJson('/api/me/phonesystem/customers');
+        phonesystemCustomers = Array.isArray(j.data) ? j.data : [];
+        if (phonesystemSelectedCustomerId && !phonesystemCustomers.some(c => String(c.tc_customer_id || '') === String(phonesystemSelectedCustomerId))) {
+          phonesystemSelectedCustomerId = '';
+        }
+        renderPhoneSystemCustomers();
+        renderPhoneSystemSelected();
+      } catch (e) {
+        phonesystemCustomers = [];
+        renderPhoneSystemCustomers();
+        if (empty) {
+          empty.style.display = 'block';
+          empty.textContent = e?.message || 'Failed to load customers';
+        }
+      }
+    }
+
+    async function loadPhoneSystemDidOptions(){
+      const sel = $('#phonesystemDidSelect');
+      if (sel) {
+        sel.innerHTML = '';
+        const opt = new Option('Loading…', '');
+        opt.disabled = true;
+        sel.appendChild(opt);
+      }
+
+      try {
+        const j = await psFetchJson('/api/me/phonesystem/did-options');
+        phonesystemDidOptions = Array.isArray(j.data) ? j.data : [];
+        renderPhoneSystemDidOptions();
+      } catch (e) {
+        phonesystemDidOptions = [];
+        renderPhoneSystemDidOptions();
+      }
+    }
+
+    async function loadPhoneSystemSipOptions(){
+      const sel = $('#phonesystemSipSelect');
+      if (sel) {
+        sel.innerHTML = '';
+        sel.appendChild(new Option('Loading…', ''));
+      }
+
+      try {
+        const j = await psFetchJson('/api/me/phonesystem/sip-options');
+        phonesystemSipOptions = Array.isArray(j.data) ? j.data : [];
+        renderPhoneSystemSipOptions();
+      } catch (e) {
+        phonesystemSipOptions = [];
+        renderPhoneSystemSipOptions();
+      }
+    }
+
+    async function createPhoneSystemCustomer(){
+      const btn = $('#phonesystemCreateCustomerBtn');
+      const input = $('#phonesystemNewCustomerName');
+      const name = input ? String(input.value || '').trim() : '';
+
+      if (btn) btn.disabled = true;
+      setPhoneSystemStatus('Creating customer…', false);
+
+      try {
+        await psFetchJson('/api/me/phonesystem/customers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name })
+        });
+
+        if (input) input.value = '';
+        setPhoneSystemStatus('Customer created.', false);
+        await loadPhoneSystemCustomers();
+        showToast('Phone.System customer created.');
+      } catch (e) {
+        setPhoneSystemStatus(e?.message || 'Failed to create customer', true);
+        showToast(e?.message || 'Failed to create customer', 'error');
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function ensurePhoneSystemIncomingTrunk(customerId){
+      const btn = $('#phonesystemCreateIncomingTrunkBtn');
+      const id = String(customerId || phonesystemSelectedCustomerId || '').trim();
+      if (!id) return;
+
+      if (btn) btn.disabled = true;
+      setPhoneSystemStatus('Creating incoming trunk…', false);
+
+      try {
+        const j = await psFetchJson(`/api/me/phonesystem/customers/${encodeURIComponent(id)}/incoming-trunks`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+
+        const domain = String(j?.data?.domain || '').trim();
+        setPhoneSystemStatus(domain ? `Incoming trunk ready. Domain: ${domain}` : 'Incoming trunk ready.', false);
+        showToast('Incoming trunk created/ensured.');
+        await loadPhoneSystemCustomers();
+      } catch (e) {
+        setPhoneSystemStatus(e?.message || 'Failed to create incoming trunk', true);
+        showToast(e?.message || 'Failed to create incoming trunk', 'error');
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    function getSelectValues(sel){
+      if (!sel) return [];
+      return Array.from(sel.selectedOptions || []).map(o => String(o.value || '').trim()).filter(Boolean);
+    }
+
+    async function assignPhoneSystemDids(){
+      const btn = $('#phonesystemAssignDidsBtn');
+      const selDid = $('#phonesystemDidSelect');
+      const id = String(phonesystemSelectedCustomerId || '').trim();
+      const didIds = getSelectValues(selDid);
+      if (!id) return;
+      if (!didIds.length) {
+        setPhoneSystemDidAssignResult('Select at least one DID to assign.', true);
+        return;
+      }
+
+      if (btn) btn.disabled = true;
+      setPhoneSystemStatus('Assigning DIDs…', false);
+      setPhoneSystemDidAssignResult('', false);
+
+      try {
+        const j = await psFetchJson(`/api/me/phonesystem/customers/${encodeURIComponent(id)}/dids`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ did_ids: didIds })
+        });
+
+        const created = Array.isArray(j?.data?.created) ? j.data.created : [];
+        const errors = Array.isArray(j?.data?.errors) ? j.data.errors : [];
+
+        const parts = [];
+        if (created.length) parts.push(`Assigned ${created.length} DID(s).`);
+        if (errors.length) parts.push(`${errors.length} error(s).`);
+        if (!parts.length) parts.push('Done.');
+
+        setPhoneSystemStatus('DID assignment complete.', false);
+        setPhoneSystemDidAssignResult(parts.join(' '), errors.length > 0);
+
+        if (errors.length) {
+          showToast('Some DIDs could not be assigned. See details.', 'error');
+        } else {
+          showToast('DIDs assigned and forwarding updated.');
+        }
+
+        await loadPhoneSystemCustomers();
+      } catch (e) {
+        setPhoneSystemStatus(e?.message || 'Failed to assign DIDs', true);
+        setPhoneSystemDidAssignResult(e?.message || 'Failed to assign DIDs', true);
+        showToast(e?.message || 'Failed to assign DIDs', 'error');
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function configurePhoneSystemOutbound(){
+      const btn = $('#phonesystemConfigureOutboundBtn');
+      const selSip = $('#phonesystemSipSelect');
+      const id = String(phonesystemSelectedCustomerId || '').trim();
+      const sipId = selSip ? String(selSip.value || '').trim() : '';
+      if (!id) return;
+      if (!sipId) {
+        setPhoneSystemStatus('Select a SIP account first.', true);
+        return;
+      }
+
+      if (btn) btn.disabled = true;
+      setPhoneSystemStatus('Configuring outbound…', false);
+
+      try {
+        await psFetchJson(`/api/me/phonesystem/customers/${encodeURIComponent(id)}/outbound`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sip_id: sipId })
+        });
+
+        setPhoneSystemStatus('Outbound configured.', false);
+        showToast('Outbound termination configured.');
+      } catch (e) {
+        setPhoneSystemStatus(e?.message || 'Failed to configure outbound', true);
+        showToast(e?.message || 'Failed to configure outbound', 'error');
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function openPhoneSystemUi(customerId){
+      const btn = $('#phonesystemOpenUiBtn');
+      const id = String(customerId || phonesystemSelectedCustomerId || '').trim();
+      if (!id) return;
+
+      if (btn) btn.disabled = true;
+      setPhoneSystemStatus('Creating session…', false);
+
+      try {
+        const j = await psFetchJson(`/api/me/phonesystem/customers/${encodeURIComponent(id)}/session`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+
+        const uri = String(j?.data?.uri || '').trim();
+        if (!uri) throw new Error('No session URL returned');
+
+        showLinkToast('phone.systems session is ready.', 'Open phone.systems', uri, 'success');
+        try { window.open(uri, '_blank', 'noopener'); } catch {}
+        setPhoneSystemStatus('Session ready.', false);
+      } catch (e) {
+        setPhoneSystemStatus(e?.message || 'Failed to create session', true);
+        showToast(e?.message || 'Failed to create session', 'error');
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function deletePhoneSystemCustomer(customerId){
+      const btn = $('#phonesystemDeleteCustomerBtn');
+      const id = String(customerId || phonesystemSelectedCustomerId || '').trim();
+      if (!id) return;
+
+      if (!confirm('Delete the local Phone.System mapping? (This will not delete the telecom.center customer)')) return;
+
+      if (btn) btn.disabled = true;
+      setPhoneSystemStatus('Deleting mapping…', false);
+
+      try {
+        await psFetchJson(`/api/me/phonesystem/customers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (String(phonesystemSelectedCustomerId) === id) phonesystemSelectedCustomerId = '';
+        setPhoneSystemStatus('Deleted local mapping.', false);
+        showToast('Phone.System mapping deleted.');
+        await loadPhoneSystemCustomers();
+      } catch (e) {
+        setPhoneSystemStatus(e?.message || 'Failed to delete mapping', true);
+        showToast(e?.message || 'Failed to delete mapping', 'error');
+      } finally {
+        if (btn) btn.disabled = false;
+        renderPhoneSystemSelected();
+      }
+    }
+
+    function initPhoneSystemUI(){
+      if (phonesystemUiInit) return;
+      phonesystemUiInit = true;
+
+      const refreshBtn = $('#phonesystemRefreshBtn');
+      if (refreshBtn) refreshBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        openPhoneSystemTab();
+      });
+
+      const createBtn = $('#phonesystemCreateCustomerBtn');
+      if (createBtn) createBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        createPhoneSystemCustomer();
+      });
+
+      const nameInput = $('#phonesystemNewCustomerName');
+      if (nameInput) nameInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          createPhoneSystemCustomer();
+        }
+      });
+
+      const openBtn = $('#phonesystemOpenUiBtn');
+      if (openBtn) openBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        openPhoneSystemUi();
+      });
+
+      const trunkBtn = $('#phonesystemCreateIncomingTrunkBtn');
+      if (trunkBtn) trunkBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        ensurePhoneSystemIncomingTrunk();
+      });
+
+      const didBtn = $('#phonesystemAssignDidsBtn');
+      if (didBtn) didBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        assignPhoneSystemDids();
+      });
+
+      const outBtn = $('#phonesystemConfigureOutboundBtn');
+      if (outBtn) outBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        configurePhoneSystemOutbound();
+      });
+
+      const delBtn = $('#phonesystemDeleteCustomerBtn');
+      if (delBtn) delBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        deletePhoneSystemCustomer();
+      });
+
+      document.addEventListener('click', (ev) => {
+        const t = ev.target;
+        if (!t || !t.classList) return;
+
+        if (t.classList.contains('ps-select')) {
+          ev.preventDefault();
+          const id = String(t.getAttribute('data-id') || '').trim();
+          if (id) {
+            phonesystemSelectedCustomerId = id;
+            renderPhoneSystemCustomers();
+            renderPhoneSystemSelected();
+            setPhoneSystemDidAssignResult('', false);
+          }
+          return;
+        }
+
+        if (t.classList.contains('ps-open-ui')) {
+          ev.preventDefault();
+          const id = String(t.getAttribute('data-id') || '').trim();
+          if (id) openPhoneSystemUi(id);
+          return;
+        }
+
+        if (t.classList.contains('ps-delete')) {
+          ev.preventDefault();
+          const id = String(t.getAttribute('data-id') || '').trim();
+          if (id) deletePhoneSystemCustomer(id);
+          return;
+        }
+      });
+    }
+
+    async function openPhoneSystemTab(){
+      initPhoneSystemUI();
+      setPhoneSystemStatus('Loading…', false);
+      setPhoneSystemDidAssignResult('', false);
+
+      try {
+        await Promise.all([
+          loadPhoneSystemCustomers(),
+          loadPhoneSystemDidOptions(),
+          loadPhoneSystemSipOptions()
+        ]);
+        setPhoneSystemStatus('', false);
+      } catch {
+        // Individual loaders already handle their own errors
+      }
+
+      renderPhoneSystemSelected();
     }
 
     // ========== AI Agents ==========
