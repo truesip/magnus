@@ -622,42 +622,6 @@
       </section>
       <section id="view-dialer" style="display:none">
         <h2>Outbound Dialer</h2>
-        <div class="muted" style="margin-bottom:10px">Create a voice broadcast campaign (outbound calls).</div>
-
-        <div class="toolbar" style="align-items:flex-end">
-          <label>Campaign
-            <input type="text" id="dialerCampaignName" placeholder="My outbound campaign" style="width:220px">
-          </label>
-          <label>Plan ID
-            <input type="number" id="dialerPlanId" placeholder="(auto)" style="width:110px">
-          </label>
-          <label>Start Date <input type="date" id="dialerStartDate"></label>
-          <label>Expire Date <input type="date" id="dialerExpireDate"></label>
-          <label style="flex:1;min-width:220px">TTS Message
-            <input type="text" id="dialerTts" placeholder="Hello, this is a test broadcast" style="width:100%">
-          </label>
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-            <input type="checkbox" id="dialerAutoStart" checked> <span>Start campaign</span>
-          </label>
-          <button id="dialerCreateBtn" class="btn--primary">Create Campaign</button>
-        </div>
-
-        <div style="margin-top:10px">
-          <label style="display:block;margin-bottom:6px">Phone Numbers <span class="muted">(one per line or comma-separated)</span></label>
-          <textarea id="dialerNumbers" rows="7" placeholder="+15551234567\n+15557654321" style="width:100%;box-sizing:border-box"></textarea>
-          <div class="toolbar" style="margin-top:8px">
-            <input type="file" id="dialerNumbersFile" accept=".txt,text/plain">
-            <button id="dialerClearBtn" type="button" class="btn--muted">Clear</button>
-          </div>
-        </div>
-
-        <div style="margin-top:10px">
-          <label style="display:block;margin-bottom:6px">Advanced Campaign Fields (optional JSON)</label>
-          <textarea id="dialerExtra" rows="4" placeholder='{"max_retry":3,"retry_time":60}' style="width:100%;box-sizing:border-box"></textarea>
-          <div class="muted" style="margin-top:4px">Use this if your MagnusBilling install requires extra fields (e.g. trunk/audio/IVR). Leave blank for defaults.</div>
-        </div>
-
-        <pre id="dialerResult" class="muted" style="margin-top:10px;white-space:pre-wrap;max-height:280px;overflow:auto"></pre>
       </section>
 
       <section id="view-trunk" style="display:none">
@@ -1350,134 +1314,12 @@
     tabs.profile.addEventListener('click',e=>{e.preventDefault();activate('profile');loadProfile();});
     tabs.sip.addEventListener('click',e=>{e.preventDefault();activate('sip');sipPage=0;loadSip();});
     tabs.trunk.addEventListener('click',e=>{e.preventDefault();activate('trunk');trunkPage=0;loadTrunks();});
-    tabs.dialer.addEventListener('click',e=>{e.preventDefault();activate('dialer');initOutboundDialer();});
+    tabs.dialer.addEventListener('click',e=>{e.preventDefault();activate('dialer');});
     tabs.billing.addEventListener('click',e=>{e.preventDefault();activate('billing');billingPage=0;loadBillingHistory();});
     tabs.buydid.addEventListener('click',e=>{e.preventDefault();activate('buydid');loadCountries();});
     tabs.mydids.addEventListener('click',e=>{e.preventDefault();activate('mydids');mydidsPage=0;loadMyDids();});
     tabs.ai.addEventListener('click',e=>{e.preventDefault();activate('ai');activateAiSubtab('agents');loadAiAgents();loadAiNumbers();});
     tabs.cdr.addEventListener('click',e=>{e.preventDefault();activate('cdr');cdrPage=0;loadCdrDidOptions();loadCdr();});
-
-    // Outbound Dialer
-    function initOutboundDialer(){
-      // Intentionally do not auto-fill Start Date.
-      // Leaving it blank makes the backend use "now" (prevents unintentionally scheduling at 00:00:00).
-    }
-
-    async function createOutboundDialerCampaign(){
-      const btn = document.getElementById('dialerCreateBtn');
-      const resultEl = document.getElementById('dialerResult');
-      if (!btn) return;
-
-      const name = String(document.getElementById('dialerCampaignName')?.value || '').trim();
-      const numbers = String(document.getElementById('dialerNumbers')?.value || '').trim();
-      const tts = String(document.getElementById('dialerTts')?.value || '').trim();
-      const planId = String(document.getElementById('dialerPlanId')?.value || '').trim();
-      const startDate = String(document.getElementById('dialerStartDate')?.value || '').trim();
-      const expireDate = String(document.getElementById('dialerExpireDate')?.value || '').trim();
-      const autoStart = !!document.getElementById('dialerAutoStart')?.checked;
-      const extraRaw = String(document.getElementById('dialerExtra')?.value || '').trim();
-
-      if (resultEl) resultEl.textContent = '';
-
-      if (!numbers) {
-        showToast('Please enter at least one phone number.', 'error');
-        return;
-      }
-      if (startDate && expireDate && expireDate < startDate) {
-        showToast('Expire date must be on/after the start date.', 'error');
-        return;
-      }
-
-      let extra = null;
-      if (extraRaw) {
-        try {
-          extra = JSON.parse(extraRaw);
-        } catch {
-          showToast('Advanced campaign JSON is invalid.', 'error');
-          return;
-        }
-        if (!extra || typeof extra !== 'object' || Array.isArray(extra)) {
-          showToast('Advanced campaign JSON must be an object.', 'error');
-          return;
-        }
-      }
-
-      btn.disabled = true;
-      const old = btn.textContent;
-      btn.textContent = 'Creating...';
-
-      try {
-        const r = await fetch('/api/me/outbound-dialer/campaigns', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name,
-            planId,
-            numbers,
-            tts,
-            startDate,
-            expireDate,
-            start: autoStart ? 1 : 0,
-            extra
-          })
-        });
-        const j = await r.json().catch(()=>null);
-
-        if (!r.ok || !j || j.success === false) {
-          const msg = j?.message || 'Failed to create campaign';
-          showToast(msg, 'error');
-          if (resultEl) resultEl.textContent = j ? JSON.stringify(j, null, 2) : msg;
-          return;
-        }
-
-        showToast('Campaign created.');
-        if (resultEl) resultEl.textContent = JSON.stringify(j.data || j, null, 2);
-      } catch (e) {
-        showToast('Failed to create campaign', 'error');
-      } finally {
-        btn.disabled = false;
-        btn.textContent = old;
-      }
-    }
-
-    (function bindOutboundDialerHandlers(){
-      const btn = document.getElementById('dialerCreateBtn');
-      if (btn && !btn._bound) {
-        btn._bound = true;
-        btn.addEventListener('click', (e) => { e.preventDefault(); createOutboundDialerCampaign(); });
-      }
-
-      const clearBtn = document.getElementById('dialerClearBtn');
-      if (clearBtn && !clearBtn._bound) {
-        clearBtn._bound = true;
-        clearBtn.addEventListener('click', (e) => {
-          e.preventDefault();
-          const ta = document.getElementById('dialerNumbers');
-          const res = document.getElementById('dialerResult');
-          if (ta) ta.value = '';
-          if (res) res.textContent = '';
-        });
-      }
-
-      const fileInput = document.getElementById('dialerNumbersFile');
-      if (fileInput && !fileInput._bound) {
-        fileInput._bound = true;
-        fileInput.addEventListener('change', async () => {
-          const f = fileInput.files && fileInput.files[0];
-          if (!f) return;
-          try {
-            const txt = await f.text();
-            const ta = document.getElementById('dialerNumbers');
-            if (ta) ta.value = String(txt || '').trim();
-          } catch {
-            showToast('Failed to read numbers file', 'error');
-          } finally {
-            try { fileInput.value = ''; } catch {}
-          }
-        });
-      }
-    })();
-
     function grabRows(payload){
       const d = (payload && typeof payload === 'object') ? (payload.data ?? payload) : payload;
       if (Array.isArray(d)) return d;
