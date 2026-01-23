@@ -1004,53 +1004,13 @@
             <input type="radio" name="fundMethod" value="crypto"> Crypto
           </label>
           <label style="margin-left:8px;cursor:pointer">
-            <input type="radio" name="fundMethod" value="ach"> <%= (typeof achPaymentProvider !== 'undefined' && String(achPaymentProvider).toLowerCase() === 'increase') ? 'ACH (Bank Debit)' : 'ACH' %>
+            <input type="radio" name="fundMethod" value="ach"> ACH
           </label>
           <div style="margin-top:6px;font-size:12px;color:#6b7280">
             <div><strong>Card</strong>: instant credit after successful payment.</div>
             <div><strong>Crypto</strong>: credit is applied after network confirmations (may take several minutes).</div>
-            <% if (typeof achPaymentProvider !== 'undefined' && String(achPaymentProvider).toLowerCase() === 'increase') { %>
-              <div><strong>ACH debit</strong>: credit is applied after the bank confirmation window clears (typically 2 business days).</div>
-            <% } else { %>
-              <div><strong>ACH</strong>: credit is applied after invoice payment is confirmed (may take a few minutes).</div>
-            <% } %>
+            <div><strong>ACH</strong>: credit is applied after invoice payment is confirmed (may take a few minutes).</div>
           </div>
-
-          <% if (typeof achPaymentProvider !== 'undefined' && String(achPaymentProvider).toLowerCase() === 'increase') { %>
-            <div id="incBankBox" style="display:none;margin-top:10px;padding:10px;border:1px solid rgba(255,255,255,.12);border-radius:10px;background:rgba(0,0,0,.22)">
-              <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-                <div style="font-size:12px"><strong>Bank account</strong></div>
-                <div class="muted" style="font-size:12px;margin-left:auto">Required for ACH debit</div>
-              </div>
-
-              <div id="incAchBankForm">
-                <label style="display:block;margin-bottom:4px;font-size:12px">Routing number</label>
-                <input id="incRoutingNumber" type="text" inputmode="numeric" placeholder="9 digits" style="width:100%;box-sizing:border-box">
-                <label style="display:block;margin:8px 0 4px;font-size:12px">Account number</label>
-                <input id="incAccountNumber" type="password" inputmode="numeric" placeholder="Account number" style="width:100%;box-sizing:border-box">
-                <div class="muted" style="font-size:12px;margin-top:6px">
-                  For security, we don’t store your routing/account number. You’ll enter it each time you pay by ACH.
-                </div>
-              </div>
-
-              <div id="incAchConsentForm" style="margin-top:10px">
-                <div class="muted" style="font-size:12px;margin-bottom:8px"><strong>Authorization (required)</strong></div>
-                <div class="muted" style="font-size:12px;margin-bottom:8px">
-                  Billing address on file: <span id="incAchBillingAddress"></span>
-                </div>
-                <label style="display:flex;gap:8px;align-items:flex-start;font-size:12px;cursor:pointer;line-height:1.3">
-                  <input id="incAchAuthorizeCheckbox" type="checkbox" style="margin-top:3px">
-                  <span>
-                    I authorize TalkUSA to initiate a one-time ACH debit from my bank account ending in <span id="incAchLast4Inline">••••</span> for <span id="incAchAmountInline">$0.00</span>.
-                    By signing electronically, I agree to the ACH debit authorization terms.
-                  </span>
-                </label>
-                <label style="display:block;margin:10px 0 4px;font-size:12px">Type your full name to sign</label>
-                <input id="incAchSignerName" type="text" placeholder="Full legal name" style="width:100%;box-sizing:border-box">
-                <div class="muted" style="font-size:12px;margin-top:8px">A signed authorization PDF will be emailed to you and the administrator.</div>
-              </div>
-            </div>
-          <% } %>
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
           <button id="cancelFundBtn" class="btn--muted">Cancel</button>
@@ -1209,7 +1169,6 @@
     const CHECKOUT_MIN_AMOUNT = <%= typeof checkoutMinAmount !== 'undefined' ? checkoutMinAmount : 100 %>;
     const CHECKOUT_MAX_AMOUNT = <%= typeof checkoutMaxAmount !== 'undefined' ? checkoutMaxAmount : 500 %>;
     const SIP_DOMAIN = <%- JSON.stringify(typeof sipDomain !== 'undefined' ? sipDomain : '') %>;
-    const ACH_PAYMENT_PROVIDER = <%- JSON.stringify(typeof achPaymentProvider !== 'undefined' ? achPaymentProvider : 'billcom') %>;
     const $ = (s)=>document.querySelector(s);
     let meProfile = null;
     var billingPage = 0;
@@ -4881,88 +4840,15 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     $('#billingNext').addEventListener('click', () => { billingPage++; loadBillingHistory(); });
     
     // Add Fund Modal
-    const isIncreaseAch = String(ACH_PAYMENT_PROVIDER || '').toLowerCase() === 'increase';
-
     function getSelectedFundMethod(){
       const methodInput = document.querySelector('input[name="fundMethod"]:checked');
       return methodInput ? String(methodInput.value || '') : 'card';
-    }
-
-    function incDigitsOnly(val) {
-      return String(val || '').replace(/[^0-9]/g, '');
-    }
-
-    function renderIncAchUi(){
-      if (!isIncreaseAch) return;
-
-      const last4InlineEl = document.getElementById('incAchLast4Inline');
-      const amountInlineEl = document.getElementById('incAchAmountInline');
-      const billingAddrEl = document.getElementById('incAchBillingAddress');
-      const signerEl = document.getElementById('incAchSignerName');
-
-      // Update last4 preview from account input
-      try {
-        const acctDigits = incDigitsOnly(document.getElementById('incAccountNumber')?.value || '');
-        const last4 = acctDigits.length >= 4 ? acctDigits.slice(-4) : '';
-        if (last4InlineEl) last4InlineEl.textContent = last4 ? `••••${last4}` : '••••';
-      } catch {}
-
-      // Fill in amount preview (best-effort)
-      if (amountInlineEl) {
-        const amt = Number(document.getElementById('fundAmount')?.value || 0);
-        amountInlineEl.textContent = Number.isFinite(amt) && amt > 0 ? `$${amt.toFixed(2)}` : '$0.00';
-      }
-
-      // Fill billing address preview from profile
-      if (billingAddrEl) {
-        const p = meProfile || {};
-        const addrParts = [p.address1, [p.city, p.state].filter(Boolean).join(', '), p.postalCode, p.country]
-          .map(v => String(v || '').trim())
-          .filter(Boolean);
-        billingAddrEl.textContent = addrParts.length ? addrParts.join(' ') : '—';
-      }
-
-      // Prefill signer name if empty
-      if (signerEl) {
-        const existing = String(signerEl.value || '').trim();
-        if (!existing) {
-          const p = meProfile || {};
-          const name = String(p.name || '').trim();
-          const uname = String(p.username || '').trim();
-          signerEl.value = name || uname || '';
-        }
-      }
-    }
-
-    function updateAddFundsMethodUi(){
-      const box = document.getElementById('incBankBox');
-      if (!box) return;
-      const method = getSelectedFundMethod();
-      const show = isIncreaseAch && method === 'ach';
-      box.style.display = show ? 'block' : 'none';
-      if (show) renderIncAchUi();
-    }
-
-    // React to method selection changes
-    document.querySelectorAll('input[name="fundMethod"]').forEach(el => {
-      el.addEventListener('change', () => {
-        updateAddFundsMethodUi();
-      });
-    });
-
-    // Update previews as the user types
-    {
-      const amtEl = document.getElementById('fundAmount');
-      if (amtEl) amtEl.addEventListener('input', () => { try { renderIncAchUi(); } catch {} });
-      const acctEl = document.getElementById('incAccountNumber');
-      if (acctEl) acctEl.addEventListener('input', () => { try { renderIncAchUi(); } catch {} });
     }
 
     $('#addFundBtn').addEventListener('click', () => {
       $('#addFundModal').style.display = 'flex';
       $('#fundAmount').value = '';
       $('#fundAmount').focus();
-      updateAddFundsMethodUi();
     });
     
     $('#cancelFundBtn').addEventListener('click', () => {
@@ -4988,50 +4874,11 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
 
       const method = getSelectedFundMethod();
 
-      let authorization = null;
-      let achBank = null;
-
-      // If Increase ACH is selected, require bank details + explicit authorization.
-      if (method === 'ach' && isIncreaseAch) {
-        const routingRaw = String(document.getElementById('incRoutingNumber')?.value || '').trim();
-        const acctRaw = String(document.getElementById('incAccountNumber')?.value || '').trim();
-        const routing = routingRaw.replace(/[^0-9]/g, '');
-        const acct = acctRaw.replace(/[^0-9]/g, '');
-
-        if (!routing || routing.length !== 9) {
-          showToast('Routing number must be 9 digits.', 'error');
-          updateAddFundsMethodUi();
-          return;
-        }
-        if (!acct || acct.length < 4) {
-          showToast('Please enter your account number.', 'error');
-          updateAddFundsMethodUi();
-          return;
-        }
-
-        const agreed = !!document.getElementById('incAchAuthorizeCheckbox')?.checked;
-        const signerName = String(document.getElementById('incAchSignerName')?.value || '').trim();
-
-        if (!agreed) {
-          showToast('Please check the authorization box to proceed with ACH debit.', 'error');
-          updateAddFundsMethodUi();
-          return;
-        }
-        if (!signerName) {
-          showToast('Please type your full name to sign the ACH authorization.', 'error');
-          updateAddFundsMethodUi();
-          return;
-        }
-
-        authorization = { agreed: true, signer_name: signerName };
-        achBank = { routing_number: routing, account_number: acct };
-      }
-
       $('#confirmFundBtn').disabled = true;
       $('#confirmFundBtn').textContent = method === 'crypto'
         ? 'Redirecting to Crypto...'
         : method === 'ach'
-          ? (isIncreaseAch ? 'Starting ACH debit...' : 'Redirecting to ACH...')
+          ? 'Redirecting to ACH...'
           : 'Redirecting to Card...';
 
       try {
@@ -5042,8 +4889,6 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
             : '/api/me/card/checkout';
 
         const payload = { amount };
-        if (authorization) payload.authorization = authorization;
-        if (achBank) Object.assign(payload, achBank);
 
         const r = await fetch(endpoint, {
           method: 'POST',
@@ -5062,7 +4907,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           return;
         }
 
-        // Hosted checkout flow (Card / Crypto / Bill.com ACH)
+        // Hosted checkout flow (Card / Crypto / ACH)
         if (j.payment_url) {
           $('#addFundModal').style.display = 'none';
           const label = method === 'crypto'
@@ -5075,17 +4920,9 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           return;
         }
 
-        // Non-hosted flow (Increase ACH debit)
+        // Non-hosted flow (fallback)
         $('#addFundModal').style.display = 'none';
         showToast(j.message || 'Payment started. Your balance will update after confirmation.');
-
-        // If present, surface a download link to the signed ACH authorization PDF.
-        try {
-          const pdfUrl = (j && j.data && j.data.authorization_pdf_url) ? String(j.data.authorization_pdf_url) : '';
-          if (pdfUrl) {
-            showLinkToast('Your ACH authorization PDF is ready.', 'Download authorization PDF', pdfUrl, 'success');
-          }
-        } catch {}
 
         activate('billing');
         billingPage = 0;
