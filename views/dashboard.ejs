@@ -513,6 +513,7 @@
       <a href="#ai" id="tab-ai"><img class="nav-icon" src="/Icon/AI%20Agent.ico" alt="" aria-hidden="true"><span>AI Agent</span></a>
       <a href="#sip" id="tab-sip"><img class="nav-icon" src="/Icon/SIP%20Accounts.ico" alt="" aria-hidden="true"><span>SIP Account</span></a>
       <a href="#dialer" id="tab-dialer"><img class="nav-icon" src="/Icon/Call%20History.ico" alt="" aria-hidden="true"><span>Outbound Dialer</span></a>
+      <a href="#phonesystem" id="tab-phonesystem"><img class="nav-icon" src="/Icon/SIP%20Accounts.ico" alt="" aria-hidden="true"><span>Phone.System</span></a>
       <a href="#mydids" id="tab-mydids"><img class="nav-icon" src="/Icon/My%20Numbers.ico" alt="" aria-hidden="true"><span>My Numbers</span></a>
       <a href="#buydid" id="tab-buydid"><img class="nav-icon" src="/Icon/Buy%20Numbers.ico" alt="" aria-hidden="true"><span>Buy Numbers</span></a>
       <a href="#trunk" id="tab-trunk"><img class="nav-icon" src="/Icon/call-forwarding.ico" alt="" aria-hidden="true"><span>Call Forwarding</span></a>
@@ -622,6 +623,9 @@
       </section>
       <section id="view-dialer" style="display:none">
         <h2>Outbound Dialer</h2>
+      </section>
+      <section id="view-phonesystem" style="display:none">
+        <h2>Phone.System</h2>
       </section>
 
       <section id="view-trunk" style="display:none">
@@ -1173,8 +1177,8 @@
     let meProfile = null;
     var billingPage = 0;
     var billingPageSize = 20;
-    const tabs = {overview:$('#tab-overview'), profile:$('#tab-profile'), sip:$('#tab-sip'), trunk:$('#tab-trunk'), dialer:$('#tab-dialer'), billing:$('#tab-billing'), buydid:$('#tab-buydid'), mydids:$('#tab-mydids'), ai:$('#tab-ai'), cdr:$('#tab-cdr')};
-    const views = {overview:$('#view-overview'), profile:$('#view-profile'), sip:$('#view-sip'), trunk:$('#view-trunk'), dialer:$('#view-dialer'), billing:$('#view-billing'), buydid:$('#view-buydid'), mydids:$('#view-mydids'), ai:$('#view-ai'), cdr:$('#view-cdr')};
+    const tabs = {overview:$('#tab-overview'), profile:$('#tab-profile'), sip:$('#tab-sip'), trunk:$('#tab-trunk'), dialer:$('#tab-dialer'), phonesystem:$('#tab-phonesystem'), billing:$('#tab-billing'), buydid:$('#tab-buydid'), mydids:$('#tab-mydids'), ai:$('#tab-ai'), cdr:$('#tab-cdr')};
+    const views = {overview:$('#view-overview'), profile:$('#view-profile'), sip:$('#view-sip'), trunk:$('#view-trunk'), dialer:$('#view-dialer'), phonesystem:$('#view-phonesystem'), billing:$('#view-billing'), buydid:$('#view-buydid'), mydids:$('#view-mydids'), ai:$('#view-ai'), cdr:$('#view-cdr')};
     function activate(name){
       Object.keys(tabs).forEach(k=>{ tabs[k].classList.toggle('active',k===name); views[k].style.display = (k===name?'block':'none'); });
     }
@@ -1274,6 +1278,7 @@
     tabs.sip.addEventListener('click',e=>{e.preventDefault();activate('sip');sipPage=0;loadSip();});
     tabs.trunk.addEventListener('click',e=>{e.preventDefault();activate('trunk');trunkPage=0;loadTrunks();});
     tabs.dialer.addEventListener('click',e=>{e.preventDefault();activate('dialer');});
+    tabs.phonesystem.addEventListener('click',e=>{e.preventDefault();activate('phonesystem');});
     tabs.billing.addEventListener('click',e=>{e.preventDefault();activate('billing');billingPage=0;loadBillingHistory();});
     tabs.buydid.addEventListener('click',e=>{e.preventDefault();activate('buydid');loadCountries();});
     tabs.mydids.addEventListener('click',e=>{e.preventDefault();activate('mydids');mydidsPage=0;loadMyDids();});
