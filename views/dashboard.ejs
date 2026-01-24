@@ -347,6 +347,13 @@
     #ai-agents-table td:last-child button{display:block;width:100%;max-width:100%;margin:0 0 8px 0}
     #ai-agents-table td:last-child button:last-child{margin-bottom:0}
 
+    /* Phone.System: keep action buttons inside the customers table */
+    #phonesystem-customers-table{table-layout:fixed}
+    #phonesystem-customers-table th:last-child,
+    #phonesystem-customers-table td:last-child{width:240px}
+    #phonesystem-customers-table td:last-child{white-space:normal}
+    .ps-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+
     /* AI Numbers: don't let the assignment dropdown force horizontal overflow */
     #ai-numbers-table{table-layout:fixed}
     #ai-numbers-table td:nth-child(2) select{width:100% !important;min-width:0;max-width:100%}
@@ -636,8 +643,8 @@
       <section id="view-phonesystem" style="display:none">
         <h2>Phone.System</h2>
         <div class="muted" style="margin-bottom:10px">
-          Create Phone.System customer accounts, auto-forward your TalkUSA numbers (DIDWW “My Numbers”) to phone.systems,
-          and set outbound termination using a Magnus SIP account.
+          Create Phone.System customer accounts, auto-forward your TalkUSA numbers (“My Numbers”) to phone.systems,
+          and set outbound termination using your ("SIP account").
         </div>
 
         <div id="phonesystem-status" class="muted" style="margin-bottom:10px"></div>
@@ -1484,28 +1491,29 @@
         tr.appendChild(tdDids);
 
         const tdActions = document.createElement('td');
-        tdActions.style.whiteSpace = 'nowrap';
+
+        const actions = document.createElement('div');
+        actions.className = 'ps-actions';
 
         const selectBtn = document.createElement('button');
         selectBtn.className = 'btn--muted ps-select';
         selectBtn.textContent = 'Select';
         selectBtn.setAttribute('data-id', cid);
-        tdActions.appendChild(selectBtn);
+        actions.appendChild(selectBtn);
 
         const openBtn = document.createElement('button');
         openBtn.className = 'btn--success ps-open-ui';
         openBtn.textContent = 'Open UI';
         openBtn.setAttribute('data-id', cid);
-        openBtn.style.marginLeft = '6px';
-        tdActions.appendChild(openBtn);
+        actions.appendChild(openBtn);
 
         const delBtn = document.createElement('button');
         delBtn.className = 'btn--danger ps-delete';
         delBtn.textContent = 'Delete';
         delBtn.setAttribute('data-id', cid);
-        delBtn.style.marginLeft = '6px';
-        tdActions.appendChild(delBtn);
+        actions.appendChild(delBtn);
 
+        tdActions.appendChild(actions);
         tr.appendChild(tdActions);
         tbody.appendChild(tr);
       }

@@ -19262,11 +19262,13 @@ app.post('/api/me/phonesystem/customers/:customerId/incoming-trunks', requireAut
     }
 
     const destinationField = 'RURI_USERPART';
+    const trunkName = `TalkUSA Incoming (${String(customer.name || tcCustomerId).trim()})`.slice(0, 255);
 
     const payload = {
       data: {
         type: 'incoming_trunks',
         attributes: {
+          name: trunkName,
           destination_field: destinationField
         },
         relationships: {
