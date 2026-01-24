@@ -690,7 +690,7 @@
           </div>
 
           <div class="toolbar">
-            <input type="text" id="phonesystemNewCustomerName" placeholder="Customer name (optional)" style="width:240px">
+            <input type="text" id="phonesystemNewCustomerName" placeholder="Customer name" style="width:240px" required>
             <button id="phonesystemCreateCustomerBtn" class="btn--primary">➕ Create</button>
           </div>
 
@@ -1622,6 +1622,13 @@
       const btn = $('#phonesystemCreateCustomerBtn');
       const input = $('#phonesystemNewCustomerName');
       const name = input ? String(input.value || '').trim() : '';
+
+      if (!name) {
+        setPhoneSystemStatus('Customer name is required.', true);
+        showToast('Customer name is required.', 'error');
+        if (input && input.focus) input.focus();
+        return;
+      }
 
       if (btn) btn.disabled = true;
       setPhoneSystemStatus('Creating customer…', false);

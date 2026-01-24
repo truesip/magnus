@@ -19116,9 +19116,10 @@ app.post('/api/me/phonesystem/customers', requireAuth, async (req, res) => {
 
     const userId = req.session.userId;
     const nameRaw = String(req.body?.name || '').trim();
-    const name = (nameRaw || `TalkUSA-${String(req.session.username || 'customer')}`)
-      .trim()
-      .slice(0, 255);
+    if (!nameRaw) {
+      return res.status(400).json({ success: false, message: 'name is required' });
+    }
+    const name = nameRaw.slice(0, 255);
 
     const [cntRows] = await pool.execute(
       'SELECT COUNT(*) AS cnt FROM phonesystem_customers WHERE user_id = ?',
