@@ -347,12 +347,39 @@
     #ai-agents-table td:last-child button{display:block;width:100%;max-width:100%;margin:0 0 8px 0}
     #ai-agents-table td:last-child button:last-child{margin-bottom:0}
 
-    /* Phone.System: keep action buttons inside the customers table */
+    /* Phone.System */
     #phonesystem-customers-table{table-layout:fixed}
-    #phonesystem-customers-table th:last-child,
-    #phonesystem-customers-table td:last-child{width:240px}
-    #phonesystem-customers-table td:last-child{white-space:normal}
+    #phonesystem-customers-table th,
+    #phonesystem-customers-table td{overflow-wrap:anywhere}
+    #phonesystem-customers-table th:nth-child(1){width:150px}
+    #phonesystem-customers-table th:nth-child(2){width:170px}
+    #phonesystem-customers-table th:nth-child(3){width:240px}
+    #phonesystem-customers-table th:nth-child(4){width:60px}
+    #phonesystem-customers-table th:nth-child(5){width:240px}
+    #phonesystem-customers-table th:nth-child(6){width:210px}
+    #phonesystem-customers-table th:nth-child(7){width:170px}
+    #phonesystem-customers-table th:nth-child(8){width:220px}
+
     .ps-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+    .ps-domain-cell{display:flex;flex-direction:column;gap:6px}
+
+    .ps-dd summary{list-style:none;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+    .ps-dd summary::-webkit-details-marker{display:none}
+    .ps-dd summary{
+      padding:8px 10px;
+      border-radius:12px;
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(255,255,255,.06);
+      color: rgba(255,255,255,.82);
+      font-weight:800;
+      font-size:12px;
+      user-select:none;
+    }
+    .ps-dd summary:hover{background: rgba(255,255,255,.10);color:#fff}
+    .ps-dd[open] summary{background: rgba(34,211,238,.12);border-color: rgba(34,211,238,.35)}
+    .ps-dd-panel{margin-top:8px;display:flex;flex-direction:column;gap:8px}
+    .ps-dd-panel select{width:100%;box-sizing:border-box}
+    .ps-dd-panel button{width:100%}
 
     /* AI Numbers: don't let the assignment dropdown force horizontal overflow */
     #ai-numbers-table{table-layout:fixed}
@@ -649,88 +676,34 @@
 
         <div id="phonesystem-status" class="muted" style="margin-bottom:10px"></div>
 
-        <div style="display:flex;gap:16px;flex-wrap:wrap">
-          <div style="flex:1;min-width:360px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.10);border-radius:16px;padding:12px">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-              <h3 style="margin:0">Customers <span id="phonesystemCustomersCount" class="muted"></span></h3>
-              <div style="margin-left:auto"></div>
-              <button id="phonesystemRefreshBtn" class="btn--muted">Refresh</button>
-            </div>
-
-            <div class="toolbar">
-              <input type="text" id="phonesystemNewCustomerName" placeholder="Customer name (optional)" style="width:240px">
-              <button id="phonesystemCreateCustomerBtn" class="btn--primary">➕ Create</button>
-            </div>
-
-            <table id="phonesystem-customers-table" style="display:none;table-layout:fixed">
-              <thead><tr><th>Name</th><th>Customer ID</th><th>Incoming Domain</th><th>DIDs</th><th>Actions</th></tr></thead>
-              <tbody></tbody>
-            </table>
-            <div id="phonesystem-customers-empty" class="muted">Loading…</div>
+        <div style="background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.10);border-radius:16px;padding:12px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <h3 style="margin:0">Customers <span id="phonesystemCustomersCount" class="muted"></span></h3>
+            <div style="margin-left:auto"></div>
+            <button id="phonesystemRefreshBtn" class="btn--muted">Refresh</button>
           </div>
 
-          <div style="flex:1;min-width:360px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.10);border-radius:16px;padding:12px">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-              <h3 style="margin:0">Provisioning</h3>
-              <div style="margin-left:auto"></div>
-              <button id="phonesystemOpenUiBtn" class="btn--success" disabled>Open phone.systems UI</button>
-            </div>
-
-            <div id="phonesystemSelectedWrap" class="muted" style="margin-bottom:10px">Select a customer to manage provisioning.</div>
-
-            <div id="phonesystemProvisioningForm" style="display:none">
-              <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px">
-                <div style="flex:1;min-width:220px">
-                  <div class="muted" style="margin-bottom:4px">Selected customer</div>
-                  <div style="font-weight:800" id="phonesystemSelectedName">—</div>
-                  <div class="muted" id="phonesystemSelectedId">—</div>
-                </div>
-                <div style="flex:1;min-width:220px">
-                  <div class="muted" style="margin-bottom:4px">Incoming domain</div>
-                  <div style="font-weight:800" id="phonesystemSelectedDomain">—</div>
-                  <div class="muted" id="phonesystemSipUriHint" style="margin-top:4px"></div>
-                </div>
-              </div>
-
-              <div style="margin-bottom:12px">
-                <div class="toolbar">
-                  <button id="phonesystemCreateIncomingTrunkBtn" class="btn--primary">Create / Ensure Incoming Trunk</button>
-                  <span class="muted">Creates the phone.systems incoming trunk + DIDWW SIP forwarding trunk.</span>
-                </div>
-              </div>
-
-              <div style="display:flex;gap:16px;flex-wrap:wrap">
-                <div style="flex:1;min-width:260px">
-                  <div class="muted" style="margin-bottom:6px">Assign inbound DIDs (from My Numbers)</div>
-                  <select id="phonesystemDidSelect" multiple size="8" style="width:100%;box-sizing:border-box"></select>
-                  <div class="toolbar" style="margin-top:8px">
-                    <button id="phonesystemAssignDidsBtn" class="btn--primary">Assign Selected DIDs</button>
-                    <span class="muted">Tip: hold Ctrl (Windows) to multi-select.</span>
-                  </div>
-                  <div id="phonesystemDidAssignResult" class="muted" style="margin-top:6px"></div>
-                </div>
-
-                <div style="flex:1;min-width:260px">
-                  <div class="muted" style="margin-bottom:6px">Outbound termination (Magnus SIP account)</div>
-                  <select id="phonesystemSipSelect" style="width:100%;box-sizing:border-box">
-                    <option value="">Loading…</option>
-                  </select>
-                  <div class="toolbar" style="margin-top:8px">
-                    <button id="phonesystemConfigureOutboundBtn" class="btn--primary">Configure Outbound</button>
-                    <span class="muted">Uses the selected SIP username/password.</span>
-                  </div>
-                  <div class="muted" style="margin-top:10px">Caller ID selection is managed inside phone.systems UI.</div>
-                </div>
-              </div>
-
-              <div style="margin-top:14px;border-top:1px solid rgba(255,255,255,.10);padding-top:12px">
-                <div class="toolbar">
-                  <button id="phonesystemDeleteCustomerBtn" class="btn--danger">Delete local mapping</button>
-                  <span class="muted">This does not delete the customer in telecom.center.</span>
-                </div>
-              </div>
-            </div>
+          <div class="toolbar">
+            <input type="text" id="phonesystemNewCustomerName" placeholder="Customer name (optional)" style="width:240px">
+            <button id="phonesystemCreateCustomerBtn" class="btn--primary">➕ Create</button>
           </div>
+
+          <table id="phonesystem-customers-table" style="display:none">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Customer ID</th>
+                <th>Incoming Domain</th>
+                <th>DIDs</th>
+                <th>Assign Selected DIDs</th>
+                <th>Configure Outbound</th>
+                <th>Delete local mapping</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div id="phonesystem-customers-empty" class="muted">Loading…</div>
         </div>
       </section>
 
@@ -1403,7 +1376,6 @@
     // ========== Phone.System ==========
     let phonesystemUiInit = false;
     let phonesystemCustomers = [];
-    let phonesystemSelectedCustomerId = '';
     let phonesystemDidOptions = [];
     let phonesystemSipOptions = [];
 
@@ -1412,19 +1384,6 @@
       if (!el) return;
       el.textContent = msg || '';
       el.style.color = isError ? '#b91c1c' : 'rgba(255,255,255,.60)';
-    }
-
-    function setPhoneSystemDidAssignResult(msg, isError){
-      const el = $('#phonesystemDidAssignResult');
-      if (!el) return;
-      el.textContent = msg || '';
-      el.style.color = isError ? '#b91c1c' : 'rgba(255,255,255,.60)';
-    }
-
-    function getSelectedPhoneSystemCustomer(){
-      const id = String(phonesystemSelectedCustomerId || '').trim();
-      if (!id) return null;
-      return (phonesystemCustomers || []).find(c => String(c.tc_customer_id || '') === id) || null;
     }
 
     async function psFetchJson(url, opts){
@@ -1438,6 +1397,47 @@
         throw e;
       }
       return j;
+    }
+
+    function getSelectValues(sel){
+      if (!sel) return [];
+      return Array.from(sel.selectedOptions || []).map(o => String(o.value || '').trim()).filter(Boolean);
+    }
+
+    function buildDidOptionsInto(selectEl){
+      if (!selectEl) return;
+      selectEl.innerHTML = '';
+      const rows = Array.isArray(phonesystemDidOptions) ? phonesystemDidOptions : [];
+      if (!rows.length) {
+        const opt = new Option('No numbers found in My Numbers', '');
+        opt.disabled = true;
+        selectEl.appendChild(opt);
+        selectEl.disabled = true;
+        return;
+      }
+      selectEl.disabled = false;
+      for (const r of rows) {
+        const id = String(r.didww_did_id || '').trim();
+        const num = String(r.did_number || '').trim();
+        if (!id) continue;
+        selectEl.appendChild(new Option(num || id, id));
+      }
+    }
+
+    function buildSipOptionsInto(selectEl){
+      if (!selectEl) return;
+      const prev = String(selectEl.value || '').trim();
+      selectEl.innerHTML = '';
+      selectEl.appendChild(new Option('Select SIP account…', ''));
+      const rows = Array.isArray(phonesystemSipOptions) ? phonesystemSipOptions : [];
+      for (const r of rows) {
+        const id = String(r.id || '').trim();
+        const username = String(r.username || '').trim();
+        if (!id) continue;
+        selectEl.appendChild(new Option(username || `SIP ${id}`, id));
+      }
+      const still = Array.from(selectEl.options || []).some(o => String(o.value) === prev);
+      selectEl.value = still ? prev : '';
     }
 
     function renderPhoneSystemCustomers(){
@@ -1467,39 +1467,103 @@
         const didCount = (c.did_count != null && Number.isFinite(Number(c.did_count))) ? Number(c.did_count) : 0;
 
         const tr = document.createElement('tr');
-        if (cid && phonesystemSelectedCustomerId && cid === phonesystemSelectedCustomerId) {
-          tr.style.background = 'rgba(79,70,229,.12)';
-        }
 
         const tdName = document.createElement('td');
         tdName.textContent = name;
-        tdName.style.overflowWrap = 'anywhere';
         tr.appendChild(tdName);
 
         const tdId = document.createElement('td');
         tdId.textContent = cid || '—';
-        tdId.style.overflowWrap = 'anywhere';
         tr.appendChild(tdId);
 
         const tdDomain = document.createElement('td');
-        tdDomain.textContent = domain || '—';
-        tdDomain.style.overflowWrap = 'anywhere';
+        const domainWrap = document.createElement('div');
+        domainWrap.className = 'ps-domain-cell';
+        const domainText = document.createElement('div');
+        domainText.textContent = domain || '—';
+        domainWrap.appendChild(domainText);
+        const trunkBtn = document.createElement('button');
+        trunkBtn.className = 'btn--primary ps-ensure-trunk';
+        trunkBtn.textContent = 'Create / Ensure Incoming Trunk';
+        trunkBtn.setAttribute('data-id', cid);
+        domainWrap.appendChild(trunkBtn);
+        tdDomain.appendChild(domainWrap);
         tr.appendChild(tdDomain);
 
         const tdDids = document.createElement('td');
         tdDids.textContent = String(didCount);
         tr.appendChild(tdDids);
 
-        const tdActions = document.createElement('td');
+        const tdAssign = document.createElement('td');
+        const ddAssign = document.createElement('details');
+        ddAssign.className = 'ps-dd';
+        const sumAssign = document.createElement('summary');
+        sumAssign.textContent = 'Assign Selected DIDs';
+        ddAssign.appendChild(sumAssign);
+        const panelAssign = document.createElement('div');
+        panelAssign.className = 'ps-dd-panel';
+        const didSelect = document.createElement('select');
+        didSelect.multiple = true;
+        didSelect.size = 6;
+        didSelect.className = 'ps-row-did-select';
+        didSelect.setAttribute('data-id', cid);
+        buildDidOptionsInto(didSelect);
+        panelAssign.appendChild(didSelect);
+        const assignBtn = document.createElement('button');
+        assignBtn.className = 'btn--primary ps-assign-dids';
+        assignBtn.textContent = 'Assign';
+        assignBtn.setAttribute('data-id', cid);
+        assignBtn.disabled = !domain;
+        panelAssign.appendChild(assignBtn);
+        const assignHint = document.createElement('div');
+        assignHint.className = 'muted';
+        assignHint.textContent = domain ? 'Hold Ctrl (Windows) to multi-select.' : 'Create an incoming trunk first.';
+        panelAssign.appendChild(assignHint);
+        ddAssign.appendChild(panelAssign);
+        tdAssign.appendChild(ddAssign);
+        tr.appendChild(tdAssign);
 
+        const tdOutbound = document.createElement('td');
+        const ddOut = document.createElement('details');
+        ddOut.className = 'ps-dd';
+        const sumOut = document.createElement('summary');
+        sumOut.textContent = 'Configure Outbound';
+        ddOut.appendChild(sumOut);
+        const panelOut = document.createElement('div');
+        panelOut.className = 'ps-dd-panel';
+        const sipSelect = document.createElement('select');
+        sipSelect.className = 'ps-row-sip-select';
+        sipSelect.setAttribute('data-id', cid);
+        buildSipOptionsInto(sipSelect);
+        panelOut.appendChild(sipSelect);
+        const outBtn = document.createElement('button');
+        outBtn.className = 'btn--primary ps-config-outbound';
+        outBtn.textContent = 'Configure';
+        outBtn.setAttribute('data-id', cid);
+        panelOut.appendChild(outBtn);
+        const outHint = document.createElement('div');
+        outHint.className = 'muted';
+        outHint.textContent = 'Caller ID selection is managed inside phone.systems UI.';
+        panelOut.appendChild(outHint);
+        ddOut.appendChild(panelOut);
+        tdOutbound.appendChild(ddOut);
+        tr.appendChild(tdOutbound);
+
+        const tdDeleteMapping = document.createElement('td');
+        const delMapBtn = document.createElement('button');
+        delMapBtn.className = 'btn--danger ps-delete-mapping';
+        delMapBtn.textContent = 'Delete local mapping';
+        delMapBtn.setAttribute('data-id', cid);
+        tdDeleteMapping.appendChild(delMapBtn);
+        const delHint = document.createElement('div');
+        delHint.className = 'muted';
+        delHint.textContent = 'Does not delete telecom.center customer.';
+        tdDeleteMapping.appendChild(delHint);
+        tr.appendChild(tdDeleteMapping);
+
+        const tdActions = document.createElement('td');
         const actions = document.createElement('div');
         actions.className = 'ps-actions';
-
-        const selectBtn = document.createElement('button');
-        selectBtn.className = 'btn--muted ps-select';
-        selectBtn.textContent = 'Select';
-        selectBtn.setAttribute('data-id', cid);
-        actions.appendChild(selectBtn);
 
         const openBtn = document.createElement('button');
         openBtn.className = 'btn--success ps-open-ui';
@@ -1515,109 +1579,12 @@
 
         tdActions.appendChild(actions);
         tr.appendChild(tdActions);
+
         tbody.appendChild(tr);
       }
 
       empty.style.display = 'none';
       table.style.display = 'table';
-    }
-
-    function renderPhoneSystemSelected(){
-      const wrap = $('#phonesystemSelectedWrap');
-      const form = $('#phonesystemProvisioningForm');
-      const openBtn = $('#phonesystemOpenUiBtn');
-      const createTrunkBtn = $('#phonesystemCreateIncomingTrunkBtn');
-      const assignDidsBtn = $('#phonesystemAssignDidsBtn');
-      const outboundBtn = $('#phonesystemConfigureOutboundBtn');
-
-      const nameEl = $('#phonesystemSelectedName');
-      const idEl = $('#phonesystemSelectedId');
-      const domainEl = $('#phonesystemSelectedDomain');
-      const hintEl = $('#phonesystemSipUriHint');
-
-      const sel = getSelectedPhoneSystemCustomer();
-      if (!sel) {
-        if (wrap) wrap.style.display = 'block';
-        if (wrap) wrap.textContent = 'Select a customer to manage provisioning.';
-        if (form) form.style.display = 'none';
-        if (openBtn) openBtn.disabled = true;
-        if (createTrunkBtn) createTrunkBtn.disabled = true;
-        if (assignDidsBtn) assignDidsBtn.disabled = true;
-        if (outboundBtn) outboundBtn.disabled = true;
-        if (nameEl) nameEl.textContent = '—';
-        if (idEl) idEl.textContent = '—';
-        if (domainEl) domainEl.textContent = '—';
-        if (hintEl) hintEl.textContent = '';
-        return;
-      }
-
-      const cid = String(sel.tc_customer_id || '').trim();
-      const name = String(sel.name || '').trim();
-      const domain = String(sel.domain || '').trim();
-
-      if (wrap) wrap.style.display = 'none';
-      if (form) form.style.display = 'block';
-
-      if (nameEl) nameEl.textContent = name || `Customer ${cid}`;
-      if (idEl) idEl.textContent = cid ? `Customer ID: ${cid}` : 'Customer ID: —';
-      if (domainEl) domainEl.textContent = domain || '—';
-
-      if (hintEl) {
-        hintEl.textContent = domain
-          ? `Inbound forwarding target: +{DID}@${domain}`
-          : 'Create an incoming trunk to generate the domain.';
-      }
-
-      if (openBtn) openBtn.disabled = !cid;
-      if (createTrunkBtn) createTrunkBtn.disabled = !cid;
-      if (assignDidsBtn) assignDidsBtn.disabled = !cid || !domain;
-      if (outboundBtn) outboundBtn.disabled = !cid;
-    }
-
-    function renderPhoneSystemDidOptions(){
-      const sel = $('#phonesystemDidSelect');
-      if (!sel) return;
-
-      const prev = Array.from(sel.selectedOptions || []).map(o => String(o.value || '')).filter(Boolean);
-
-      sel.innerHTML = '';
-      const rows = Array.isArray(phonesystemDidOptions) ? phonesystemDidOptions : [];
-      if (!rows.length) {
-        const opt = new Option('No numbers found in My Numbers', '');
-        opt.disabled = true;
-        sel.appendChild(opt);
-        return;
-      }
-
-      for (const r of rows) {
-        const id = String(r.didww_did_id || '').trim();
-        const num = String(r.did_number || '').trim();
-        if (!id) continue;
-        const label = num || id;
-        const opt = new Option(label, id);
-        if (prev.includes(id)) opt.selected = true;
-        sel.appendChild(opt);
-      }
-    }
-
-    function renderPhoneSystemSipOptions(){
-      const sel = $('#phonesystemSipSelect');
-      if (!sel) return;
-
-      const prev = String(sel.value || '').trim();
-      sel.innerHTML = '';
-      sel.appendChild(new Option('Select SIP account…', ''));
-
-      const rows = Array.isArray(phonesystemSipOptions) ? phonesystemSipOptions : [];
-      for (const r of rows) {
-        const id = String(r.id || '').trim();
-        const username = String(r.username || '').trim();
-        if (!id) continue;
-        sel.appendChild(new Option(username || `SIP ${id}`, id));
-      }
-
-      const still = Array.from(sel.options || []).some(o => String(o.value) === prev);
-      sel.value = still ? prev : '';
     }
 
     async function loadPhoneSystemCustomers(){
@@ -1629,11 +1596,7 @@
       try {
         const j = await psFetchJson('/api/me/phonesystem/customers');
         phonesystemCustomers = Array.isArray(j.data) ? j.data : [];
-        if (phonesystemSelectedCustomerId && !phonesystemCustomers.some(c => String(c.tc_customer_id || '') === String(phonesystemSelectedCustomerId))) {
-          phonesystemSelectedCustomerId = '';
-        }
         renderPhoneSystemCustomers();
-        renderPhoneSystemSelected();
       } catch (e) {
         phonesystemCustomers = [];
         renderPhoneSystemCustomers();
@@ -1645,38 +1608,20 @@
     }
 
     async function loadPhoneSystemDidOptions(){
-      const sel = $('#phonesystemDidSelect');
-      if (sel) {
-        sel.innerHTML = '';
-        const opt = new Option('Loading…', '');
-        opt.disabled = true;
-        sel.appendChild(opt);
-      }
-
       try {
         const j = await psFetchJson('/api/me/phonesystem/did-options');
         phonesystemDidOptions = Array.isArray(j.data) ? j.data : [];
-        renderPhoneSystemDidOptions();
-      } catch (e) {
+      } catch {
         phonesystemDidOptions = [];
-        renderPhoneSystemDidOptions();
       }
     }
 
     async function loadPhoneSystemSipOptions(){
-      const sel = $('#phonesystemSipSelect');
-      if (sel) {
-        sel.innerHTML = '';
-        sel.appendChild(new Option('Loading…', ''));
-      }
-
       try {
         const j = await psFetchJson('/api/me/phonesystem/sip-options');
         phonesystemSipOptions = Array.isArray(j.data) ? j.data : [];
-        renderPhoneSystemSipOptions();
-      } catch (e) {
+      } catch {
         phonesystemSipOptions = [];
-        renderPhoneSystemSipOptions();
       }
     }
 
@@ -1697,8 +1642,8 @@
 
         if (input) input.value = '';
         setPhoneSystemStatus('Customer created.', false);
-        await loadPhoneSystemCustomers();
         showToast('Phone.System customer created.');
+        await openPhoneSystemTab();
       } catch (e) {
         setPhoneSystemStatus(e?.message || 'Failed to create customer', true);
         showToast(e?.message || 'Failed to create customer', 'error');
@@ -1708,11 +1653,9 @@
     }
 
     async function ensurePhoneSystemIncomingTrunk(customerId){
-      const btn = $('#phonesystemCreateIncomingTrunkBtn');
-      const id = String(customerId || phonesystemSelectedCustomerId || '').trim();
+      const id = String(customerId || '').trim();
       if (!id) return;
 
-      if (btn) btn.disabled = true;
       setPhoneSystemStatus('Creating incoming trunk…', false);
 
       try {
@@ -1725,88 +1668,64 @@
         const domain = String(j?.data?.domain || '').trim();
         setPhoneSystemStatus(domain ? `Incoming trunk ready. Domain: ${domain}` : 'Incoming trunk ready.', false);
         showToast('Incoming trunk created/ensured.');
-        await loadPhoneSystemCustomers();
+        await openPhoneSystemTab();
       } catch (e) {
         setPhoneSystemStatus(e?.message || 'Failed to create incoming trunk', true);
         showToast(e?.message || 'Failed to create incoming trunk', 'error');
-      } finally {
-        if (btn) btn.disabled = false;
       }
     }
 
-    function getSelectValues(sel){
-      if (!sel) return [];
-      return Array.from(sel.selectedOptions || []).map(o => String(o.value || '').trim()).filter(Boolean);
-    }
-
-    async function assignPhoneSystemDids(){
-      const btn = $('#phonesystemAssignDidsBtn');
-      const selDid = $('#phonesystemDidSelect');
-      const id = String(phonesystemSelectedCustomerId || '').trim();
-      const didIds = getSelectValues(selDid);
+    async function assignPhoneSystemDids(customerId, didIds){
+      const id = String(customerId || '').trim();
       if (!id) return;
-      if (!didIds.length) {
-        setPhoneSystemDidAssignResult('Select at least one DID to assign.', true);
+      const list = Array.isArray(didIds) ? didIds : [];
+      if (!list.length) {
+        setPhoneSystemStatus('Select at least one DID to assign.', true);
         return;
       }
 
-      if (btn) btn.disabled = true;
       setPhoneSystemStatus('Assigning DIDs…', false);
-      setPhoneSystemDidAssignResult('', false);
 
       try {
         const j = await psFetchJson(`/api/me/phonesystem/customers/${encodeURIComponent(id)}/dids`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ did_ids: didIds })
+          body: JSON.stringify({ did_ids: list })
         });
 
         const created = Array.isArray(j?.data?.created) ? j.data.created : [];
         const errors = Array.isArray(j?.data?.errors) ? j.data.errors : [];
 
-        const parts = [];
-        if (created.length) parts.push(`Assigned ${created.length} DID(s).`);
-        if (errors.length) parts.push(`${errors.length} error(s).`);
-        if (!parts.length) parts.push('Done.');
-
-        setPhoneSystemStatus('DID assignment complete.', false);
-        setPhoneSystemDidAssignResult(parts.join(' '), errors.length > 0);
-
         if (errors.length) {
-          showToast('Some DIDs could not be assigned. See details.', 'error');
+          showToast(`Assigned ${created.length}. Errors: ${errors.length}.`, 'error');
         } else {
-          showToast('DIDs assigned and forwarding updated.');
+          showToast(`Assigned ${created.length} DID(s) and updated forwarding.`);
         }
 
-        await loadPhoneSystemCustomers();
+        setPhoneSystemStatus('DID assignment complete.', errors.length > 0);
+        await openPhoneSystemTab();
       } catch (e) {
         setPhoneSystemStatus(e?.message || 'Failed to assign DIDs', true);
-        setPhoneSystemDidAssignResult(e?.message || 'Failed to assign DIDs', true);
         showToast(e?.message || 'Failed to assign DIDs', 'error');
-      } finally {
-        if (btn) btn.disabled = false;
       }
     }
 
-    async function configurePhoneSystemOutbound(){
-      const btn = $('#phonesystemConfigureOutboundBtn');
-      const selSip = $('#phonesystemSipSelect');
-      const id = String(phonesystemSelectedCustomerId || '').trim();
-      const sipId = selSip ? String(selSip.value || '').trim() : '';
+    async function configurePhoneSystemOutbound(customerId, sipId){
+      const id = String(customerId || '').trim();
+      const sip = String(sipId || '').trim();
       if (!id) return;
-      if (!sipId) {
+      if (!sip) {
         setPhoneSystemStatus('Select a SIP account first.', true);
         return;
       }
 
-      if (btn) btn.disabled = true;
       setPhoneSystemStatus('Configuring outbound…', false);
 
       try {
         await psFetchJson(`/api/me/phonesystem/customers/${encodeURIComponent(id)}/outbound`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sip_id: sipId })
+          body: JSON.stringify({ sip_id: sip })
         });
 
         setPhoneSystemStatus('Outbound configured.', false);
@@ -1814,17 +1733,13 @@
       } catch (e) {
         setPhoneSystemStatus(e?.message || 'Failed to configure outbound', true);
         showToast(e?.message || 'Failed to configure outbound', 'error');
-      } finally {
-        if (btn) btn.disabled = false;
       }
     }
 
     async function openPhoneSystemUi(customerId){
-      const btn = $('#phonesystemOpenUiBtn');
-      const id = String(customerId || phonesystemSelectedCustomerId || '').trim();
+      const id = String(customerId || '').trim();
       if (!id) return;
 
-      if (btn) btn.disabled = true;
       setPhoneSystemStatus('Creating session…', false);
 
       try {
@@ -1843,33 +1758,25 @@
       } catch (e) {
         setPhoneSystemStatus(e?.message || 'Failed to create session', true);
         showToast(e?.message || 'Failed to create session', 'error');
-      } finally {
-        if (btn) btn.disabled = false;
       }
     }
 
-    async function deletePhoneSystemCustomer(customerId){
-      const btn = $('#phonesystemDeleteCustomerBtn');
-      const id = String(customerId || phonesystemSelectedCustomerId || '').trim();
+    async function deletePhoneSystemCustomerMapping(customerId){
+      const id = String(customerId || '').trim();
       if (!id) return;
 
       if (!confirm('Delete the local Phone.System mapping? (This will not delete the telecom.center customer)')) return;
 
-      if (btn) btn.disabled = true;
       setPhoneSystemStatus('Deleting mapping…', false);
 
       try {
         await psFetchJson(`/api/me/phonesystem/customers/${encodeURIComponent(id)}`, { method: 'DELETE' });
-        if (String(phonesystemSelectedCustomerId) === id) phonesystemSelectedCustomerId = '';
         setPhoneSystemStatus('Deleted local mapping.', false);
         showToast('Phone.System mapping deleted.');
-        await loadPhoneSystemCustomers();
+        await openPhoneSystemTab();
       } catch (e) {
         setPhoneSystemStatus(e?.message || 'Failed to delete mapping', true);
         showToast(e?.message || 'Failed to delete mapping', 'error');
-      } finally {
-        if (btn) btn.disabled = false;
-        renderPhoneSystemSelected();
       }
     }
 
@@ -1897,63 +1804,53 @@
         }
       });
 
-      const openBtn = $('#phonesystemOpenUiBtn');
-      if (openBtn) openBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        openPhoneSystemUi();
-      });
-
-      const trunkBtn = $('#phonesystemCreateIncomingTrunkBtn');
-      if (trunkBtn) trunkBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        ensurePhoneSystemIncomingTrunk();
-      });
-
-      const didBtn = $('#phonesystemAssignDidsBtn');
-      if (didBtn) didBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        assignPhoneSystemDids();
-      });
-
-      const outBtn = $('#phonesystemConfigureOutboundBtn');
-      if (outBtn) outBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        configurePhoneSystemOutbound();
-      });
-
-      const delBtn = $('#phonesystemDeleteCustomerBtn');
-      if (delBtn) delBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        deletePhoneSystemCustomer();
-      });
-
-      document.addEventListener('click', (ev) => {
+      document.addEventListener('click', async (ev) => {
         const t = ev.target;
         if (!t || !t.classList) return;
 
-        if (t.classList.contains('ps-select')) {
+        if (t.classList.contains('ps-ensure-trunk')) {
           ev.preventDefault();
           const id = String(t.getAttribute('data-id') || '').trim();
-          if (id) {
-            phonesystemSelectedCustomerId = id;
-            renderPhoneSystemCustomers();
-            renderPhoneSystemSelected();
-            setPhoneSystemDidAssignResult('', false);
-          }
+          t.disabled = true;
+          try { await ensurePhoneSystemIncomingTrunk(id); } finally { t.disabled = false; }
+          return;
+        }
+
+        if (t.classList.contains('ps-assign-dids')) {
+          ev.preventDefault();
+          const id = String(t.getAttribute('data-id') || '').trim();
+          const wrap = t.closest('.ps-dd') || t.parentElement;
+          const sel = wrap ? wrap.querySelector('select.ps-row-did-select') : null;
+          const didIds = getSelectValues(sel);
+          t.disabled = true;
+          try { await assignPhoneSystemDids(id, didIds); } finally { t.disabled = false; }
+          return;
+        }
+
+        if (t.classList.contains('ps-config-outbound')) {
+          ev.preventDefault();
+          const id = String(t.getAttribute('data-id') || '').trim();
+          const wrap = t.closest('.ps-dd') || t.parentElement;
+          const sel = wrap ? wrap.querySelector('select.ps-row-sip-select') : null;
+          const sipId = sel ? String(sel.value || '').trim() : '';
+          t.disabled = true;
+          try { await configurePhoneSystemOutbound(id, sipId); } finally { t.disabled = false; }
           return;
         }
 
         if (t.classList.contains('ps-open-ui')) {
           ev.preventDefault();
           const id = String(t.getAttribute('data-id') || '').trim();
-          if (id) openPhoneSystemUi(id);
+          t.disabled = true;
+          try { await openPhoneSystemUi(id); } finally { t.disabled = false; }
           return;
         }
 
-        if (t.classList.contains('ps-delete')) {
+        if (t.classList.contains('ps-delete-mapping') || t.classList.contains('ps-delete')) {
           ev.preventDefault();
           const id = String(t.getAttribute('data-id') || '').trim();
-          if (id) deletePhoneSystemCustomer(id);
+          t.disabled = true;
+          try { await deletePhoneSystemCustomerMapping(id); } finally { t.disabled = false; }
           return;
         }
       });
@@ -1962,20 +1859,16 @@
     async function openPhoneSystemTab(){
       initPhoneSystemUI();
       setPhoneSystemStatus('Loading…', false);
-      setPhoneSystemDidAssignResult('', false);
 
-      try {
-        await Promise.all([
-          loadPhoneSystemCustomers(),
-          loadPhoneSystemDidOptions(),
-          loadPhoneSystemSipOptions()
-        ]);
-        setPhoneSystemStatus('', false);
-      } catch {
-        // Individual loaders already handle their own errors
-      }
+      await Promise.all([
+        loadPhoneSystemDidOptions(),
+        loadPhoneSystemSipOptions(),
+        loadPhoneSystemCustomers()
+      ]);
 
-      renderPhoneSystemSelected();
+      // Customers depend on did/sip options for per-row selects.
+      renderPhoneSystemCustomers();
+      setPhoneSystemStatus('', false);
     }
 
     // ========== AI Agents ==========
