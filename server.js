@@ -19009,6 +19009,19 @@ async function getPhoneSystemIncomingTrunkMapping({ userId, tcCustomerId }) {
   return rows && rows[0] ? rows[0] : null;
 }
 
+async function tcDeleteIgnoreNotFound(path) {
+  const rel = String(path || '').trim();
+  if (!rel) return { ok: true, deleted: false };
+  try {
+    await telecomCenterApiCall({ method: 'DELETE', path: rel });
+    return { ok: true, deleted: true };
+  } catch (e) {
+    const status = e?.status != null ? Number(e.status) : null;
+    if (status === 404) return { ok: true, deleted: false };
+    throw e;
+  }
+}
+
 async function ensureDidwwSipForwardingTrunk({ userId, trunkName, sipHost, sipPort = 5060, transportProtocolId = 2 }) {
   if (!pool) throw new Error('Database not configured');
 
@@ -19178,10 +19191,121 @@ app.delete('/api/me/phonesystem/customers/:customerId', requireAuth, async (req,
     const row = await getPhoneSystemCustomerMapping({ userId, tcCustomerId });
     if (!row) return res.status(404).json({ success: false, message: 'Phone.System customer not found' });
 
-    // Only delete local mappings by default (safer). Remote deletion can be added later if desired.
+    // Load local mappings so we can clean up remote resources and revert DIDWW forwarding.
+    const [didRows] = await pool.execute(
+      'SELECT tc_available_did_number_id, didww_did_id FROM phonesystem_dids WHERE user_id = ? AND tc_customer_id = ?',
+      [userId, tcCustomerId]
+    );
+    const [incomingRows] = await pool.execute(
+      'SELECT tc_incoming_trunk_id, didww_forwarding_trunk_id FROM phonesystem_incoming_trunks WHERE user_id = ? AND tc_customer_id = ?',
+      [userId, tcCustomerId]
+    );
+    const [gwRows] = await pool.execute(
+      'SELECT tc_termination_gateway_id FROM phonesystem_termination_gateways WHERE user_id = ? AND tc_customer_id = ?',
+      [userId, tcCustomerId]
+    );
+    const [rtRows] = await pool.execute(
+      'SELECT tc_termination_route_id FROM phonesystem_termination_routes WHERE user_id = ? AND tc_customer_id = ?',
+      [userId, tcCustomerId]
+    );
+
+    const didwwDidIds = Array.from(new Set((didRows || []).map(r => String(r.didww_did_id || '').trim()).filter(Boolean)));
+    const tcDidIds = Array.from(new Set((didRows || []).map(r => String(r.tc_available_did_number_id || '').trim()).filter(Boolean)));
+    const tcIncomingIds = Array.from(new Set((incomingRows || []).map(r => String(r.tc_incoming_trunk_id || '').trim()).filter(Boolean)));
+    const didwwTrunkIds = Array.from(new Set((incomingRows || []).map(r => String(r.didww_forwarding_trunk_id || '').trim()).filter(Boolean)));
+    const tcGatewayIds = Array.from(new Set((gwRows || []).map(r => String(r.tc_termination_gateway_id || '').trim()).filter(Boolean)));
+    const tcRouteIds = Array.from(new Set((rtRows || []).map(r => String(r.tc_termination_route_id || '').trim()).filter(Boolean)));
+
+    // Revert DIDWW forwarding for DIDs that still point to the forwarding trunk(s) we created.
+    // We only unassign if local user_dids.trunk_id matches one of didwwTrunkIds to avoid overriding manual changes.
+    let didwwUnassigned = 0;
+    let didwwUnassignFailed = 0;
+
+    if (didwwDidIds.length && didwwTrunkIds.length) {
+      try {
+        const didPh = didwwDidIds.map(() => '?').join(',');
+        const trunkPh = didwwTrunkIds.map(() => '?').join(',');
+        const sql = `SELECT didww_did_id FROM user_dids WHERE user_id = ? AND didww_did_id IN (${didPh}) AND trunk_id IN (${trunkPh})`;
+        const [toUnassignRows] = await pool.execute(sql, [userId, ...didwwDidIds, ...didwwTrunkIds]);
+        const toUnassign = Array.from(new Set((toUnassignRows || []).map(r => String(r.didww_did_id || '').trim()).filter(Boolean)));
+
+        for (const didId of toUnassign) {
+          try {
+            await didwwUnassignVoiceInTrunk(didId);
+            didwwUnassigned += 1;
+            try {
+              await pool.execute(
+                'UPDATE user_dids SET trunk_id = NULL WHERE user_id = ? AND didww_did_id = ? LIMIT 1',
+                [userId, didId]
+              );
+            } catch {}
+          } catch (e) {
+            didwwUnassignFailed += 1;
+            if (DEBUG) console.warn('[phonesystem.delete.didww] Unassign failed:', didId, e?.message || e);
+          }
+        }
+      } catch (e) {
+        if (DEBUG) console.warn('[phonesystem.delete.didww] Failed to compute DIDWW unassign set:', e?.message || e);
+      }
+    }
+
+    // Delete telecom.center resources (best-effort per resource). Order matters.
+    for (const id of tcRouteIds) {
+      try { await tcDeleteIgnoreNotFound(`/termination_routes/${encodeURIComponent(id)}`); } catch (e) {
+        if (DEBUG) console.warn('[phonesystem.delete.tc] termination_route delete failed:', id, e?.message || e);
+      }
+    }
+    for (const id of tcGatewayIds) {
+      try { await tcDeleteIgnoreNotFound(`/termination_gateways/${encodeURIComponent(id)}`); } catch (e) {
+        if (DEBUG) console.warn('[phonesystem.delete.tc] termination_gateway delete failed:', id, e?.message || e);
+      }
+    }
+    for (const id of tcDidIds) {
+      try { await tcDeleteIgnoreNotFound(`/available_did_numbers/${encodeURIComponent(id)}`); } catch (e) {
+        if (DEBUG) console.warn('[phonesystem.delete.tc] available_did_number delete failed:', id, e?.message || e);
+      }
+    }
+    for (const id of tcIncomingIds) {
+      try { await tcDeleteIgnoreNotFound(`/incoming_trunks/${encodeURIComponent(id)}`); } catch (e) {
+        if (DEBUG) console.warn('[phonesystem.delete.tc] incoming_trunk delete failed:', id, e?.message || e);
+      }
+    }
+
+    // Delete telecom.center customer (required). If this fails, keep local mapping so user can retry.
+    try {
+      await tcDeleteIgnoreNotFound(`/customers/${encodeURIComponent(tcCustomerId)}`);
+    } catch (e) {
+      const msg = e?.message || 'Failed to delete telecom.center customer';
+      const status = e?.status && Number.isFinite(Number(e.status)) ? Number(e.status) : 502;
+      if (DEBUG) console.error('[phonesystem.customers.delete.remote] error:', { status, msg, data: e?.data });
+      return res.status(status >= 400 && status < 600 ? status : 502).json({ success: false, message: msg });
+    }
+
+    // Local cleanup (mappings/settings)
+    try { await pool.execute('DELETE FROM phonesystem_dids WHERE user_id = ? AND tc_customer_id = ?', [userId, tcCustomerId]); } catch {}
+    try { await pool.execute('DELETE FROM phonesystem_incoming_trunks WHERE user_id = ? AND tc_customer_id = ?', [userId, tcCustomerId]); } catch {}
+    try { await pool.execute('DELETE FROM phonesystem_termination_routes WHERE user_id = ? AND tc_customer_id = ?', [userId, tcCustomerId]); } catch {}
+    try { await pool.execute('DELETE FROM phonesystem_termination_gateways WHERE user_id = ? AND tc_customer_id = ?', [userId, tcCustomerId]); } catch {}
+
+    // Delete forwarding trunks created for this customer from local ownership table (best-effort)
+    for (const trunkId of didwwTrunkIds) {
+      try {
+        await pool.execute(
+          'DELETE FROM user_trunks WHERE user_id = ? AND didww_trunk_id = ? LIMIT 1',
+          [userId, trunkId]
+        );
+      } catch {}
+    }
+
     await pool.execute('DELETE FROM phonesystem_customers WHERE user_id = ? AND tc_customer_id = ? LIMIT 1', [userId, tcCustomerId]);
 
-    return res.json({ success: true });
+    return res.json({
+      success: true,
+      data: {
+        didww_unassigned: didwwUnassigned,
+        didww_unassign_failed: didwwUnassignFailed
+      }
+    });
   } catch (e) {
     if (DEBUG) console.error('[phonesystem.customers.delete] error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to delete Phone.System customer' });

@@ -351,28 +351,34 @@
     #phonesystem-customers-table{table-layout:fixed}
     #phonesystem-customers-table th,
     #phonesystem-customers-table td{overflow-wrap:anywhere}
-    #phonesystem-customers-table th:nth-child(1){width:150px}
-    #phonesystem-customers-table th:nth-child(2){width:170px}
-    #phonesystem-customers-table th:nth-child(3){width:240px}
-    #phonesystem-customers-table th:nth-child(4){width:60px}
-    #phonesystem-customers-table th:nth-child(5){width:240px}
-    #phonesystem-customers-table th:nth-child(6){width:210px}
-    #phonesystem-customers-table th:nth-child(7){width:170px}
-    #phonesystem-customers-table th:nth-child(8){width:220px}
+    #phonesystem-customers-table th,
+    #phonesystem-customers-table td{padding:5px 6px;font-size:11px}
 
-    .ps-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
-    .ps-domain-cell{display:flex;flex-direction:column;gap:6px}
+    /* Use percentages so the table fits the card without forcing horizontal overflow. */
+    #phonesystem-customers-table th:nth-child(1){width:12%}
+    #phonesystem-customers-table th:nth-child(2){width:16%}
+    #phonesystem-customers-table th:nth-child(3){width:22%}
+    #phonesystem-customers-table th:nth-child(4){width:6%}
+    #phonesystem-customers-table th:nth-child(5){width:18%}
+    #phonesystem-customers-table th:nth-child(6){width:14%}
+    #phonesystem-customers-table th:nth-child(7){width:12%}
+
+    #phonesystem-customers-table button{padding:5px 7px;font-size:10px;border-radius:10px}
+    #phonesystem-customers-table select{padding:6px 8px;border-radius:10px;font-size:11px}
+
+    .ps-actions{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
+    .ps-domain-cell{display:flex;flex-direction:column;gap:4px}
 
     .ps-dd summary{list-style:none;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px}
     .ps-dd summary::-webkit-details-marker{display:none}
     .ps-dd summary{
-      padding:8px 10px;
-      border-radius:12px;
+      padding:6px 8px;
+      border-radius:10px;
       border:1px solid rgba(255,255,255,.14);
       background: rgba(255,255,255,.06);
       color: rgba(255,255,255,.82);
       font-weight:800;
-      font-size:12px;
+      font-size:11px;
       user-select:none;
     }
     .ps-dd summary:hover{background: rgba(255,255,255,.10);color:#fff}
@@ -692,12 +698,11 @@
             <thead>
               <tr>
                 <th>Name</th>
-                <th>Customer ID</th>
-                <th>Incoming Domain</th>
+                <th>ID</th>
+                <th>Domain</th>
                 <th>DIDs</th>
-                <th>Assign Selected DIDs</th>
-                <th>Configure Outbound</th>
-                <th>Delete local mapping</th>
+                <th>Assign</th>
+                <th>Outbound</th>
                 <th>Action</th>
               </tr>
             </thead>
@@ -1484,7 +1489,7 @@
         domainWrap.appendChild(domainText);
         const trunkBtn = document.createElement('button');
         trunkBtn.className = 'btn--primary ps-ensure-trunk';
-        trunkBtn.textContent = 'Create / Ensure Incoming Trunk';
+        trunkBtn.textContent = domain ? 'Ensure Trunk' : 'Create Trunk';
         trunkBtn.setAttribute('data-id', cid);
         domainWrap.appendChild(trunkBtn);
         tdDomain.appendChild(domainWrap);
@@ -1498,7 +1503,7 @@
         const ddAssign = document.createElement('details');
         ddAssign.className = 'ps-dd';
         const sumAssign = document.createElement('summary');
-        sumAssign.textContent = 'Assign Selected DIDs';
+        sumAssign.textContent = 'Assign DIDs';
         ddAssign.appendChild(sumAssign);
         const panelAssign = document.createElement('div');
         panelAssign.className = 'ps-dd-panel';
@@ -1527,7 +1532,7 @@
         const ddOut = document.createElement('details');
         ddOut.className = 'ps-dd';
         const sumOut = document.createElement('summary');
-        sumOut.textContent = 'Configure Outbound';
+        sumOut.textContent = 'Outbound';
         ddOut.appendChild(sumOut);
         const panelOut = document.createElement('div');
         panelOut.className = 'ps-dd-panel';
@@ -1549,25 +1554,13 @@
         tdOutbound.appendChild(ddOut);
         tr.appendChild(tdOutbound);
 
-        const tdDeleteMapping = document.createElement('td');
-        const delMapBtn = document.createElement('button');
-        delMapBtn.className = 'btn--danger ps-delete-mapping';
-        delMapBtn.textContent = 'Delete local mapping';
-        delMapBtn.setAttribute('data-id', cid);
-        tdDeleteMapping.appendChild(delMapBtn);
-        const delHint = document.createElement('div');
-        delHint.className = 'muted';
-        delHint.textContent = 'Does not delete telecom.center customer.';
-        tdDeleteMapping.appendChild(delHint);
-        tr.appendChild(tdDeleteMapping);
-
         const tdActions = document.createElement('td');
         const actions = document.createElement('div');
         actions.className = 'ps-actions';
 
         const openBtn = document.createElement('button');
         openBtn.className = 'btn--success ps-open-ui';
-        openBtn.textContent = 'Open UI';
+        openBtn.textContent = 'Open';
         openBtn.setAttribute('data-id', cid);
         actions.appendChild(openBtn);
 
@@ -1761,22 +1754,34 @@
       }
     }
 
-    async function deletePhoneSystemCustomerMapping(customerId){
+    async function deletePhoneSystemCustomer(customerId){
       const id = String(customerId || '').trim();
       if (!id) return;
 
-      if (!confirm('Delete the local Phone.System mapping? (This will not delete the telecom.center customer)')) return;
+      const ok = confirm(
+        'Delete this Phone.System customer?\n\n' +
+        'This will delete the customer in telecom.center AND remove all local Phone.System settings.\n' +
+        'Inbound forwarding for numbers that are currently routed to this customer will be unassigned.'
+      );
+      if (!ok) return;
 
-      setPhoneSystemStatus('Deleting mapping…', false);
+      setPhoneSystemStatus('Deleting customer…', false);
 
       try {
-        await psFetchJson(`/api/me/phonesystem/customers/${encodeURIComponent(id)}`, { method: 'DELETE' });
-        setPhoneSystemStatus('Deleted local mapping.', false);
-        showToast('Phone.System mapping deleted.');
+        const j = await psFetchJson(`/api/me/phonesystem/customers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        const unassigned = (j && j.data && Number.isFinite(Number(j.data.didww_unassigned))) ? Number(j.data.didww_unassigned) : 0;
+        const failed = (j && j.data && Number.isFinite(Number(j.data.didww_unassign_failed))) ? Number(j.data.didww_unassign_failed) : 0;
+
+        const msg = failed
+          ? `Customer deleted. DIDWW unassigned: ${unassigned}. Failed: ${failed}.`
+          : `Customer deleted. DIDWW unassigned: ${unassigned}.`;
+
+        setPhoneSystemStatus(msg, failed > 0);
+        showToast(failed ? 'Customer deleted (with some unassign warnings).' : 'Customer deleted.');
         await openPhoneSystemTab();
       } catch (e) {
-        setPhoneSystemStatus(e?.message || 'Failed to delete mapping', true);
-        showToast(e?.message || 'Failed to delete mapping', 'error');
+        setPhoneSystemStatus(e?.message || 'Failed to delete customer', true);
+        showToast(e?.message || 'Failed to delete customer', 'error');
       }
     }
 
@@ -1846,11 +1851,11 @@
           return;
         }
 
-        if (t.classList.contains('ps-delete-mapping') || t.classList.contains('ps-delete')) {
+        if (t.classList.contains('ps-delete')) {
           ev.preventDefault();
           const id = String(t.getAttribute('data-id') || '').trim();
           t.disabled = true;
-          try { await deletePhoneSystemCustomerMapping(id); } finally { t.disabled = false; }
+          try { await deletePhoneSystemCustomer(id); } finally { t.disabled = false; }
           return;
         }
       });
@@ -1860,15 +1865,19 @@
       initPhoneSystemUI();
       setPhoneSystemStatus('Loading…', false);
 
-      await Promise.all([
-        loadPhoneSystemDidOptions(),
-        loadPhoneSystemSipOptions(),
-        loadPhoneSystemCustomers()
-      ]);
+      try {
+        await Promise.all([
+          loadPhoneSystemDidOptions(),
+          loadPhoneSystemSipOptions(),
+          loadPhoneSystemCustomers()
+        ]);
 
-      // Customers depend on did/sip options for per-row selects.
-      renderPhoneSystemCustomers();
-      setPhoneSystemStatus('', false);
+        // Customers depend on did/sip options for per-row selects.
+        renderPhoneSystemCustomers();
+        setPhoneSystemStatus('', false);
+      } catch (e) {
+        setPhoneSystemStatus(e?.message || 'Failed to load Phone.System data', true);
+      }
     }
 
     // ========== AI Agents ==========
