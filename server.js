@@ -19022,6 +19022,81 @@ async function tcDeleteIgnoreNotFound(path) {
   }
 }
 
+async function tcGetDefaultIncomingTrunkForCustomer(tcCustomerId) {
+  const cid = tcId(tcCustomerId);
+  if (!cid) return null;
+
+  // JSON:API filter by customer.id
+  const path = `/incoming_trunks?filter[customer.id]=${encodeURIComponent(cid)}`;
+  const tc = await telecomCenterApiCall({ method: 'GET', path });
+
+  const list = Array.isArray(tc?.data) ? tc.data : [];
+  if (!list.length) return null;
+
+  const pick = list.find(t => String(t?.attributes?.name || '').trim().toLowerCase() === 'default') || list[0];
+  const domain = String(pick?.attributes?.domain || '').trim();
+
+  return {
+    tc_incoming_trunk_id: tcId(pick?.id),
+    domain: domain || null,
+    destination_field: String(pick?.attributes?.destination_field || '').trim() || null,
+    name: String(pick?.attributes?.name || '').trim() || null
+  };
+}
+
+async function ensurePhoneSystemIncomingTrunkMapping({ userId, tcCustomerId, maxAttempts = 4 }) {
+  if (!pool) throw new Error('Database not configured');
+
+  const cid = tcId(tcCustomerId);
+  if (!cid) return null;
+
+  const existing = await getPhoneSystemIncomingTrunkMapping({ userId, tcCustomerId: cid });
+  if (existing && existing.domain) return existing;
+
+  let found = null;
+  let lastErr = null;
+
+  for (let attempt = 0; attempt < Math.max(1, Number(maxAttempts) || 4); attempt += 1) {
+    try {
+      found = await tcGetDefaultIncomingTrunkForCustomer(cid);
+      if (found && found.domain) break;
+    } catch (e) {
+      lastErr = e;
+    }
+
+    // Give telecom.center a moment if trunks are created asynchronously.
+    await new Promise(r => setTimeout(r, 250));
+  }
+
+  if (!found || !found.domain) {
+    if (lastErr && DEBUG) console.warn('[phonesystem.incoming-trunks.default] Failed to fetch default trunk:', lastErr?.message || lastErr);
+    return existing;
+  }
+
+  if (existing && existing.id) {
+    try {
+      await pool.execute(
+        'UPDATE phonesystem_incoming_trunks SET tc_incoming_trunk_id = ?, domain = ?, destination_field = ? WHERE id = ? LIMIT 1',
+        [found.tc_incoming_trunk_id || null, found.domain || null, found.destination_field || null, existing.id]
+      );
+    } catch {}
+
+    existing.tc_incoming_trunk_id = found.tc_incoming_trunk_id || existing.tc_incoming_trunk_id;
+    existing.domain = found.domain || existing.domain;
+    existing.destination_field = found.destination_field || existing.destination_field;
+    return existing;
+  }
+
+  try {
+    await pool.execute(
+      'INSERT INTO phonesystem_incoming_trunks (user_id, tc_customer_id, tc_incoming_trunk_id, domain, destination_field, didww_forwarding_trunk_id) VALUES (?, ?, ?, ?, ?, ?)',
+      [userId, cid, found.tc_incoming_trunk_id || null, found.domain || null, found.destination_field || null, null]
+    );
+  } catch {}
+
+  return await getPhoneSystemIncomingTrunkMapping({ userId, tcCustomerId: cid });
+}
+
 async function ensureDidwwSipForwardingTrunk({ userId, trunkName, sipHost, sipPort = 5060, transportProtocolId = 2 }) {
   if (!pool) throw new Error('Database not configured');
 
@@ -19103,7 +19178,30 @@ app.get('/api/me/phonesystem/customers', requireAuth, async (req, res) => {
       [userId]
     );
 
-    return res.json({ success: true, data: rows || [] });
+    const out = rows || [];
+
+    // If telecom.center is configured to auto-create a default incoming trunk per customer,
+    // sync the domain into our local mapping so the UI can display it.
+    for (const r of out) {
+      const cid = tcId(r?.tc_customer_id);
+      if (!cid) continue;
+      const hasDomain = String(r?.domain || '').trim();
+      if (hasDomain) continue;
+
+      try {
+        const incoming = await ensurePhoneSystemIncomingTrunkMapping({ userId, tcCustomerId: cid });
+        if (incoming && incoming.domain) {
+          r.tc_incoming_trunk_id = incoming.tc_incoming_trunk_id || r.tc_incoming_trunk_id;
+          r.domain = incoming.domain || r.domain;
+          r.destination_field = incoming.destination_field || r.destination_field;
+          r.didww_forwarding_trunk_id = incoming.didww_forwarding_trunk_id || r.didww_forwarding_trunk_id;
+        }
+      } catch (e) {
+        if (DEBUG) console.warn('[phonesystem.customers.list] Failed to sync default incoming trunk:', cid, e?.message || e);
+      }
+    }
+
+    return res.json({ success: true, data: out });
   } catch (e) {
     if (DEBUG) console.error('[phonesystem.customers.list] error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to load Phone.System customers' });
@@ -19172,7 +19270,20 @@ app.post('/api/me/phonesystem/customers', requireAuth, async (req, res) => {
       [userId, tcIdVal, name]
     );
 
-    return res.json({ success: true, data: { tc_customer_id: tcIdVal, name } });
+    // Best-effort: sync the default incoming trunk domain created by phone.systems.
+    let incoming = null;
+    try {
+      incoming = await ensurePhoneSystemIncomingTrunkMapping({ userId, tcCustomerId: tcIdVal, maxAttempts: 6 });
+    } catch {}
+
+    return res.json({
+      success: true,
+      data: {
+        tc_customer_id: tcIdVal,
+        name,
+        domain: incoming && incoming.domain ? String(incoming.domain) : null
+      }
+    });
   } catch (e) {
     const msg = e?.message || 'Failed to create Phone.System customer';
     const status = e?.status && Number.isFinite(Number(e.status)) ? Number(e.status) : 500;
@@ -19366,71 +19477,38 @@ app.post('/api/me/phonesystem/customers/:customerId/incoming-trunks', requireAut
     const customer = await getPhoneSystemCustomerMapping({ userId, tcCustomerId });
     if (!customer) return res.status(404).json({ success: false, message: 'Phone.System customer not found' });
 
-    // Enforce one incoming trunk per customer for now
-    const existing = await getPhoneSystemIncomingTrunkMapping({ userId, tcCustomerId });
-    if (existing && existing.tc_incoming_trunk_id) {
-      // Ensure DIDWW SIP forwarding trunk exists
-      if (!existing.didww_forwarding_trunk_id && existing.domain) {
-        const didwwTrunkId = await ensureDidwwSipForwardingTrunk({
-          userId,
-          trunkName: `Phone.System ${customer.name}`,
-          sipHost: String(existing.domain)
-        });
-        await pool.execute(
-          'UPDATE phonesystem_incoming_trunks SET didww_forwarding_trunk_id = ? WHERE id = ? LIMIT 1',
-          [didwwTrunkId, existing.id]
-        );
-        existing.didww_forwarding_trunk_id = didwwTrunkId;
-      }
-
-      return res.json({ success: true, data: existing, reused: true });
+    // phone.systems can auto-create a default incoming trunk for new customers.
+    // This endpoint now syncs that default trunk into our local mapping.
+    const incoming = await ensurePhoneSystemIncomingTrunkMapping({ userId, tcCustomerId, maxAttempts: 6 });
+    if (!incoming || !incoming.domain) {
+      return res.status(409).json({
+        success: false,
+        message: 'Incoming trunk domain not found for this customer. Please verify phone.systems inbound trunk setup.'
+      });
     }
 
-    const destinationField = 'RURI_USERPART';
-    const trunkName = `TalkUSA Incoming (${String(customer.name || tcCustomerId).trim()})`.slice(0, 255);
+    // Ensure DIDWW SIP forwarding trunk exists (used to route DIDWW numbers to phone.systems)
+    if (!incoming.didww_forwarding_trunk_id) {
+      const didwwTrunkId = await ensureDidwwSipForwardingTrunk({
+        userId,
+        trunkName: `Phone.System ${customer.name}`,
+        sipHost: String(incoming.domain)
+      });
 
-    const payload = {
-      data: {
-        type: 'incoming_trunks',
-        attributes: {
-          name: trunkName,
-          destination_field: destinationField
-        },
-        relationships: {
-          customer: { data: { type: 'customers', id: tcCustomerId } }
-        }
-      }
-    };
+      try {
+        await pool.execute(
+          'UPDATE phonesystem_incoming_trunks SET didww_forwarding_trunk_id = ? WHERE id = ? LIMIT 1',
+          [didwwTrunkId, incoming.id]
+        );
+        incoming.didww_forwarding_trunk_id = didwwTrunkId;
+      } catch {}
+    }
 
-    const tc = await telecomCenterApiCall({ method: 'POST', path: '/incoming_trunks', body: payload });
-    const tcIncomingId = tcId(tc?.data?.id);
-    const domain = String(tc?.data?.attributes?.domain || '').trim();
-    if (!tcIncomingId) return res.status(502).json({ success: false, message: 'telecom.center incoming trunk create returned no id' });
-
-    const didwwTrunkId = await ensureDidwwSipForwardingTrunk({
-      userId,
-      trunkName: `Phone.System ${customer.name}`,
-      sipHost: domain
-    });
-
-    await pool.execute(
-      'INSERT INTO phonesystem_incoming_trunks (user_id, tc_customer_id, tc_incoming_trunk_id, domain, destination_field, didww_forwarding_trunk_id) VALUES (?, ?, ?, ?, ?, ?)',
-      [userId, tcCustomerId, tcIncomingId, domain || null, destinationField, didwwTrunkId]
-    );
-
-    return res.json({
-      success: true,
-      data: {
-        tc_incoming_trunk_id: tcIncomingId,
-        domain: domain || null,
-        destination_field: destinationField,
-        didww_forwarding_trunk_id: didwwTrunkId
-      }
-    });
+    return res.json({ success: true, data: incoming, reused: true });
   } catch (e) {
-    const msg = e?.message || 'Failed to create incoming trunk';
+    const msg = e?.message || 'Failed to sync incoming trunk';
     const status = e?.status && Number.isFinite(Number(e.status)) ? Number(e.status) : 500;
-    if (DEBUG) console.error('[phonesystem.incoming-trunks.create] error:', { status, msg, data: e?.data });
+    if (DEBUG) console.error('[phonesystem.incoming-trunks.sync] error:', { status, msg, data: e?.data });
     return res.status(status >= 400 && status < 600 ? status : 500).json({ success: false, message: msg });
   }
 });
@@ -19449,9 +19527,12 @@ app.post('/api/me/phonesystem/customers/:customerId/dids', requireAuth, async (r
     const customer = await getPhoneSystemCustomerMapping({ userId, tcCustomerId });
     if (!customer) return res.status(404).json({ success: false, message: 'Phone.System customer not found' });
 
-    const incoming = await getPhoneSystemIncomingTrunkMapping({ userId, tcCustomerId });
+    const incoming = await ensurePhoneSystemIncomingTrunkMapping({ userId, tcCustomerId, maxAttempts: 6 });
     if (!incoming || !incoming.domain) {
-      return res.status(409).json({ success: false, message: 'Create an incoming trunk first.' });
+      return res.status(409).json({
+        success: false,
+        message: 'Incoming trunk domain not found for this customer. Please verify phone.systems inbound trunk setup.'
+      });
     }
 
     const forwardTrunkId = incoming.didww_forwarding_trunk_id

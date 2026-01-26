@@ -1482,17 +1482,7 @@
         tr.appendChild(tdId);
 
         const tdDomain = document.createElement('td');
-        const domainWrap = document.createElement('div');
-        domainWrap.className = 'ps-domain-cell';
-        const domainText = document.createElement('div');
-        domainText.textContent = domain || '—';
-        domainWrap.appendChild(domainText);
-        const trunkBtn = document.createElement('button');
-        trunkBtn.className = 'btn--primary ps-ensure-trunk';
-        trunkBtn.textContent = domain ? 'Ensure Trunk' : 'Create Trunk';
-        trunkBtn.setAttribute('data-id', cid);
-        domainWrap.appendChild(trunkBtn);
-        tdDomain.appendChild(domainWrap);
+        tdDomain.textContent = domain || '—';
         tr.appendChild(tdDomain);
 
         const tdDids = document.createElement('td');
@@ -1522,7 +1512,7 @@
         panelAssign.appendChild(assignBtn);
         const assignHint = document.createElement('div');
         assignHint.className = 'muted';
-        assignHint.textContent = domain ? 'Hold Ctrl (Windows) to multi-select.' : 'Create an incoming trunk first.';
+        assignHint.textContent = domain ? 'Hold Ctrl (Windows) to multi-select.' : 'Trunk domain not ready yet. Try Refresh.';
         panelAssign.appendChild(assignHint);
         ddAssign.appendChild(panelAssign);
         tdAssign.appendChild(ddAssign);
@@ -1649,29 +1639,6 @@
         showToast(e?.message || 'Failed to create customer', 'error');
       } finally {
         if (btn) btn.disabled = false;
-      }
-    }
-
-    async function ensurePhoneSystemIncomingTrunk(customerId){
-      const id = String(customerId || '').trim();
-      if (!id) return;
-
-      setPhoneSystemStatus('Creating incoming trunk…', false);
-
-      try {
-        const j = await psFetchJson(`/api/me/phonesystem/customers/${encodeURIComponent(id)}/incoming-trunks`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({})
-        });
-
-        const domain = String(j?.data?.domain || '').trim();
-        setPhoneSystemStatus(domain ? `Incoming trunk ready. Domain: ${domain}` : 'Incoming trunk ready.', false);
-        showToast('Incoming trunk created/ensured.');
-        await openPhoneSystemTab();
-      } catch (e) {
-        setPhoneSystemStatus(e?.message || 'Failed to create incoming trunk', true);
-        showToast(e?.message || 'Failed to create incoming trunk', 'error');
       }
     }
 
@@ -1819,14 +1786,6 @@
       document.addEventListener('click', async (ev) => {
         const t = ev.target;
         if (!t || !t.classList) return;
-
-        if (t.classList.contains('ps-ensure-trunk')) {
-          ev.preventDefault();
-          const id = String(t.getAttribute('data-id') || '').trim();
-          t.disabled = true;
-          try { await ensurePhoneSystemIncomingTrunk(id); } finally { t.disabled = false; }
-          return;
-        }
 
         if (t.classList.contains('ps-assign-dids')) {
           ev.preventDefault();
