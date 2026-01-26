@@ -7205,7 +7205,7 @@ async function hydrateDialerCampaignRows(userId, rows) {
   if (!pool) return safeRows;
   const ids = safeRows.map(r => r.id).filter(Boolean);
   if (!ids.length) return safeRows.map(r => ({ ...r, stats: buildDialerStatsSeed() }));
-  const placeholders = ids.map(() => '?').join(',');
+  const idsParam = ids.map((id) => Number(id));
   const leadStatsMap = new Map();
   try {
     const [leadStats] = await pool.query(
@@ -7216,9 +7216,9 @@ async function hydrateDialerCampaignRows(userId, rows) {
         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
         COUNT(*) AS total_count
        FROM dialer_leads
-       WHERE user_id = ? AND campaign_id IN (${placeholders})
+       WHERE user_id = ? AND campaign_id IN (?)
        GROUP BY campaign_id`,
-      [userId, ...ids]
+      [userId, idsParam]
     );
     for (const s of leadStats || []) {
       leadStatsMap.set(Number(s.campaign_id), {
@@ -7241,9 +7241,9 @@ async function hydrateDialerCampaignRows(userId, rows) {
         SUM(CASE WHEN result = 'voicemail' THEN 1 ELSE 0 END) AS voicemail_count,
         SUM(CASE WHEN result = 'transferred' THEN 1 ELSE 0 END) AS transferred_count
        FROM dialer_call_logs
-       WHERE user_id = ? AND campaign_id IN (${placeholders})
+       WHERE user_id = ? AND campaign_id IN (?)
        GROUP BY campaign_id`,
-      [userId, ...ids]
+      [userId, idsParam]
     );
     for (const s of callStats || []) {
       callStatsMap.set(Number(s.campaign_id), {
