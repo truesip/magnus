@@ -100,6 +100,11 @@ const DIALER_MAX_LEADS_PER_UPLOAD = Math.max(1, parseInt(process.env.DIALER_MAX_
 const DIALER_CAMPAIGN_STATUSES = ['draft', 'running', 'paused', 'completed', 'deleted'];
 const DIALER_LEAD_STATUSES = ['pending', 'queued', 'dialing', 'answered', 'voicemail', 'transferred', 'failed', 'completed'];
 
+const dialerLeadUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+});
+
 // DIDWW inbound call acceptance gating based on MagnusBilling credit.
 // If a user's credit falls below DIDWW_INBOUND_MIN_CREDIT, inbound calls to DIDWW DIDs are blocked
 // by unassigning voice_in_trunk (call forwarding) until the balance is sufficient again.
@@ -7582,11 +7587,6 @@ const AI_MAX_NUMBERS = Math.max(1, parseInt(process.env.AI_MAX_NUMBERS || '5', 1
 const aiAgentBackgroundAudioUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 } // 5MB
-});
-
-const dialerLeadUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB
 });
 
 function getPublicBaseUrlFromReq(req) {
