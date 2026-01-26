@@ -22,6 +22,7 @@ const zlib = require('zlib');
 const mysql = require('mysql2/promise');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
+const Papa = require('papaparse');
 const PizZip = require('pizzip');
 const Docxtemplater = require('docxtemplater');
 const session = require('express-session');
@@ -92,6 +93,12 @@ const AI_CALLER_MEMORY_MAX_CHARS_PER_MESSAGE = Math.max(
   parseInt(process.env.AI_CALLER_MEMORY_MAX_CHARS_PER_MESSAGE || '500', 10) || 500
 );
 const AI_CALLER_MEMORY_MAX_DAYS = Math.max(1, parseInt(process.env.AI_CALLER_MEMORY_MAX_DAYS || '30', 10) || 30);
+// Outbound dialer settings
+const DIALER_MIN_CONCURRENCY = 1;
+const DIALER_MAX_CONCURRENCY = 20;
+const DIALER_MAX_LEADS_PER_UPLOAD = Math.max(1, parseInt(process.env.DIALER_MAX_LEADS_PER_UPLOAD || '5000', 10) || 5000);
+const DIALER_CAMPAIGN_STATUSES = ['draft', 'running', 'paused', 'completed', 'deleted'];
+const DIALER_LEAD_STATUSES = ['pending', 'queued', 'dialing', 'answered', 'voicemail', 'transferred', 'failed', 'completed'];
 
 // DIDWW inbound call acceptance gating based on MagnusBilling credit.
 // If a user's credit falls below DIDWW_INBOUND_MIN_CREDIT, inbound calls to DIDWW DIDs are blocked
@@ -1886,6 +1893,73 @@ async function initDb() {
     UNIQUE KEY uniq_ai_doc_template (user_id, name),
     KEY idx_ai_doc_templates_user (user_id),
     CONSTRAINT fk_ai_doc_templates_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
+  // Outbound dialer tables
+  await pool.query(`CREATE TABLE IF NOT EXISTS dialer_campaigns (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    name VARCHAR(191) NOT NULL,
+    ai_agent_id BIGINT NOT NULL,
+    ai_agent_name VARCHAR(191) NULL,
+    sip_account_id VARCHAR(128) NOT NULL,
+    sip_account_label VARCHAR(191) NULL,
+    status ENUM('draft','running','paused','completed','deleted') NOT NULL DEFAULT 'draft',
+    concurrency_limit INT NOT NULL DEFAULT 1,
+    last_started_at DATETIME NULL,
+    last_paused_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    KEY idx_dialer_campaigns_user (user_id),
+    KEY idx_dialer_campaigns_agent (ai_agent_id),
+    CONSTRAINT fk_dialer_campaigns_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_dialer_campaigns_agent FOREIGN KEY (ai_agent_id) REFERENCES ai_agents(id) ON DELETE CASCADE
+  )`);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS dialer_leads (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    campaign_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    phone_number VARCHAR(32) NOT NULL,
+    lead_name VARCHAR(191) NULL,
+    metadata JSON NULL,
+    status ENUM('pending','queued','dialing','answered','voicemail','transferred','failed','completed') NOT NULL DEFAULT 'pending',
+    last_call_at DATETIME NULL,
+    attempt_count INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_campaign_phone (campaign_id, phone_number),
+    KEY idx_dialer_leads_campaign (campaign_id),
+    KEY idx_dialer_leads_user (user_id),
+    KEY idx_dialer_leads_status (status),
+    CONSTRAINT fk_dialer_leads_campaign FOREIGN KEY (campaign_id) REFERENCES dialer_campaigns(id) ON DELETE CASCADE,
+    CONSTRAINT fk_dialer_leads_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS dialer_call_logs (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    campaign_id BIGINT NOT NULL,
+    lead_id BIGINT NULL,
+    user_id BIGINT NOT NULL,
+    ai_agent_id BIGINT NULL,
+    sip_account_id VARCHAR(128) NULL,
+    call_id VARCHAR(128) NULL,
+    status VARCHAR(32) NULL,
+    result VARCHAR(32) NULL,
+    duration_sec INT NULL,
+    transferred_to VARCHAR(64) NULL,
+    recording_url TEXT NULL,
+    notes TEXT NULL,
+    metadata JSON NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_dialer_logs_campaign (campaign_id),
+    KEY idx_dialer_logs_lead (lead_id),
+    KEY idx_dialer_logs_user (user_id),
+    KEY idx_dialer_logs_agent (ai_agent_id),
+    CONSTRAINT fk_dialer_logs_campaign FOREIGN KEY (campaign_id) REFERENCES dialer_campaigns(id) ON DELETE CASCADE,
+    CONSTRAINT fk_dialer_logs_lead FOREIGN KEY (lead_id) REFERENCES dialer_leads(id) ON DELETE SET NULL,
+    CONSTRAINT fk_dialer_logs_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_dialer_logs_agent FOREIGN KEY (ai_agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL
   )`);
 
   // AI email send audit log + idempotency
@@ -7052,7 +7126,455 @@ app.post('/api/ai/agent/log-message', async (req, res) => {
   }
 });
 
-// ========== AI Agents (Pipecat Cloud) ==========
+// ========== Dialer Campaigns ==========
+function normalizeDialerPhone(raw) {
+  const digits = digitsOnly(raw);
+  if (!digits) return '';
+  let normalized = digits;
+  if (normalized.length === 10) {
+    normalized = `1${normalized}`;
+  }
+  if (normalized.length < 8 || normalized.length > 15) return '';
+  return `+${normalized}`;
+}
+
+async function ensureAiAgentForUser({ userId, agentId }) {
+  if (!pool) throw new Error('Database not configured');
+  if (!agentId) throw new Error('AI agent id is required');
+  const [rows] = await pool.execute(
+    'SELECT id, display_name FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1',
+    [agentId, userId]
+  );
+  const row = rows && rows[0] ? rows[0] : null;
+  if (!row) throw new Error('AI agent not found');
+  return { id: String(row.id), name: String(row.display_name || `Agent ${row.id}`) };
+}
+
+async function ensureSipAccountForUser({ req, sipAccountId }) {
+  if (!sipAccountId) throw new Error('SIP account is required');
+  const httpsAgent = magnusBillingAgent;
+  const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+  const magnusUserId = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
+  if (!magnusUserId) throw new Error('Magnus user id not found for this account');
+  const sipRows = await fetchSipUsersForUserAll({ idUser: magnusUserId, httpsAgent, hostHeader, maxPages: 10, pageSize: 500 });
+  const match = (sipRows || []).find(r => (sipRowId(r) || '') === sipAccountId);
+  if (!match) throw new Error('SIP account not found');
+  const username = String(
+    match.username ||
+    match.name ||
+    match.sipuser ||
+    match.user ||
+    match.accountcode ||
+    match.defaultuser ||
+    ''
+  ).trim();
+  const callerId = String(match.callerid || match.cid || match.cid_name || match.calleridname || '').trim();
+  const label = username || callerId || `SIP ${sipAccountId}`;
+  return { id: String(sipAccountId), label, callerId };
+}
+
+async function fetchDialerCampaignById({ userId, campaignId }) {
+  if (!pool) throw new Error('Database not configured');
+  const [rows] = await pool.execute(
+    'SELECT * FROM dialer_campaigns WHERE id = ? AND user_id = ? AND status <> \'deleted\' LIMIT 1',
+    [campaignId, userId]
+  );
+  return rows && rows[0] ? rows[0] : null;
+}
+
+function buildDialerStatsSeed() {
+  return {
+    totalLeads: 0,
+    pending: 0,
+    inProgress: 0,
+    completed: 0,
+    failed: 0,
+    answered: 0,
+    voicemail: 0,
+    transferred: 0
+  };
+}
+
+async function hydrateDialerCampaignRows(userId, rows) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  if (!pool) return safeRows;
+  const ids = safeRows.map(r => r.id).filter(Boolean);
+  if (!ids.length) return safeRows.map(r => ({ ...r, stats: buildDialerStatsSeed() }));
+  const placeholders = ids.map(() => '?').join(',');
+  const leadStatsMap = new Map();
+  try {
+    const [leadStats] = await pool.query(
+      `SELECT campaign_id,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+        SUM(CASE WHEN status IN ('queued','dialing') THEN 1 ELSE 0 END) AS in_progress_count,
+        SUM(CASE WHEN status IN ('completed','answered','voicemail','transferred') THEN 1 ELSE 0 END) AS completed_count,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+        COUNT(*) AS total_count
+       FROM dialer_leads
+       WHERE user_id = ? AND campaign_id IN (${placeholders})
+       GROUP BY campaign_id`,
+      [userId, ...ids]
+    );
+    for (const s of leadStats || []) {
+      leadStatsMap.set(Number(s.campaign_id), {
+        total: Number(s.total_count || 0),
+        pending: Number(s.pending_count || 0),
+        inProgress: Number(s.in_progress_count || 0),
+        completed: Number(s.completed_count || 0),
+        failed: Number(s.failed_count || 0)
+      });
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[dialer.stats.leads] failed', e?.message || e);
+  }
+
+  const callStatsMap = new Map();
+  try {
+    const [callStats] = await pool.query(
+      `SELECT campaign_id,
+        SUM(CASE WHEN result = 'answered' THEN 1 ELSE 0 END) AS answered_count,
+        SUM(CASE WHEN result = 'voicemail' THEN 1 ELSE 0 END) AS voicemail_count,
+        SUM(CASE WHEN result = 'transferred' THEN 1 ELSE 0 END) AS transferred_count
+       FROM dialer_call_logs
+       WHERE user_id = ? AND campaign_id IN (${placeholders})
+       GROUP BY campaign_id`,
+      [userId, ...ids]
+    );
+    for (const s of callStats || []) {
+      callStatsMap.set(Number(s.campaign_id), {
+        answered: Number(s.answered_count || 0),
+        voicemail: Number(s.voicemail_count || 0),
+        transferred: Number(s.transferred_count || 0)
+      });
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[dialer.stats.calls] failed', e?.message || e);
+  }
+
+  return safeRows.map(row => {
+    const leadStats = leadStatsMap.get(Number(row.id)) || {};
+    const callStats = callStatsMap.get(Number(row.id)) || {};
+    return {
+      ...row,
+      stats: {
+        totalLeads: Number(leadStats.total || 0),
+        pending: Number(leadStats.pending || 0),
+        inProgress: Number(leadStats.inProgress || 0),
+        completed: Number(leadStats.completed || 0),
+        failed: Number(leadStats.failed || 0),
+        answered: Number(callStats.answered || 0),
+        voicemail: Number(callStats.voicemail || 0),
+        transferred: Number(callStats.transferred || 0)
+      }
+    };
+  });
+}
+
+function serializeDialerCampaign(row) {
+  if (!row) return null;
+  const stats = row.stats || buildDialerStatsSeed();
+  return {
+    id: Number(row.id),
+    name: row.name,
+    status: row.status,
+    ai_agent_id: Number(row.ai_agent_id),
+    ai_agent_name: row.ai_agent_name || '',
+    sip_account_id: row.sip_account_id,
+    sip_account_label: row.sip_account_label || '',
+    concurrency_limit: Number(row.concurrency_limit || 1),
+    last_started_at: row.last_started_at ? new Date(row.last_started_at).toISOString() : null,
+    last_paused_at: row.last_paused_at ? new Date(row.last_paused_at).toISOString() : null,
+    created_at: row.created_at ? new Date(row.created_at).toISOString() : null,
+    updated_at: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+    stats
+  };
+}
+
+app.get('/api/me/dialer/campaigns', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const page = Math.max(0, parseInt(req.query.page || '0', 10));
+    const pageSize = Math.max(1, Math.min(100, parseInt(req.query.pageSize || '25', 10)));
+
+    const [[countRow]] = await pool.execute(
+      'SELECT COUNT(*) AS cnt FROM dialer_campaigns WHERE user_id = ? AND status <> \'deleted\'',
+      [userId]
+    );
+    const total = countRow && countRow.cnt != null ? Number(countRow.cnt) : 0;
+    const offset = page * pageSize;
+
+    const [rows] = await pool.execute(
+      `SELECT * FROM dialer_campaigns
+       WHERE user_id = ? AND status <> 'deleted'
+       ORDER BY created_at DESC
+       LIMIT ? OFFSET ?`,
+      [userId, pageSize, offset]
+    );
+
+    const hydrated = await hydrateDialerCampaignRows(userId, rows || []);
+    const data = hydrated.map(serializeDialerCampaign);
+
+    return res.json({ success: true, data, page, pageSize, total });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.campaigns.list] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load campaigns' });
+  }
+});
+
+app.post('/api/me/dialer/campaigns', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const name = String(req.body?.name || '').trim().slice(0, 191);
+    const aiAgentId = Number(req.body?.ai_agent_id || req.body?.aiAgentId || 0);
+    const sipAccountId = String(req.body?.sip_account_id || req.body?.sipAccountId || '').trim();
+    const concurrencyRaw = parseInt(req.body?.concurrency_limit ?? req.body?.concurrencyLimit ?? 1, 10);
+    if (!name) return res.status(400).json({ success: false, message: 'Campaign name is required' });
+    if (!aiAgentId) return res.status(400).json({ success: false, message: 'AI agent is required' });
+    if (!sipAccountId) return res.status(400).json({ success: false, message: 'SIP account is required' });
+
+    const concurrency = Math.min(
+      DIALER_MAX_CONCURRENCY,
+      Math.max(DIALER_MIN_CONCURRENCY, Number.isFinite(concurrencyRaw) ? concurrencyRaw : DIALER_MIN_CONCURRENCY)
+    );
+
+    const agent = await ensureAiAgentForUser({ userId, agentId: aiAgentId });
+    const sipAccount = await ensureSipAccountForUser({ req, sipAccountId });
+
+    const [result] = await pool.execute(
+      `INSERT INTO dialer_campaigns
+        (user_id, name, ai_agent_id, ai_agent_name, sip_account_id, sip_account_label, concurrency_limit)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [userId, name, agent.id, agent.name, sipAccount.id, sipAccount.label, concurrency]
+    );
+
+    const campaignId = result && result.insertId ? Number(result.insertId) : null;
+    const row = await fetchDialerCampaignById({ userId, campaignId });
+    const hydrated = await hydrateDialerCampaignRows(userId, row ? [row] : []);
+    const payload = hydrated.length ? serializeDialerCampaign(hydrated[0]) : null;
+    return res.json({ success: true, data: payload });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.campaigns.create] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: e?.message || 'Failed to create campaign' });
+  }
+});
+
+app.post('/api/me/dialer/campaigns/:campaignId/leads-upload', requireAuth, dialerLeadUpload.single('file'), async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const campaignId = Number(req.params.campaignId || 0);
+    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
+    const campaign = await fetchDialerCampaignById({ userId, campaignId });
+    if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
+
+    const file = req.file;
+    if (!file || !file.buffer) {
+      return res.status(400).json({ success: false, message: 'Missing CSV file (field name: file)' });
+    }
+    const csvText = file.buffer.toString('utf8');
+    const parsed = Papa.parse(csvText, {
+      header: true,
+      skipEmptyLines: true,
+      transformHeader: (hdr) => String(hdr || '').trim().toLowerCase()
+    });
+    if (parsed.errors && parsed.errors.length) {
+      const firstErr = parsed.errors[0];
+      return res.status(400).json({ success: false, message: `CSV parse error: ${firstErr.message}` });
+    }
+    const rows = Array.isArray(parsed.data) ? parsed.data : [];
+    if (!rows.length) {
+      return res.status(400).json({ success: false, message: 'CSV file is empty or missing headers' });
+    }
+    if (rows.length > DIALER_MAX_LEADS_PER_UPLOAD) {
+      return res.status(400).json({ success: false, message: `Upload up to ${DIALER_MAX_LEADS_PER_UPLOAD} leads at a time.` });
+    }
+
+    const prepared = [];
+    let invalid = 0;
+    for (const row of rows) {
+      const phoneRaw = row.phone || row.number || row.dial || row.destination || row.to;
+      const normalized = normalizeDialerPhone(phoneRaw);
+      if (!normalized) {
+        invalid += 1;
+        continue;
+      }
+      const name = String(row.name || row.full_name || row.contact || '').trim().slice(0, 191) || null;
+      let metadata = null;
+      if (row.metadata !== undefined && row.metadata !== null && row.metadata !== '') {
+        if (typeof row.metadata === 'object') {
+          try {
+            metadata = JSON.stringify(row.metadata);
+          } catch {
+            metadata = JSON.stringify({ note: '[object]' });
+          }
+        } else if (typeof row.metadata === 'string') {
+          try {
+            metadata = JSON.stringify(JSON.parse(row.metadata));
+          } catch {
+            metadata = JSON.stringify({ note: row.metadata });
+          }
+        } else {
+          metadata = JSON.stringify({ note: String(row.metadata) });
+        }
+      }
+      prepared.push([campaignId, userId, normalized, name, metadata]);
+    }
+
+    if (!prepared.length) {
+      return res.status(400).json({ success: false, message: 'No valid leads found in file.', invalid });
+    }
+
+    const [insertResult] = await pool.query(
+      'INSERT IGNORE INTO dialer_leads (campaign_id, user_id, phone_number, lead_name, metadata) VALUES ?',
+      [prepared]
+    );
+    const inserted = insertResult && insertResult.affectedRows ? Number(insertResult.affectedRows) : 0;
+    const duplicates = prepared.length - inserted;
+    await pool.execute('UPDATE dialer_campaigns SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?', [campaignId, userId]);
+
+    return res.json({
+      success: true,
+      data: { inserted, duplicates, invalid }
+    });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.leads.upload] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: e?.message || 'Failed to upload leads' });
+  }
+});
+
+app.patch('/api/me/dialer/campaigns/:campaignId/status', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const campaignId = Number(req.params.campaignId || 0);
+    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
+    const action = String(req.body?.action || '').trim().toLowerCase();
+    if (!['start', 'pause', 'complete'].includes(action)) {
+      return res.status(400).json({ success: false, message: 'Invalid action' });
+    }
+    const campaign = await fetchDialerCampaignById({ userId, campaignId });
+    if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
+
+    if (action === 'start') {
+      const [leadRows] = await pool.execute(
+        `SELECT COUNT(*) AS cnt FROM dialer_leads
+         WHERE campaign_id = ? AND user_id = ? AND status IN ('pending','queued','dialing')`,
+        [campaignId, userId]
+      );
+      const available = leadRows && leadRows[0] ? Number(leadRows[0].cnt || 0) : 0;
+      if (!available) {
+        return res.status(400).json({ success: false, message: 'Upload at least one pending lead before starting.' });
+      }
+      await pool.execute(
+        'UPDATE dialer_campaigns SET status = ?, last_started_at = NOW(), updated_at = NOW() WHERE id = ? AND user_id = ?',
+        ['running', campaignId, userId]
+      );
+    } else if (action === 'pause') {
+      await pool.execute(
+        'UPDATE dialer_campaigns SET status = ?, last_paused_at = NOW(), updated_at = NOW() WHERE id = ? AND user_id = ?',
+        ['paused', campaignId, userId]
+      );
+    } else if (action === 'complete') {
+      await pool.execute(
+        'UPDATE dialer_campaigns SET status = ?, updated_at = NOW() WHERE id = ? AND user_id = ?',
+        ['completed', campaignId, userId]
+      );
+    }
+
+    const updated = await fetchDialerCampaignById({ userId, campaignId });
+    const hydrated = await hydrateDialerCampaignRows(userId, updated ? [updated] : []);
+    const payload = hydrated.length ? serializeDialerCampaign(hydrated[0]) : null;
+    return res.json({ success: true, data: payload });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.campaigns.status] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: e?.message || 'Failed to update campaign status' });
+  }
+});
+
+app.delete('/api/me/dialer/campaigns/:campaignId', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const campaignId = Number(req.params.campaignId || 0);
+    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
+    const campaign = await fetchDialerCampaignById({ userId, campaignId });
+    if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
+    await pool.execute(
+      'UPDATE dialer_campaigns SET status = \'deleted\', updated_at = NOW() WHERE id = ? AND user_id = ?',
+      [campaignId, userId]
+    );
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.campaigns.delete] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to delete campaign' });
+  }
+});
+
+app.get('/api/me/dialer/campaigns/:campaignId/leads', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const campaignId = Number(req.params.campaignId || 0);
+    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
+    const campaign = await fetchDialerCampaignById({ userId, campaignId });
+    if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
+
+    const page = Math.max(0, parseInt(req.query.page || '0', 10));
+    const pageSize = Math.max(1, Math.min(200, parseInt(req.query.pageSize || '50', 10)));
+    const offset = page * pageSize;
+
+    const [[countRow]] = await pool.execute(
+      'SELECT COUNT(*) AS cnt FROM dialer_leads WHERE campaign_id = ? AND user_id = ?',
+      [campaignId, userId]
+    );
+    const total = countRow && countRow.cnt != null ? Number(countRow.cnt || 0) : 0;
+
+    const [rows] = await pool.execute(
+      `SELECT id, phone_number, lead_name, status, attempt_count, last_call_at, created_at
+       FROM dialer_leads
+       WHERE campaign_id = ? AND user_id = ?
+       ORDER BY created_at DESC
+       LIMIT ? OFFSET ?`,
+      [campaignId, userId, pageSize, offset]
+    );
+
+    const data = (rows || []).map(r => ({
+      id: Number(r.id),
+      phone_number: r.phone_number,
+      lead_name: r.lead_name || '',
+      status: r.status,
+      attempt_count: Number(r.attempt_count || 0),
+      last_call_at: r.last_call_at ? new Date(r.last_call_at).toISOString() : null,
+      created_at: r.created_at ? new Date(r.created_at).toISOString() : null
+    }));
+
+    return res.json({ success: true, data, page, pageSize, total });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.leads.list] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load leads' });
+  }
+});
+
+app.get('/api/me/dialer/campaigns/:campaignId/stats', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const campaignId = Number(req.params.campaignId || 0);
+    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
+    const campaign = await fetchDialerCampaignById({ userId, campaignId });
+    if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
+    const hydrated = await hydrateDialerCampaignRows(userId, [campaign]);
+    const payload = hydrated.length ? serializeDialerCampaign(hydrated[0]) : null;
+    return res.json({ success: true, data: payload ? payload.stats : buildDialerStatsSeed() });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.campaigns.stats] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load stats' });
+  }
+});
+
+// ========== AI Agents ==========
 const AI_MAX_AGENTS = Math.max(1, parseInt(process.env.AI_MAX_AGENTS || '5', 10) || 5);
 const AI_MAX_NUMBERS = Math.max(1, parseInt(process.env.AI_MAX_NUMBERS || '5', 10) || 5);
 
@@ -7060,6 +7582,11 @@ const AI_MAX_NUMBERS = Math.max(1, parseInt(process.env.AI_MAX_NUMBERS || '5', 1
 const aiAgentBackgroundAudioUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 } // 5MB
+});
+
+const dialerLeadUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB
 });
 
 function getPublicBaseUrlFromReq(req) {
