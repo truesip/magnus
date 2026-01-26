@@ -271,7 +271,7 @@
     .status-unknown{background:rgba(255,255,255,.40)}
     .direction-icon{color:rgba(34,211,238,.95);font-weight:900;font-size:16px}
 
-    .toast{position:fixed;top:20px;right:20px;background:rgba(16,185,129,.92);color:#071024;padding:12px 20px;border-radius:12px;border:1px solid rgba(16,185,129,.35);box-shadow:0 18px 60px rgba(0,0,0,.55);z-index:9999;animation:slideIn 0.3s ease-out}
+    .toast{position:fixed;top:20px;right:20px;background:rgba(16,185,129,.92);color:#071024;padding:12px 20px;border-radius:12px;border:1px solid rgba(16,185,129,.35);box-shadow:0 18px 60px rgba(0,0,0,.55);z-index:2147483647;animation:slideIn 0.3s ease-out}
     @keyframes slideIn{from{transform:translateX(400px);opacity:0}to{transform:translateX(0);opacity:1}}
     @keyframes btnClick{0%{transform:scale(1)}50%{transform:scale(0.98)}100%{transform:scale(1)}}
 
@@ -440,8 +440,8 @@
     #trunkModal,
     #aiEmailPreviewModal,
     #aiAgentModal{
-      /* Opaque backdrop so the page behind isn't visible. */
-      background: #050816 !important;
+      /* Keep the dimmed overlay so the page behind is still visible. */
+      background: rgba(0,0,0,.55) !important;
     }
 
     #addFundModal > div,
@@ -449,8 +449,8 @@
     #trunkModal > div,
     #aiEmailPreviewModal > div,
     #aiAgentModal .ai-agent-modal-card{
-      /* Opaque modal cards (no transparency / no see-through). */
-      background: linear-gradient(180deg, #111a35 0%, #0b1024 100%) !important;
+      /* Solid modal cards (no transparency / no see-through). */
+      background: #0b1024 !important;
       border:1px solid rgba(255,255,255,.14) !important;
       box-shadow: 0 24px 90px rgba(0,0,0,.70) !important;
       color: rgba(255,255,255,.92) !important;
