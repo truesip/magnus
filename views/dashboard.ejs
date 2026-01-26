@@ -435,12 +435,22 @@
     }
 
     /* Modals */
+    #addFundModal,
+    #sipModal,
+    #trunkModal,
+    #aiEmailPreviewModal,
+    #aiAgentModal{
+      /* Opaque backdrop so the page behind isn't visible. */
+      background: #050816 !important;
+    }
+
     #addFundModal > div,
     #sipModal > div,
     #trunkModal > div,
     #aiEmailPreviewModal > div,
     #aiAgentModal .ai-agent-modal-card{
-      background: linear-gradient(180deg, rgba(255,255,255,.10) 0%, rgba(255,255,255,.06) 100%) !important;
+      /* Opaque modal cards (no transparency / no see-through). */
+      background: linear-gradient(180deg, #111a35 0%, #0b1024 100%) !important;
       border:1px solid rgba(255,255,255,.14) !important;
       box-shadow: 0 24px 90px rgba(0,0,0,.70) !important;
       color: rgba(255,255,255,.92) !important;
