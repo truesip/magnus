@@ -280,6 +280,48 @@
     .kpi-label{font-size:12px;color:rgba(255,255,255,.60);margin-bottom:4px}
     .kpi-value{font-size:20px;font-weight:900;color:rgba(255,255,255,.92)}
     .kpi-sub{font-size:11px;color:rgba(255,255,255,.48)}
+    /* Dialer */
+    #dialer-campaigns-table{table-layout:fixed}
+    #dialer-campaigns-table th:nth-child(1){width:22%}
+    #dialer-campaigns-table th:nth-child(2){width:16%}
+    #dialer-campaigns-table th:nth-child(3){width:14%}
+    #dialer-campaigns-table th:nth-child(4){width:16%}
+    #dialer-campaigns-table th:nth-child(5){width:12%}
+    #dialer-campaigns-table th:nth-child(6){width:10%}
+    #dialer-campaigns-table th:nth-child(7){width:12%}
+    .dialer-status-badge{
+      display:inline-flex;
+      align-items:center;
+      gap:4px;
+      padding:3px 8px;
+      border-radius:999px;
+      font-size:11px;
+      font-weight:700;
+      text-transform:capitalize;
+      border:1px solid rgba(255,255,255,.12);
+      background:rgba(255,255,255,.05);
+      color:rgba(255,255,255,.92);
+    }
+    .dialer-status-running{border-color:rgba(16,185,129,.45);background:rgba(16,185,129,.15);color:#bbf7d0}
+    .dialer-status-paused{border-color:rgba(245,158,11,.45);background:rgba(245,158,11,.15);color:#fde68a}
+    .dialer-status-draft{border-color:rgba(255,255,255,.20);color:rgba(255,255,255,.75)}
+    .dialer-status-completed{border-color:rgba(59,130,246,.35);background:rgba(59,130,246,.12);color:#cfe0ff}
+    .dialer-chip-grid{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+    .dialer-chip{
+      background:rgba(255,255,255,.08);
+      border:1px solid rgba(255,255,255,.16);
+      border-radius:10px;
+      padding:3px 7px;
+      font-size:11px;
+      color:rgba(255,255,255,.82);
+      display:inline-flex;
+      gap:4px;
+      align-items:center;
+    }
+    .dialer-chip strong{font-weight:900;color:#fff}
+    .dialer-actions{display:flex;flex-wrap:wrap;gap:6px}
+    .dialer-actions button{font-size:11px;padding:6px 10px;border-radius:10px}
+    #dialerStatus{font-size:12px;margin-left:auto}
     #callsChartContainer{margin-top:8px;margin-bottom:16px;background:rgba(255,255,255,.05);border-radius:16px;border:1px solid rgba(255,255,255,.10);padding:12px}
     #callsChart{width:100%;max-height:220px}
 
@@ -682,6 +724,35 @@
       </section>
       <section id="view-dialer" style="display:none">
         <h2>Outbound Dialer</h2>
+        <div class="muted" style="margin-bottom:10px">
+          Launch AI-powered outbound campaigns: pick an AI agent, connect one of your SIP accounts, upload leads from CSV,
+          then start, pause, or complete the run while tracking answer/voicemail/transfer metrics.
+        </div>
+        <div class="toolbar" id="dialer-toolbar">
+          <button id="dialerCreateBtn" class="btn--primary">➕ Create Campaign</button>
+          <button id="dialerRefreshBtn">Refresh</button>
+          <div id="dialerStatus" class="muted"></div>
+        </div>
+        <table id="dialer-campaigns-table" style="display:none">
+          <thead>
+            <tr>
+              <th>Campaign</th>
+              <th>AI Agent</th>
+              <th>SIP Account</th>
+              <th>Leads</th>
+              <th>Concurrency</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div class="toolbar" id="dialer-pager" style="display:none">
+          <button id="dialerPrev">Prev</button>
+          <span id="dialerPageInfo" class="muted"></span>
+          <button id="dialerNext">Next</button>
+        </div>
+        <div id="dialer-empty" class="muted">Loading…</div>
       </section>
       <section id="view-phonesystem" style="display:none">
         <h2>Phone.System</h2>
@@ -1168,6 +1239,59 @@
 
 
     <!-- AI Agent Modal -->
+    <div id="dialerCreateModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
+      <div style="background:#ffffff;padding:16px;border-radius:14px;width:420px;max-width:92%;max-height:92vh;overflow:auto;color:#0f172a">
+        <h3 style="margin:0 0 10px 0">📞 Create Dialer Campaign</h3>
+        <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
+          <label style="display:flex;flex-direction:column;gap:4px">
+            <span>Campaign Name *</span>
+            <input id="dialerCampaignNameInput" type="text" placeholder="e.g. January Renewals" required>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px">
+            <span>AI Agent *</span>
+            <select id="dialerAgentSelect"><option value="">Loading agents…</option></select>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px">
+            <span>SIP Account *</span>
+            <select id="dialerSipSelect"><option value="">Loading SIP accounts…</option></select>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px">
+            <span>Concurrent Calls</span>
+            <input id="dialerConcurrencyInput" type="range" min="1" max="20" value="1">
+            <div class="muted" style="font-size:12px;color:#475569">Simultaneous calls: <strong id="dialerConcurrencyValue">1</strong></div>
+          </label>
+          <div class="muted" style="font-size:12px;color:#475569">
+            After creating the campaign you can upload leads (CSV with columns like <code>phone</code>, <code>name</code>, <code>metadata</code>) and start dialing.
+          </div>
+          <div id="dialerCreateError" class="muted" style="display:none;color:#b91c1c;font-size:12px"></div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+          <button id="dialerCancelCreateBtn" class="btn--muted" type="button">Cancel</button>
+          <button id="dialerSaveCampaignBtn" class="btn--primary" type="button">Save Campaign</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="dialerUploadModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
+      <div style="background:#ffffff;padding:16px;border-radius:14px;width:420px;max-width:92%;max-height:92vh;overflow:auto;color:#0f172a">
+        <h3 style="margin:0 0 6px 0">📋 Upload Leads</h3>
+        <div class="muted" style="margin-bottom:10px;color:#475569;font-size:12px">Campaign: <strong id="dialerUploadCampaignName">—</strong></div>
+        <label style="display:flex;flex-direction:column;gap:6px;font-size:13px">
+          <span>CSV File *</span>
+          <input id="dialerUploadFile" type="file" accept=".csv,text/csv">
+        </label>
+        <div class="muted" style="font-size:12px;color:#475569;margin-top:8px">
+          Include a header row. Only digits are required in <code>phone</code>; we auto-format to E.164.
+          Optional columns: <code>name</code>, <code>metadata</code> (JSON or text). Limit 5,000 leads per upload.
+        </div>
+        <div id="dialerUploadStatus" class="muted" style="margin-top:10px;font-size:12px;color:#475569"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+          <button id="dialerUploadCloseBtn" class="btn--muted" type="button">Close</button>
+          <button id="dialerUploadSubmitBtn" class="btn--primary" type="button">Upload Leads</button>
+        </div>
+      </div>
+    </div>
+
     <div id="aiAgentModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
       <div class="ai-agent-modal-card" style="background:#fff;padding:14px;border-radius:10px;width:320px;max-width:92%;max-height:92vh;overflow:auto">
         <h3 style="margin:0 0 10px 0" id="aiAgentModalTitle">🤖 Create AI Agent</h3>
@@ -1371,13 +1495,501 @@
     tabs.profile.addEventListener('click',e=>{e.preventDefault();activate('profile');loadProfile();});
     tabs.sip.addEventListener('click',e=>{e.preventDefault();activate('sip');sipPage=0;loadSip();});
     tabs.trunk.addEventListener('click',e=>{e.preventDefault();activate('trunk');trunkPage=0;loadTrunks();});
-    tabs.dialer.addEventListener('click',e=>{e.preventDefault();activate('dialer');});
+    tabs.dialer.addEventListener('click',e=>{e.preventDefault();activate('dialer');openDialerTab();});
     tabs.phonesystem.addEventListener('click',e=>{e.preventDefault();activate('phonesystem');openPhoneSystemTab();});
     tabs.billing.addEventListener('click',e=>{e.preventDefault();activate('billing');billingPage=0;loadBillingHistory();});
     tabs.buydid.addEventListener('click',e=>{e.preventDefault();activate('buydid');loadCountries();});
     tabs.mydids.addEventListener('click',e=>{e.preventDefault();activate('mydids');mydidsPage=0;loadMyDids();});
     tabs.ai.addEventListener('click',e=>{e.preventDefault();activate('ai');activateAiSubtab('agents');loadAiAgents();loadAiNumbers();});
     tabs.cdr.addEventListener('click',e=>{e.preventDefault();activate('cdr');cdrPage=0;loadCdrDidOptions();loadCdr();});
+
+    // ========== Outbound Dialer ==========
+    let dialerUiInit = false;
+    let dialerCampaigns = [];
+    let dialerPage = 0;
+    const dialerPageSize = 25;
+    let dialerTotal = 0;
+    let dialerSipOptions = [];
+    let dialerUploadCampaignId = null;
+
+    function setDialerStatus(msg, isError){
+      const el = $('#dialerStatus');
+      if (!el) return;
+      el.textContent = msg || '';
+      el.style.color = isError ? '#f87171' : 'rgba(255,255,255,.70)';
+    }
+
+    function dialerStatusBadge(status){
+      const s = String(status || 'draft').toLowerCase();
+      const cls = {
+        running: 'dialer-status-running',
+        paused: 'dialer-status-paused',
+        completed: 'dialer-status-completed',
+        draft: 'dialer-status-draft'
+      }[s] || 'dialer-status-draft';
+      return `<span class="dialer-status-badge ${cls}">${escapeHtml(s)}</span>`;
+    }
+
+    function dialerNumber(val){
+      const num = Number(val || 0);
+      if (!Number.isFinite(num)) return '0';
+      return num.toLocaleString();
+    }
+
+    function dialerStatsChips(stats){
+      const s = stats || {};
+      return [
+        { label: 'Pending', value: s.pending },
+        { label: 'Live', value: s.inProgress },
+        { label: 'Done', value: s.completed },
+        { label: 'Failed', value: s.failed },
+        { label: 'Answered', value: s.answered },
+        { label: 'Voicemail', value: s.voicemail },
+        { label: 'Transferred', value: s.transferred }
+      ].map(item => `<span class="dialer-chip"><strong>${dialerNumber(item.value)}</strong> ${escapeHtml(item.label)}</span>`).join('');
+    }
+
+    function findDialerCampaign(id){
+      const target = String(id || '');
+      return dialerCampaigns.find(c => String(c.id) === target) || null;
+    }
+
+    function renderDialerCampaigns(){
+      const table = $('#dialer-campaigns-table');
+      const empty = $('#dialer-empty');
+      const pager = $('#dialer-pager');
+      const pageInfo = $('#dialerPageInfo');
+      if (!table || !empty) return;
+      const tbody = table.querySelector('tbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+
+      if (!dialerCampaigns.length){
+        table.style.display = 'none';
+        empty.style.display = 'block';
+        empty.textContent = 'No campaigns yet. Click “Create Campaign”.';
+        if (pager) pager.style.display = 'none';
+        if (pageInfo) pageInfo.textContent = '';
+        return;
+      }
+
+      table.style.display = 'table';
+      empty.style.display = 'none';
+
+      const renderedTotal = typeof dialerTotal === 'number' ? dialerTotal : dialerCampaigns.length;
+      const totalPages = Math.max(1, Math.ceil(renderedTotal / dialerPageSize));
+      if (pager) pager.style.display = totalPages > 1 ? 'flex' : 'none';
+      if (pageInfo) pageInfo.textContent = totalPages > 1 ? `Page ${dialerPage + 1} of ${totalPages}` : '';
+
+      for (const c of dialerCampaigns){
+        const stats = c.stats || {};
+        const updatedAt = c.updated_at ? new Date(c.updated_at).toLocaleString() : '—';
+        const aiName = c.ai_agent_name || `Agent ${c.ai_agent_id || ''}`;
+        const sipLabel = c.sip_account_label || c.sip_account_id || '—';
+        const leadsSummary = `${dialerNumber(stats.completed)} / ${dialerNumber(stats.totalLeads)} completed`;
+        const actions = [];
+        actions.push(`<button class="btn--muted" data-dialer-action="upload" data-id="${escapeHtml(String(c.id))}">Upload CSV</button>`);
+        if (String(c.status) === 'running'){
+          actions.push(`<button class="btn--warning" data-dialer-action="pause" data-id="${escapeHtml(String(c.id))}">Pause</button>`);
+        } else if (String(c.status) === 'completed'){
+          // no start button
+        } else {
+          actions.push(`<button class="btn--success" data-dialer-action="start" data-id="${escapeHtml(String(c.id))}">Start</button>`);
+        }
+        if (String(c.status) !== 'completed'){
+          actions.push(`<button data-dialer-action="complete" data-id="${escapeHtml(String(c.id))}">Mark Complete</button>`);
+        }
+        actions.push(`<button class="btn--danger" data-dialer-action="delete" data-id="${escapeHtml(String(c.id))}">Delete</button>`);
+
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>
+            <div style="font-weight:700">${escapeHtml(c.name || '')}</div>
+            <div class="muted" style="font-size:11px">Updated ${escapeHtml(updatedAt)}</div>
+            <div class="dialer-chip-grid">${dialerStatsChips(stats)}</div>
+          </td>
+          <td>${escapeHtml(aiName)}</td>
+          <td>${escapeHtml(sipLabel)}</td>
+          <td>${escapeHtml(leadsSummary)}</td>
+          <td>${dialerNumber(c.concurrency_limit || c.concurrency || 1)}</td>
+          <td>${dialerStatusBadge(c.status)}</td>
+          <td><div class="dialer-actions">${actions.join(' ')}</div></td>`;
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function loadDialerCampaigns(){
+      const empty = $('#dialer-empty');
+      if (empty) { empty.style.display = 'block'; empty.textContent = 'Loading…'; }
+      setDialerStatus('Loading campaigns…');
+      try {
+        const r = await fetch(`/api/me/dialer/campaigns?page=${dialerPage}&pageSize=${dialerPageSize}`);
+        const j = await r.json();
+        if (!r.ok || !j || j.success === false){
+          throw new Error(j?.message || 'Failed to load campaigns');
+        }
+        dialerCampaigns = Array.isArray(j.data) ? j.data : grabRows(j);
+        dialerTotal = typeof j.total === 'number' ? j.total : dialerCampaigns.length;
+        renderDialerCampaigns();
+        if (dialerCampaigns.length){
+          setDialerStatus(`Showing ${dialerCampaigns.length} campaign${dialerCampaigns.length === 1 ? '' : 's'}.`);
+        } else {
+          setDialerStatus('Create your first campaign to begin.');
+        }
+      } catch (err) {
+        console.error('[dialer.load]', err);
+        dialerCampaigns = [];
+        renderDialerCampaigns();
+        setDialerStatus(err?.message || 'Failed to load campaigns', true);
+        if (empty) empty.textContent = 'Failed to load campaigns.';
+      }
+    }
+
+    async function ensureDialerAgentOptions(){
+      if (!Array.isArray(aiAgentsData) || !aiAgentsData.length){
+        try { await loadAiAgents(); } catch (e) { console.warn('[dialer] loadAiAgents failed', e); }
+      }
+    }
+
+    async function ensureDialerSipOptions(force=false){
+      if (!force && dialerSipOptions.length) return dialerSipOptions;
+      try {
+        const r = await fetch('/api/me/sip-users?page=0&pageSize=200');
+        const j = await r.json();
+        if (!r.ok || !j || j.success === false){
+          throw new Error(j?.message || 'Failed to load SIP accounts');
+        }
+        const rows = grabRows(j);
+        dialerSipOptions = rows.map(row => {
+          const id = row && (row.id || row.id_sip || row.idUser || row.id_user || row.idsip);
+          const username = row && (row.username || row.name || row.sipuser || '');
+          const callerId = row && (row.callerid || row.cid || row.calleridname || '');
+          return {
+            id: id != null ? String(id) : '',
+            label: (username && String(username).trim()) || (callerId && String(callerId).trim()) || `SIP ${id || ''}`
+          };
+        }).filter(opt => opt.id);
+      } catch (err) {
+        dialerSipOptions = [];
+        throw err;
+      }
+      return dialerSipOptions;
+    }
+
+    function populateDialerAgentSelect(){
+      const sel = $('#dialerAgentSelect');
+      if (!sel) return;
+      const prev = sel.value;
+      sel.innerHTML = '';
+      if (!Array.isArray(aiAgentsData) || !aiAgentsData.length){
+        const opt = new Option('Create an AI agent first', '');
+        opt.disabled = true;
+        sel.appendChild(opt);
+        sel.disabled = true;
+        return;
+      }
+      sel.disabled = false;
+      sel.appendChild(new Option('Select AI agent…', ''));
+      for (const a of aiAgentsData){
+        const id = a && a.id != null ? String(a.id) : '';
+        if (!id) continue;
+        sel.appendChild(new Option(a.display_name || `Agent ${id}`, id));
+      }
+      const still = Array.from(sel.options || []).some(o => o.value === prev);
+      sel.value = still ? prev : '';
+    }
+
+    function populateDialerSipSelect(){
+      const sel = $('#dialerSipSelect');
+      if (!sel) return;
+      const prev = sel.value;
+      sel.innerHTML = '';
+      if (!dialerSipOptions.length){
+        const opt = new Option('Create a SIP account first', '');
+        opt.disabled = true;
+        sel.appendChild(opt);
+        sel.disabled = true;
+        return;
+      }
+      sel.disabled = false;
+      sel.appendChild(new Option('Select SIP account…', ''));
+      for (const s of dialerSipOptions){
+        sel.appendChild(new Option(s.label || s.id, s.id));
+      }
+      const still = Array.from(sel.options || []).some(o => o.value === prev);
+      sel.value = still ? prev : '';
+    }
+
+    async function openDialerCreateModal(){
+      const modal = $('#dialerCreateModal');
+      if (!modal) return;
+      $('#dialerCampaignNameInput').value = '';
+      $('#dialerConcurrencyInput').value = '1';
+      $('#dialerConcurrencyValue').textContent = '1';
+      const errorEl = $('#dialerCreateError');
+      if (errorEl) { errorEl.style.display = 'none'; errorEl.textContent = ''; }
+      try {
+        await ensureDialerAgentOptions();
+        populateDialerAgentSelect();
+      } catch (e) {
+        setDialerStatus(e?.message || 'Load AI agents first', true);
+      }
+      try {
+        await ensureDialerSipOptions();
+        populateDialerSipSelect();
+      } catch (e) {
+        setDialerStatus(e?.message || 'Failed to load SIP accounts', true);
+      }
+      modal.style.display = 'flex';
+      setTimeout(() => { try { $('#dialerCampaignNameInput').focus(); } catch {} }, 0);
+    }
+
+    function closeDialerCreateModal(){
+      const modal = $('#dialerCreateModal');
+      if (modal) modal.style.display = 'none';
+    }
+
+    async function submitDialerCreateForm(){
+      const name = ($('#dialerCampaignNameInput').value || '').trim();
+      const agentId = ($('#dialerAgentSelect').value || '').trim();
+      const sipId = ($('#dialerSipSelect').value || '').trim();
+      const concurrency = parseInt($('#dialerConcurrencyInput').value || '1', 10) || 1;
+      const errorEl = $('#dialerCreateError');
+
+      if (!name || !agentId || !sipId){
+        if (errorEl){
+          errorEl.textContent = 'Name, AI agent, and SIP account are required.';
+          errorEl.style.display = 'block';
+        }
+        return;
+      }
+
+      const btn = $('#dialerSaveCampaignBtn');
+      if (btn){
+        btn.disabled = true;
+        btn.textContent = 'Saving...';
+      }
+      setDialerStatus('Creating campaign…');
+
+      try {
+        const payload = {
+          name,
+          ai_agent_id: agentId,
+          sip_account_id: sipId,
+          concurrency_limit: concurrency
+        };
+        const r = await fetch('/api/me/dialer/campaigns', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const j = await r.json();
+        if (!r.ok || !j || j.success === false){
+          throw new Error(j?.message || 'Failed to create campaign');
+        }
+        showToast('Campaign created.');
+        closeDialerCreateModal();
+        await loadDialerCampaigns();
+        const newId = j && j.data && j.data.id != null ? String(j.data.id) : '';
+        if (newId){
+          openDialerUploadModal(newId);
+        }
+      } catch (err) {
+        if (errorEl){
+          errorEl.textContent = err?.message || 'Failed to create campaign.';
+          errorEl.style.display = 'block';
+        }
+        setDialerStatus(err?.message || 'Failed to create campaign', true);
+      } finally {
+        if (btn){
+          btn.disabled = false;
+          btn.textContent = 'Save Campaign';
+        }
+      }
+    }
+
+    function openDialerUploadModal(campaignId){
+      const modal = $('#dialerUploadModal');
+      if (!modal) return;
+      dialerUploadCampaignId = campaignId ? String(campaignId) : '';
+      const row = findDialerCampaign(dialerUploadCampaignId);
+      const nameEl = $('#dialerUploadCampaignName');
+      if (nameEl) nameEl.textContent = row ? (row.name || `Campaign ${row.id}`) : `Campaign ${dialerUploadCampaignId || ''}`;
+      const statusEl = $('#dialerUploadStatus');
+      if (statusEl) { statusEl.textContent = ''; statusEl.style.color = '#475569'; }
+      const fileInput = $('#dialerUploadFile');
+      if (fileInput) fileInput.value = '';
+      modal.style.display = 'flex';
+    }
+
+    function closeDialerUploadModal(){
+      const modal = $('#dialerUploadModal');
+      if (modal) modal.style.display = 'none';
+      dialerUploadCampaignId = null;
+    }
+
+    async function submitDialerUploadForm(){
+      const statusEl = $('#dialerUploadStatus');
+      const btn = $('#dialerUploadSubmitBtn');
+      if (!dialerUploadCampaignId){
+        if (statusEl){ statusEl.textContent = 'Select a campaign first.'; statusEl.style.color = '#b91c1c'; }
+        return;
+      }
+      const fileInput = $('#dialerUploadFile');
+      const file = fileInput && fileInput.files ? fileInput.files[0] : null;
+      if (!file){
+        if (statusEl){ statusEl.textContent = 'Choose a CSV file to upload.'; statusEl.style.color = '#b91c1c'; }
+        return;
+      }
+      if (statusEl){ statusEl.textContent = 'Uploading…'; statusEl.style.color = '#475569'; }
+      if (btn){ btn.disabled = true; btn.textContent = 'Uploading...'; }
+      try {
+        const fd = new FormData();
+        fd.append('file', file);
+        const r = await fetch(`/api/me/dialer/campaigns/${encodeURIComponent(dialerUploadCampaignId)}/leads-upload`, {
+          method: 'POST',
+          body: fd
+        });
+        const j = await r.json();
+        if (!r.ok || !j || j.success === false){
+          throw new Error(j?.message || 'Failed to upload leads');
+        }
+        const inserted = j && j.data ? Number(j.data.inserted || 0) : 0;
+        const duplicates = j && j.data ? Number(j.data.duplicates || 0) : 0;
+        const invalid = j && j.data ? Number(j.data.invalid || 0) : 0;
+        if (statusEl){
+          statusEl.textContent = `Inserted ${inserted}, duplicates ${duplicates}, invalid ${invalid}.`;
+          statusEl.style.color = '#10b981';
+        }
+        showToast(`Uploaded ${inserted} lead${inserted === 1 ? '' : 's'}.`);
+        await loadDialerCampaigns();
+      } catch (err) {
+        if (statusEl){
+          statusEl.textContent = err?.message || 'Upload failed.';
+          statusEl.style.color = '#b91c1c';
+        }
+      } finally {
+        if (btn){ btn.disabled = false; btn.textContent = 'Upload Leads'; }
+      }
+    }
+
+    async function updateDialerCampaignStatus(id, action){
+      setDialerStatus('Updating campaign…');
+      try {
+        const r = await fetch(`/api/me/dialer/campaigns/${encodeURIComponent(id)}/status`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action })
+        });
+        const j = await r.json();
+        if (!r.ok || !j || j.success === false){
+          throw new Error(j?.message || 'Failed to update status');
+        }
+        showToast(`Campaign ${action}ed.`);
+        await loadDialerCampaigns();
+      } catch (err) {
+        setDialerStatus(err?.message || 'Failed to update status', true);
+        showToast(err?.message || 'Failed to update status', 'error');
+      }
+    }
+
+    async function deleteDialerCampaign(id){
+      if (!confirm('Delete this campaign? This action cannot be undone.')) return;
+      setDialerStatus('Deleting campaign…');
+      try {
+        const r = await fetch(`/api/me/dialer/campaigns/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        const j = await r.json();
+        if (!r.ok || !j || j.success === false){
+          throw new Error(j?.message || 'Failed to delete campaign');
+        }
+        showToast('Campaign deleted.');
+        await loadDialerCampaigns();
+      } catch (err) {
+        setDialerStatus(err?.message || 'Failed to delete campaign', true);
+        showToast(err?.message || 'Failed to delete campaign', 'error');
+      }
+    }
+
+    function initDialerUi(){
+      if (dialerUiInit) return;
+      dialerUiInit = true;
+
+      const createBtn = $('#dialerCreateBtn');
+      if (createBtn) createBtn.addEventListener('click', (e) => { e.preventDefault(); openDialerCreateModal(); });
+
+      const refreshBtn = $('#dialerRefreshBtn');
+      if (refreshBtn) refreshBtn.addEventListener('click', (e) => { e.preventDefault(); loadDialerCampaigns(); });
+
+      const cancelCreateBtn = $('#dialerCancelCreateBtn');
+      if (cancelCreateBtn) cancelCreateBtn.addEventListener('click', (e) => { e.preventDefault(); closeDialerCreateModal(); });
+
+      const saveCampaignBtn = $('#dialerSaveCampaignBtn');
+      if (saveCampaignBtn) saveCampaignBtn.addEventListener('click', (e) => { e.preventDefault(); submitDialerCreateForm(); });
+
+      const createModal = $('#dialerCreateModal');
+      if (createModal) createModal.addEventListener('click', (e) => { if (e.target === createModal) closeDialerCreateModal(); });
+
+      const uploadCloseBtn = $('#dialerUploadCloseBtn');
+      if (uploadCloseBtn) uploadCloseBtn.addEventListener('click', (e) => { e.preventDefault(); closeDialerUploadModal(); });
+
+      const uploadSubmitBtn = $('#dialerUploadSubmitBtn');
+      if (uploadSubmitBtn) uploadSubmitBtn.addEventListener('click', (e) => { e.preventDefault(); submitDialerUploadForm(); });
+
+      const uploadModal = $('#dialerUploadModal');
+      if (uploadModal) uploadModal.addEventListener('click', (e) => { if (e.target === uploadModal) closeDialerUploadModal(); });
+
+      const concurrencyInput = $('#dialerConcurrencyInput');
+      if (concurrencyInput){
+        concurrencyInput.addEventListener('input', () => {
+          const out = $('#dialerConcurrencyValue');
+          if (out) out.textContent = concurrencyInput.value;
+        });
+      }
+
+      const table = $('#dialer-campaigns-table');
+      if (table){
+        table.addEventListener('click', (e) => {
+          const btn = e.target.closest?.('[data-dialer-action]');
+          if (!btn) return;
+          const id = btn.getAttribute('data-id');
+          const action = btn.getAttribute('data-dialer-action');
+          if (!id || !action) return;
+          if (action === 'upload'){
+            openDialerUploadModal(id);
+          } else if (action === 'start' || action === 'pause' || action === 'complete'){
+            updateDialerCampaignStatus(id, action);
+          } else if (action === 'delete'){
+            deleteDialerCampaign(id);
+          }
+        });
+      }
+
+      const prevBtn = $('#dialerPrev');
+      if (prevBtn) prevBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (dialerPage > 0){
+          dialerPage -= 1;
+          loadDialerCampaigns();
+        }
+      });
+
+      const nextBtn = $('#dialerNext');
+      if (nextBtn) nextBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        const renderedTotal = typeof dialerTotal === 'number' ? dialerTotal : dialerCampaigns.length;
+        if ((dialerPage + 1) * dialerPageSize < renderedTotal){
+          dialerPage += 1;
+          loadDialerCampaigns();
+        }
+      });
+    }
+
+    function openDialerTab(){
+      initDialerUi();
+      loadDialerCampaigns();
+      ensureDialerAgentOptions().then(populateDialerAgentSelect).catch(() => {});
+      ensureDialerSipOptions().then(populateDialerSipSelect).catch(() => {});
+    }
     function grabRows(payload){
       const d = (payload && typeof payload === 'object') ? (payload.data ?? payload) : payload;
       if (Array.isArray(d)) return d;
