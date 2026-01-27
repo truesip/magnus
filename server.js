@@ -7630,6 +7630,67 @@ app.get('/api/me/dialer/campaigns/:campaignId/stats', requireAuth, async (req, r
   }
 });
 
+// Debug endpoint: manually update call status for testing
+app.post('/api/me/dialer/debug/update-call-status', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const callId = String(req.body?.call_id || '').trim();
+    const status = String(req.body?.status || '').trim();
+    const result = String(req.body?.result || '').trim();
+    const durationSec = req.body?.duration_sec != null ? Number(req.body.duration_sec) : null;
+
+    if (!callId) return res.status(400).json({ success: false, message: 'call_id is required' });
+
+    // Find the call log by call_id
+    const [logRows] = await pool.execute(
+      'SELECT id, lead_id, campaign_id, user_id FROM dialer_call_logs WHERE call_id = ? ORDER BY id DESC LIMIT 1',
+      [callId]
+    );
+    const logRow = logRows && logRows[0] ? logRows[0] : null;
+
+    if (!logRow) {
+      return res.status(404).json({ success: false, message: 'Call log not found' });
+    }
+
+    // Verify ownership
+    if (Number(logRow.user_id) !== Number(userId)) {
+      return res.status(403).json({ success: false, message: 'Unauthorized' });
+    }
+
+    // Update call log
+    await pool.execute(
+      `UPDATE dialer_call_logs
+       SET status = COALESCE(?, status),
+           result = COALESCE(?, result),
+           duration_sec = COALESCE(?, duration_sec),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? LIMIT 1`,
+      [status || null, result || null, durationSec, logRow.id]
+    );
+
+    // Update lead if result is specified
+    if (result && logRow.lead_id) {
+      const leadStatus = ['answered', 'voicemail', 'transferred'].includes(result)
+        ? result
+        : (result === 'failed' ? 'failed' : 'completed');
+      await pool.execute(
+        'UPDATE dialer_leads SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? LIMIT 1',
+        [leadStatus, logRow.lead_id, userId]
+      );
+    }
+
+    return res.json({
+      success: true,
+      message: 'Call status updated',
+      data: { callId, logId: logRow.id, leadId: logRow.lead_id }
+    });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.debug.update-call-status] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: e?.message || 'Failed to update call status' });
+  }
+});
+
 function buildDialerCallIdentifiers({ campaignId, leadId }) {
   const ts = Date.now().toString(36);
   const callId = `d${campaignId}l${leadId}-${ts}`.slice(0, 64);
@@ -15567,6 +15628,11 @@ app.post('/webhooks/daily/events', async (req, res) => {
 
     const root = req.body;
 
+    // Enhanced logging
+    if (DEBUG) {
+      console.log('[daily.webhook] Received webhook:', JSON.stringify(root).slice(0, 500));
+    }
+
     // Daily may send a single event object or (less commonly) a batch array.
     // Support both so we don't silently ignore valid deliveries.
     const events = Array.isArray(root)
@@ -15935,6 +16001,21 @@ app.post('/webhooks/daily/events', async (req, res) => {
           }
           if (!leadRow) {
             try { leadRow = await findDialerLeadByToDigits(); } catch {}
+          }
+
+          // Enhanced debug logging for dialout events
+          if (DEBUG) {
+            console.log('[daily.webhook] Processing dialout event:', {
+              type: typeRaw,
+              leadStatus,
+              logStatus,
+              resultVal,
+              durationSec,
+              foundLogRow: !!logRow,
+              foundLeadRow: !!leadRow,
+              callIdCandidates: callIdCandidates.slice(0, 3),
+              toDigits: toDigits || null
+            });
           }
 
           let leadUpdated = false;
