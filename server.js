@@ -7637,14 +7637,10 @@ function buildDialerCallIdentifiers({ campaignId, leadId }) {
   return { callId, callDomain };
 }
 
-function buildDialerDailyRoomProperties({ displayName }) {
+function buildDialerDailyRoomProperties() {
   const props = {
-    sip: {
-      sip_mode: 'dial-in',
-      num_endpoints: 1
-    }
+    enable_dialout: true
   };
-  if (displayName) props.sip.display_name = String(displayName).slice(0, 64);
   if (DIALER_DAILY_ROOM_TTL_SECONDS > 0) {
     props.exp = Math.floor(Date.now() / 1000) + DIALER_DAILY_ROOM_TTL_SECONDS;
   }
@@ -7655,20 +7651,20 @@ async function resolveDialerCallerId({ userId, agentId }) {
   if (!pool) return '';
   try {
     const [rows] = await pool.execute(
-      'SELECT phone_number FROM ai_numbers WHERE user_id = ? AND agent_id = ? AND cancel_pending = 0 ORDER BY updated_at DESC LIMIT 1',
+      'SELECT daily_number_id FROM ai_numbers WHERE user_id = ? AND agent_id = ? AND cancel_pending = 0 ORDER BY updated_at DESC LIMIT 1',
       [userId, agentId]
     );
     const row = rows && rows[0] ? rows[0] : null;
-    if (row && row.phone_number) return String(row.phone_number);
+    if (row && row.daily_number_id) return String(row.daily_number_id);
   } catch {}
 
   try {
     const [rows] = await pool.execute(
-      'SELECT phone_number FROM ai_numbers WHERE user_id = ? AND cancel_pending = 0 ORDER BY updated_at DESC LIMIT 1',
+      'SELECT daily_number_id FROM ai_numbers WHERE user_id = ? AND cancel_pending = 0 ORDER BY updated_at DESC LIMIT 1',
       [userId]
     );
     const row = rows && rows[0] ? rows[0] : null;
-    if (row && row.phone_number) return String(row.phone_number);
+    if (row && row.daily_number_id) return String(row.daily_number_id);
   } catch {}
 
   return '';
@@ -7711,13 +7707,10 @@ async function startDialerLeadCall({ campaign, lead }) {
 
   const callerId = await resolveDialerCallerId({ userId, agentId });
   const { callId, callDomain } = buildDialerCallIdentifiers({ campaignId, leadId });
-  const displayName = lead.lead_name || 'TalkUSA Dialer';
-
   const dialoutSettings = {
     phoneNumber: String(lead.phone_number || '').trim()
   };
   if (callerId) dialoutSettings.callerId = String(callerId);
-  if (displayName) dialoutSettings.displayName = String(displayName);
 
   const metadata = {
     campaign_id: campaignId,
@@ -7748,13 +7741,13 @@ async function startDialerLeadCall({ campaign, lead }) {
     if (DEBUG) console.warn('[dialer.worker] Failed to insert call log row:', e?.message || e);
   }
 
-  const dailyRoomProperties = buildDialerDailyRoomProperties({ displayName });
+  const dailyRoomProperties = buildDialerDailyRoomProperties();
 
   const startBody = {
     createDailyRoom: true,
     dailyRoomProperties,
     body: {
-      dialout_settings: dialoutSettings,
+      dialout_settings: [dialoutSettings],
       call_id: callId,
       call_domain: callDomain,
       mode: 'dialout',
