@@ -11726,7 +11726,76 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
     if (DEBUG) console.warn('[cdr.timeline] Failed to load outbound from user_mb_cdrs:', e.message || e);
     outbound = [];
   }
+  // Outbound dialer calls from dialer_call_logs (Pipecat dial-out)
+  let dialerOutbound = [];
+  try {
+    const dialerFilters = ['l.user_id = ?'];
+    const dialerParams = [userId];
+    if (fromRaw) {
+      dialerFilters.push('DATE(l.created_at) >= ?');
+      dialerParams.push(fromRaw);
+    }
+    if (toRaw) {
+      dialerFilters.push('DATE(l.created_at) <= ?');
+      dialerParams.push(toRaw);
+    }
+    if (didFilter) {
+      dialerFilters.push('(d.phone_number = ? OR n.phone_number = ?)');
+      dialerParams.push(didFilter, didFilter);
+    }
+    const whereDialerSql = dialerFilters.length ? 'WHERE ' + dialerFilters.join(' AND ') : '';
 
+    const [dialerRows] = await pool.query(
+      `SELECT l.id, l.call_id, l.duration_sec, l.price, l.status, l.result, l.created_at,
+              d.phone_number AS to_number,
+              n.phone_number AS from_number
+       FROM dialer_call_logs l
+       LEFT JOIN dialer_leads d ON d.id = l.lead_id
+       LEFT JOIN ai_numbers n ON n.agent_id = l.ai_agent_id AND n.user_id = l.user_id
+       ${whereDialerSql}
+       ORDER BY l.created_at DESC, l.id DESC`,
+      dialerParams
+    );
+
+    dialerOutbound = (dialerRows || []).map(r => {
+      let timeStart = null;
+      let timeEnd = null;
+      try {
+        if (r.created_at) {
+          const start = (r.created_at instanceof Date) ? r.created_at : new Date(r.created_at);
+          if (!Number.isNaN(start.getTime())) {
+            timeStart = start.toISOString();
+            const dur = Number(r.duration_sec || 0);
+            if (Number.isFinite(dur) && dur > 0) {
+              timeEnd = new Date(start.getTime() + (dur * 1000)).toISOString();
+            }
+          }
+        }
+      } catch {}
+      const durVal = (r.duration_sec != null ? Number(r.duration_sec) : null);
+      return {
+        id: `dialer-${r.id}`,
+        cdrId: r.call_id ? `dialer-${r.call_id}` : null,
+        didNumber: r.from_number || null,
+        direction: 'outbound',
+        srcNumber: r.from_number || '',
+        dstNumber: r.to_number || '',
+        timeStart,
+        timeConnect: timeStart,
+        timeEnd,
+        duration: Number.isFinite(durVal) ? durVal : null,
+        billsec: Number.isFinite(durVal) ? durVal : null,
+        price: r.price != null ? Number(r.price) : null,
+        status: r.status || r.result || null,
+        createdAt: r.created_at ? (r.created_at instanceof Date ? r.created_at.toISOString() : new Date(r.created_at).toISOString()) : null
+      };
+    });
+  } catch (e) {
+    if (DEBUG) console.warn('[cdr.timeline] Failed to load dialer outbound from dialer_call_logs:', e.message || e);
+    dialerOutbound = [];
+  }
+
+  let all = inbound.concat(aiInbound).concat(dialerOutbound).concat(outbound);
   let all = inbound.concat(aiInbound).concat(outbound);
 
   // Sort newest first by timeStart (fallback to createdAt)
@@ -15565,10 +15634,38 @@ app.post('/webhooks/daily/events', async (req, res) => {
 
         // Phone numbers (optional fallback matching)
         const toNumber = String(
-          src.To || src.to || src.to_number || src.toNumber || evt.To || evt.to || evt.to_number || evt.toNumber || ''
+          src.To
+            || src.to
+            || src.to_number
+            || src.toNumber
+            || src.phone_number
+            || src.phoneNumber
+            || src.destination
+            || src.dest
+            || evt.To
+            || evt.to
+            || evt.to_number
+            || evt.toNumber
+            || evt.phone_number
+            || evt.phoneNumber
+            || evt.destination
+            || evt.dest
+            || ''
         ).trim();
         const fromNumber = String(
-          src.From || src.from || src.from_number || src.fromNumber || evt.From || evt.from || evt.from_number || evt.fromNumber || ''
+          src.From
+            || src.from
+            || src.from_number
+            || src.fromNumber
+            || src.caller_id
+            || src.callerId
+            || evt.From
+            || evt.from
+            || evt.from_number
+            || evt.fromNumber
+            || evt.caller_id
+            || evt.callerId
+            || ''
         ).trim();
 
         const toDigits = digitsOnly(toNumber);
