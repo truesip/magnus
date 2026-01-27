@@ -101,6 +101,12 @@ const DIALER_CAMPAIGN_STATUSES = ['draft', 'running', 'paused', 'completed', 'de
 const DIALER_LEAD_STATUSES = ['pending', 'queued', 'dialing', 'answered', 'voicemail', 'transferred', 'failed', 'completed'];
 const DIALER_WORKER_INTERVAL_SECONDS = Math.max(0, parseInt(process.env.DIALER_WORKER_INTERVAL_SECONDS || '0', 10) || 0);
 const DIALER_DAILY_ROOM_TTL_SECONDS = Math.max(0, parseInt(process.env.DIALER_DAILY_ROOM_TTL_SECONDS || '1800', 10) || 1800);
+// Dialer outbound call billing (per-minute equivalent, billed per second by default)
+const DIALER_OUTBOUND_RATE_PER_MIN = parseFloat(
+  process.env.DIALER_OUTBOUND_RATE_PER_MIN || String(AI_INBOUND_LOCAL_RATE_PER_MIN)
+) || AI_INBOUND_LOCAL_RATE_PER_MIN;
+// If 1, dialer outbound calls are billed in whole-minute increments (rounded up).
+const DIALER_OUTBOUND_BILLING_ROUND_UP_TO_MINUTE = String(process.env.DIALER_OUTBOUND_BILLING_ROUND_UP_TO_MINUTE ?? '0') !== '0';
 
 const dialerLeadUpload = multer({
   storage: multer.memoryStorage(),
@@ -1954,6 +1960,9 @@ async function initDb() {
     status VARCHAR(32) NULL,
     result VARCHAR(32) NULL,
     duration_sec INT NULL,
+    price DECIMAL(18,8) NULL,
+    billed TINYINT(1) NOT NULL DEFAULT 0,
+    billing_history_id BIGINT NULL,
     transferred_to VARCHAR(64) NULL,
     recording_url TEXT NULL,
     notes TEXT NULL,
@@ -1963,11 +1972,49 @@ async function initDb() {
     KEY idx_dialer_logs_lead (lead_id),
     KEY idx_dialer_logs_user (user_id),
     KEY idx_dialer_logs_agent (ai_agent_id),
+    KEY idx_dialer_logs_billed (user_id, billed),
     CONSTRAINT fk_dialer_logs_campaign FOREIGN KEY (campaign_id) REFERENCES dialer_campaigns(id) ON DELETE CASCADE,
     CONSTRAINT fk_dialer_logs_lead FOREIGN KEY (lead_id) REFERENCES dialer_leads(id) ON DELETE SET NULL,
     CONSTRAINT fk_dialer_logs_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE,
     CONSTRAINT fk_dialer_logs_agent FOREIGN KEY (ai_agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL
   )`);
+
+  // Ensure dialer_call_logs billing columns exist (price + billed markers)
+  for (const col of [
+    { name: 'price', ddl: 'ALTER TABLE dialer_call_logs ADD COLUMN price DECIMAL(18,8) NULL AFTER duration_sec' },
+    { name: 'billed', ddl: 'ALTER TABLE dialer_call_logs ADD COLUMN billed TINYINT(1) NOT NULL DEFAULT 0 AFTER price' },
+    { name: 'billing_history_id', ddl: 'ALTER TABLE dialer_call_logs ADD COLUMN billing_history_id BIGINT NULL AFTER billed' }
+  ]) {
+    try {
+      const [rows] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='dialer_call_logs' AND column_name=? LIMIT 1",
+        [dbName, col.name]
+      );
+      if (!rows || !rows.length) {
+        await pool.query(col.ddl);
+        if (DEBUG) console.log(`[schema] Added dialer_call_logs.${col.name} column`);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn(`[schema] dialer_call_logs.${col.name} check failed`, e.message || e);
+    }
+  }
+
+  try {
+    const [hasIdx] = await pool.query(
+      "SELECT 1 FROM information_schema.statistics WHERE table_schema=? AND table_name='dialer_call_logs' AND index_name='idx_dialer_logs_billed' LIMIT 1",
+      [dbName]
+    );
+    if (!hasIdx || !hasIdx.length) {
+      try {
+        await pool.query('ALTER TABLE dialer_call_logs ADD KEY idx_dialer_logs_billed (user_id, billed)');
+        if (DEBUG) console.log('[schema] Added dialer_call_logs.idx_dialer_logs_billed index');
+      } catch (e) {
+        if (DEBUG) console.warn('[schema] Failed to add dialer_call_logs.idx_dialer_logs_billed index:', e.message || e);
+      }
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[schema] dialer_call_logs.idx_dialer_logs_billed check failed', e.message || e);
+  }
 
   // AI email send audit log + idempotency
   await pool.query(`CREATE TABLE IF NOT EXISTS ai_email_sends (
@@ -18438,6 +18485,64 @@ async function backfillAiCallPricesForUser({ localUserId, limit = 500 }) {
   }
 }
 
+function rateDialerOutboundCallPrice({ billsec }) {
+  const sec = Number(billsec || 0);
+  const ratePerMin = Number(DIALER_OUTBOUND_RATE_PER_MIN || 0);
+  if (!Number.isFinite(sec) || sec <= 0 || !ratePerMin || ratePerMin <= 0) {
+    return { price: 0, ratePerMin: ratePerMin || 0, billedUnits: 0 };
+  }
+
+  let price = 0;
+  let billedUnits = 0;
+  if (DIALER_OUTBOUND_BILLING_ROUND_UP_TO_MINUTE) {
+    billedUnits = Math.ceil(sec / 60);
+    price = billedUnits * ratePerMin;
+  } else {
+    billedUnits = sec;
+    price = sec * (ratePerMin / 60);
+  }
+
+  const rounded = Number(price.toFixed(6));
+  return { price: Number.isFinite(rounded) ? rounded : 0, ratePerMin, billedUnits };
+}
+
+// Backfill/compute per-call price for dialer outbound calls.
+async function backfillDialerCallPricesForUser({ localUserId, limit = 500 }) {
+  if (!pool || !localUserId) return;
+  if (!DIALER_OUTBOUND_RATE_PER_MIN || DIALER_OUTBOUND_RATE_PER_MIN <= 0) return;
+  try {
+    const safeLimit = Math.max(1, Math.min(2000, parseInt(String(limit || '500'), 10) || 500));
+    const [rows] = await pool.query(
+      `SELECT l.id, l.duration_sec
+       FROM dialer_call_logs l
+       WHERE l.user_id = ?
+         AND COALESCE(l.duration_sec, 0) > 0
+         AND (l.price IS NULL OR l.price <= 0)
+         AND l.status IN ('completed','connected')
+         AND (l.result IS NULL OR l.result <> 'failed')
+       ORDER BY l.created_at DESC, l.id DESC
+       LIMIT ${safeLimit}`,
+      [localUserId]
+    );
+
+    for (const r of rows || []) {
+      const billsec = Number(r.duration_sec || 0);
+      const { price } = rateDialerOutboundCallPrice({ billsec });
+      if (!price || price <= 0) continue;
+      try {
+        await pool.execute(
+          'UPDATE dialer_call_logs SET price = ? WHERE id = ? AND (price IS NULL OR price <= 0)',
+          [price, r.id]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[dialer.call.rate] Failed to update dialer_call_logs.price:', e.message || e);
+      }
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[dialer.call.rate] Backfill failed:', e.message || e);
+  }
+}
+
 // Aggregate and bill inbound AI calls for a user (Daily dial-in -> Pipecat)
 async function billInboundAiCallsForUser({ localUserId, magnusUserId, httpsAgent, hostHeader }) {
   if (!pool || !localUserId || !magnusUserId) return;
@@ -18591,6 +18696,176 @@ async function billInboundAiCallsForUser({ localUserId, magnusUserId, httpsAgent
     );
   } catch (e) {
     if (DEBUG) console.warn('[ai.call.billing] MagnusBilling error while charging AI inbound calls:', e.message || e);
+    await pool.execute(
+      'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+      ['failed', String(e.message || e), billingId]
+    );
+  }
+}
+
+// Aggregate and bill dialer outbound calls for a user (Pipecat dial-out)
+async function billDialerOutboundCallsForUser({ localUserId, magnusUserId, httpsAgent, hostHeader }) {
+  if (!pool || !localUserId || !magnusUserId) return;
+  if (!DIALER_OUTBOUND_RATE_PER_MIN || DIALER_OUTBOUND_RATE_PER_MIN <= 0) return;
+
+  await backfillDialerCallPricesForUser({ localUserId });
+
+  const [[agg]] = await pool.execute(
+    `SELECT SUM(price) AS total_amount, COUNT(*) AS call_count
+     FROM dialer_call_logs
+     WHERE user_id = ?
+       AND billed = 0
+       AND price IS NOT NULL
+       AND price > 0
+       AND COALESCE(duration_sec, 0) > 0
+       AND status IN ('completed','connected')
+       AND (result IS NULL OR result <> 'failed')`,
+    [localUserId]
+  );
+  const totalAmount = Number(agg?.total_amount || 0);
+  const callCount = Number(agg?.call_count || 0);
+  if (!totalAmount || totalAmount <= 0 || !callCount) return;
+
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const now = new Date();
+  const dateLabel = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+  const desc = `Dialer outbound call charges - ${dateLabel} - ${callCount} call${callCount === 1 ? '' : 's'}`;
+
+  const [insertResult] = await pool.execute(
+    'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
+    [localUserId, -totalAmount, desc, 'pending']
+  );
+  const billingId = insertResult.insertId;
+
+  try {
+    await pool.execute(
+      `UPDATE dialer_call_logs
+       SET billed = 1, billing_history_id = ?
+       WHERE user_id = ?
+         AND billed = 0
+         AND price IS NOT NULL
+         AND price > 0
+         AND COALESCE(duration_sec, 0) > 0
+         AND status IN ('completed','connected')
+         AND (result IS NULL OR result <> 'failed')`,
+      [billingId, localUserId]
+    );
+  } catch (e) {
+    if (DEBUG) console.warn('[dialer.call.billing] Failed to mark dialer_call_logs as billed:', e.message || e);
+    return;
+  }
+
+  try {
+    let magnusResponse = null;
+    let success = false;
+    let creditBefore = null;
+
+    try {
+      const beforeInfo = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+      if (beforeInfo && Number.isFinite(beforeInfo.credit)) creditBefore = Number(beforeInfo.credit);
+    } catch (e) {
+      if (DEBUG) console.warn('[dialer.call.billing] Failed to read MagnusBilling credit before charge:', e.message || e);
+    }
+
+    try {
+      const refillParams = new URLSearchParams();
+      refillParams.append('module', 'refill');
+      refillParams.append('action', 'save');
+      refillParams.append('id_user', String(magnusUserId));
+      refillParams.append('credit', String(-totalAmount));
+      refillParams.append('description', desc);
+      refillParams.append('payment', '1');
+      refillParams.append('refill_type', '0');
+
+      const refillResp = await mbSignedCall({ relPath: '/index.php/refill/save', params: refillParams, httpsAgent, hostHeader });
+      magnusResponse = JSON.stringify(refillResp?.data || refillResp || {});
+
+      if (
+        refillResp?.data?.success === true ||
+        (Array.isArray(refillResp?.data?.rows) && refillResp.data.rows.length > 0) ||
+        (refillResp?.status >= 200 && refillResp?.status < 300)
+      ) {
+        success = true;
+
+        if (creditBefore != null) {
+          try {
+            const ensureRes = await ensureMagnusCreditDeltaApplied({
+              magnusUserId,
+              creditDelta: -totalAmount,
+              creditBefore,
+              httpsAgent,
+              hostHeader,
+              label: 'dialer.call.billing'
+            });
+            if (!ensureRes.ok) {
+              success = false;
+              if (DEBUG) console.warn('[dialer.call.billing] Credit correction failed after negative refill; will mark billing failed', {
+                magnusUserId,
+                totalAmount
+              });
+            }
+          } catch (ensureErr) {
+            success = false;
+            if (DEBUG) console.warn('[dialer.call.billing] Credit correction threw after negative refill; will mark billing failed', ensureErr?.message || ensureErr);
+          }
+        }
+
+        if (DEBUG) console.log('[dialer.call.billing.refill] Created negative refill for dialer outbound charges:', {
+          magnusUserId,
+          userId: localUserId,
+          totalAmount,
+          callCount
+        });
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[dialer.call.billing] Refill module failed, falling back to direct credit update:', e.message || e);
+    }
+
+    if (!success) {
+      try {
+        const readParams = new URLSearchParams();
+        readParams.append('module', 'user');
+        readParams.append('action', 'read');
+        readParams.append('start', '0');
+        readParams.append('limit', '100');
+        const readResp = await mbSignedCall({ relPath: '/index.php/user/read', params: readParams, httpsAgent, hostHeader });
+        const allUsers = readResp?.data?.rows || readResp?.data?.data || [];
+        const userRow = allUsers.find(u => String(u.id || u.user_id || u.uid || u.id_user || '') === String(magnusUserId));
+        magnusResponse = JSON.stringify(readResp?.data || readResp || {});
+
+        if (userRow) {
+          const currentCredit = Number(userRow.credit || 0);
+          const newCredit = currentCredit - totalAmount;
+          const updateParams = new URLSearchParams();
+          updateParams.append('module', 'user');
+          updateParams.append('action', 'save');
+          updateParams.append('id', String(magnusUserId));
+          updateParams.append('credit', String(newCredit));
+          const updateResp = await mbSignedCall({ relPath: '/index.php/user/save', params: updateParams, httpsAgent, hostHeader });
+          magnusResponse = JSON.stringify(updateResp?.data || updateResp || {});
+          success = true;
+          if (DEBUG) console.log('[dialer.call.billing] Deducted dialer outbound charges from MagnusBilling credit (fallback path):', {
+            magnusUserId,
+            userId: localUserId,
+            totalAmount,
+            currentCredit,
+            newCredit,
+            callCount
+          });
+        } else if (DEBUG) {
+          console.warn('[dialer.call.billing] Magnus user not found when charging dialer outbound calls (fallback path)', { magnusUserId });
+        }
+      } catch (fallbackErr) {
+        if (DEBUG) console.warn('[dialer.call.billing] Fallback direct credit update failed:', fallbackErr.message || fallbackErr);
+      }
+    }
+
+    await pool.execute(
+      'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
+      [success ? 'completed' : 'failed', magnusResponse || 'No MagnusBilling response', billingId]
+    );
+  } catch (e) {
+    if (DEBUG) console.warn('[dialer.call.billing] MagnusBilling error while charging dialer outbound calls:', e.message || e);
     await pool.execute(
       'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
       ['failed', String(e.message || e), billingId]
@@ -21465,6 +21740,8 @@ async function runMarkupBillingTick() {
 
       // AI inbound call usage
       await billInboundAiCallsForUser({ localUserId, magnusUserId, httpsAgent, hostHeader });
+      // Dialer outbound call usage
+      await billDialerOutboundCallsForUser({ localUserId, magnusUserId, httpsAgent, hostHeader });
 
       // If enabled, keep AI number routing synced with balance (disable when credit < threshold, re-enable when sufficient)
       if (userAiNumbers.length) {
