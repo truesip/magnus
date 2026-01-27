@@ -11796,7 +11796,6 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
   }
 
   let all = inbound.concat(aiInbound).concat(dialerOutbound).concat(outbound);
-  let all = inbound.concat(aiInbound).concat(outbound);
 
   // Sort newest first by timeStart (fallback to createdAt)
   all.sort((a, b) => {
