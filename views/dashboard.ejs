@@ -1240,7 +1240,7 @@
 
     <!-- AI Agent Modal -->
     <div id="dialerCreateModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
-      <div style="background:#ffffff;padding:16px;border-radius:14px;width:420px;max-width:92%;max-height:92vh;overflow:auto;color:#0f172a">
+      <div style="background:linear-gradient(180deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.05) 100%);border:1px solid rgba(255,255,255,.12);box-shadow:var(--shadow-sm);padding:16px;border-radius:14px;width:420px;max-width:92%;max-height:92vh;overflow:auto;color:var(--text)">
         <h3 style="margin:0 0 10px 0">📞 Create Dialer Campaign</h3>
         <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
           <label style="display:flex;flex-direction:column;gap:4px">
@@ -1258,9 +1258,9 @@
           <label style="display:flex;flex-direction:column;gap:4px">
             <span>Concurrent Calls</span>
             <input id="dialerConcurrencyInput" type="range" min="1" max="20" value="1">
-            <div class="muted" style="font-size:12px;color:#475569">Simultaneous calls: <strong id="dialerConcurrencyValue">1</strong></div>
+            <div class="muted" style="font-size:12px;color:rgba(255,255,255,.60)">Simultaneous calls: <strong id="dialerConcurrencyValue">1</strong></div>
           </label>
-          <div class="muted" style="font-size:12px;color:#475569">
+          <div class="muted" style="font-size:12px;color:rgba(255,255,255,.60)">
             After creating the campaign you can upload leads (CSV with columns like <code>phone</code>, <code>name</code>, <code>metadata</code>) and start dialing.
           </div>
           <div id="dialerCreateError" class="muted" style="display:none;color:#b91c1c;font-size:12px"></div>
@@ -1273,18 +1273,18 @@
     </div>
 
     <div id="dialerUploadModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
-      <div style="background:#ffffff;padding:16px;border-radius:14px;width:420px;max-width:92%;max-height:92vh;overflow:auto;color:#0f172a">
+      <div style="background:linear-gradient(180deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.05) 100%);border:1px solid rgba(255,255,255,.12);box-shadow:var(--shadow-sm);padding:16px;border-radius:14px;width:420px;max-width:92%;max-height:92vh;overflow:auto;color:var(--text)">
         <h3 style="margin:0 0 6px 0">📋 Upload Leads</h3>
-        <div class="muted" style="margin-bottom:10px;color:#475569;font-size:12px">Campaign: <strong id="dialerUploadCampaignName">—</strong></div>
+        <div class="muted" style="margin-bottom:10px;color:rgba(255,255,255,.60);font-size:12px">Campaign: <strong id="dialerUploadCampaignName">—</strong></div>
         <label style="display:flex;flex-direction:column;gap:6px;font-size:13px">
           <span>CSV File *</span>
           <input id="dialerUploadFile" type="file" accept=".csv,text/csv">
         </label>
-        <div class="muted" style="font-size:12px;color:#475569;margin-top:8px">
+        <div class="muted" style="font-size:12px;color:rgba(255,255,255,.60);margin-top:8px">
           Include a header row. Only digits are required in <code>phone</code>; we auto-format to E.164.
           Optional columns: <code>name</code>, <code>metadata</code> (JSON or text). Limit 5,000 leads per upload.
         </div>
-        <div id="dialerUploadStatus" class="muted" style="margin-top:10px;font-size:12px;color:#475569"></div>
+        <div id="dialerUploadStatus" class="muted" style="margin-top:10px;font-size:12px;color:rgba(255,255,255,.60)"></div>
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
           <button id="dialerUploadCloseBtn" class="btn--muted" type="button">Close</button>
           <button id="dialerUploadSubmitBtn" class="btn--primary" type="button">Upload Leads</button>
