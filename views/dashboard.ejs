@@ -1705,7 +1705,6 @@
       const concurrency = parseInt($('#dialerConcurrencyInput').value || '1', 10) || 1;
       const errorEl = $('#dialerCreateError');
       if (!name || !agentId){
-      if (!name || !agentId || !sipId){
         if (errorEl){
           errorEl.textContent = 'Name and AI agent are required.';
           errorEl.style.display = 'block';
