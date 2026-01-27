@@ -7663,8 +7663,7 @@ app.post('/api/me/dialer/debug/update-call-status', requireAuth, async (req, res
       `UPDATE dialer_call_logs
        SET status = COALESCE(?, status),
            result = COALESCE(?, result),
-           duration_sec = COALESCE(?, duration_sec),
-           updated_at = CURRENT_TIMESTAMP
+           duration_sec = COALESCE(?, duration_sec)
        WHERE id = ? LIMIT 1`,
       [status || null, result || null, durationSec, logRow.id]
     );
@@ -7675,7 +7674,7 @@ app.post('/api/me/dialer/debug/update-call-status', requireAuth, async (req, res
         ? result
         : (result === 'failed' ? 'failed' : 'completed');
       await pool.execute(
-        'UPDATE dialer_leads SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? LIMIT 1',
+        'UPDATE dialer_leads SET status = ? WHERE id = ? AND user_id = ? LIMIT 1',
         [leadStatus, logRow.lead_id, userId]
       );
     }
@@ -7753,12 +7752,12 @@ async function startDialerLeadCall({ campaign, lead }) {
   if (!agent || !agent.pipecat_agent_name) {
     try {
       await pool.execute(
-        'UPDATE dialer_leads SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? LIMIT 1',
+        'UPDATE dialer_leads SET status = ? WHERE id = ? AND user_id = ? LIMIT 1',
         ['failed', leadId, userId]
       );
       await pool.execute(
         `UPDATE dialer_call_logs
-         SET status = 'error', result = 'failed', notes = COALESCE(NULLIF(notes,''), ?), updated_at = CURRENT_TIMESTAMP
+         SET status = 'error', result = 'failed', notes = COALESCE(NULLIF(notes,''), ?)
          WHERE lead_id = ? ORDER BY id DESC LIMIT 1`,
         ['Missing Pipecat agent configuration', leadId]
       );
@@ -7828,11 +7827,11 @@ async function startDialerLeadCall({ campaign, lead }) {
 
     try {
       await pool.execute(
-        'UPDATE dialer_leads SET status = ?, last_call_at = NOW(), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? LIMIT 1',
+        'UPDATE dialer_leads SET status = ?, last_call_at = NOW() WHERE id = ? AND user_id = ? LIMIT 1',
         ['dialing', leadId, userId]
       );
       await pool.execute(
-        'UPDATE dialer_call_logs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE lead_id = ? ORDER BY id DESC LIMIT 1',
+        'UPDATE dialer_call_logs SET status = ? WHERE lead_id = ? ORDER BY id DESC LIMIT 1',
         ['dialing', leadId]
       );
     } catch {}
@@ -7843,12 +7842,12 @@ async function startDialerLeadCall({ campaign, lead }) {
     if (DEBUG) console.warn('[dialer.worker] Pipecat dial-out failed:', msg);
     try {
       await pool.execute(
-        'UPDATE dialer_leads SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? LIMIT 1',
+        'UPDATE dialer_leads SET status = ? WHERE id = ? AND user_id = ? LIMIT 1',
         ['failed', leadId, userId]
       );
       await pool.execute(
         `UPDATE dialer_call_logs
-         SET status = 'error', result = 'failed', notes = COALESCE(NULLIF(notes,''), ?), updated_at = CURRENT_TIMESTAMP
+         SET status = 'error', result = 'failed', notes = COALESCE(NULLIF(notes,''), ?)
          WHERE lead_id = ? ORDER BY id DESC LIMIT 1`,
         [String(msg).slice(0, 500), leadId]
       );
@@ -15644,7 +15643,7 @@ app.post('/webhooks/pipecat/dialout-completed', async (req, res) => {
     const resultVal = result || 'answered';
     await pool.execute(
       `UPDATE dialer_call_logs
-       SET status = ?, result = ?, duration_sec = COALESCE(?, duration_sec), updated_at = CURRENT_TIMESTAMP
+       SET status = ?, result = ?, duration_sec = COALESCE(?, duration_sec)
        WHERE id = ? LIMIT 1`,
       [status, resultVal, durationSec, logRow.id]
     );
@@ -15655,7 +15654,7 @@ app.post('/webhooks/pipecat/dialout-completed', async (req, res) => {
         ? resultVal
         : 'completed';
       await pool.execute(
-        'UPDATE dialer_leads SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? LIMIT 1',
+        'UPDATE dialer_leads SET status = ? WHERE id = ? AND user_id = ? LIMIT 1',
         [leadStatus, logRow.lead_id, logRow.user_id]
       );
     }
