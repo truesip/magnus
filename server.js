@@ -15603,10 +15603,14 @@ app.post('/webhooks/daily/events', async (req, res) => {
           continue;
         }
 
+        const nestedBody = (src.body && typeof src.body === 'object') ? src.body : ((evt.body && typeof evt.body === 'object') ? evt.body : null);
         const callIdCandidates = [
           src.call_id,
           src.callId,
           src.callID,
+          nestedBody?.call_id,
+          nestedBody?.callId,
+          nestedBody?.callID,
           evt.call_id,
           evt.callId,
           evt.callID,
@@ -15621,6 +15625,8 @@ app.post('/webhooks/daily/events', async (req, res) => {
         const callDomainCandidates = [
           src.call_domain,
           src.callDomain,
+          nestedBody?.call_domain,
+          nestedBody?.callDomain,
           evt.call_domain,
           evt.callDomain,
           src.domain_id,
@@ -15631,8 +15637,27 @@ app.post('/webhooks/daily/events', async (req, res) => {
           .map(v => String(v || '').trim())
           .filter(Boolean);
 
+        // Dialout settings can be nested; attempt to resolve them for fallback matching.
+        let dialoutSettings = null;
+        try {
+          dialoutSettings = src.dialout_settings
+            || src.dialoutSettings
+            || src.dialout
+            || nestedBody?.dialout_settings
+            || nestedBody?.dialoutSettings
+            || nestedBody?.dialout
+            || evt.dialout_settings
+            || evt.dialoutSettings
+            || evt.dialout
+            || null;
+          if (Array.isArray(dialoutSettings)) dialoutSettings = dialoutSettings[0] || null;
+          if (dialoutSettings && typeof dialoutSettings !== 'object') dialoutSettings = null;
+        } catch {
+          dialoutSettings = null;
+        }
+
         // Phone numbers (optional fallback matching)
-        const toNumber = String(
+        let toNumber = String(
           src.To
             || src.to
             || src.to_number
@@ -15651,7 +15676,7 @@ app.post('/webhooks/daily/events', async (req, res) => {
             || evt.dest
             || ''
         ).trim();
-        const fromNumber = String(
+        let fromNumber = String(
           src.From
             || src.from
             || src.from_number
@@ -15666,6 +15691,15 @@ app.post('/webhooks/daily/events', async (req, res) => {
             || evt.callerId
             || ''
         ).trim();
+
+        if ((!toNumber || toNumber === '') && dialoutSettings) {
+          const dn = dialoutSettings.phoneNumber || dialoutSettings.phone_number || dialoutSettings.to || dialoutSettings.to_number || dialoutSettings.toNumber;
+          if (dn) toNumber = String(dn).trim();
+        }
+        if ((!fromNumber || fromNumber === '') && dialoutSettings) {
+          const cn = dialoutSettings.callerId || dialoutSettings.caller_id || dialoutSettings.from || dialoutSettings.from_number || dialoutSettings.fromNumber;
+          if (cn) fromNumber = String(cn).trim();
+        }
 
         const toDigits = digitsOnly(toNumber);
         const fromDigits = digitsOnly(fromNumber);
