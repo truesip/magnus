@@ -7640,7 +7640,7 @@ function buildDialerCallIdentifiers({ campaignId, leadId }) {
 function buildDialerDailyRoomProperties({ displayName }) {
   const props = {
     sip: {
-      sip_mode: 'dial-out',
+      sip_mode: 'dial-in',
       num_endpoints: 1
     }
   };
