@@ -10109,6 +10109,80 @@ app.get('/api/me/ai/conversations/sessions', requireAuth, async (req, res) => {
   }
 });
 
+// List outbound AI dialer call sessions (Pipecat dial-out) for the logged-in user.
+// These use dialer_call_logs for call metadata and ai_call_messages for transcript turns.
+app.get('/api/me/ai/outbound-conversations/sessions', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    if (!userId) return res.status(401).json({ success: false, message: 'Not authenticated' });
+
+    const page = Math.max(0, parseInt(String(req.query.page || '0'), 10) || 0);
+    const pageSizeRaw = parseInt(String(req.query.pageSize || '25'), 10) || 25;
+    const pageSize = Math.max(1, Math.min(100, pageSizeRaw));
+    const offset = page * pageSize;
+
+    const agentIdRaw = String(req.query.agent_id || req.query.agentId || '').trim();
+    const agentId = agentIdRaw ? agentIdRaw : '';
+
+    // Exclude queued rows so the list reflects actual call attempts.
+    const where = [`l.user_id = ?`, `l.call_id IS NOT NULL`, `l.call_id <> ''`, `(l.status IS NULL OR l.status <> 'queued')`];
+    const params = [userId];
+
+    if (agentId) {
+      where.push('l.ai_agent_id = ?');
+      params.push(agentId);
+    }
+
+    const whereSql = where.length ? ('WHERE ' + where.join(' AND ')) : '';
+
+    const [cntRows] = await pool.execute(
+      `SELECT COUNT(*) AS total
+       FROM dialer_call_logs l
+       ${whereSql}`,
+      params
+    );
+    const total = Number(cntRows && cntRows[0] ? (cntRows[0].total || 0) : 0);
+
+    const [rows] = await pool.query(
+      `SELECT l.call_id,
+              CONCAT('dialer-', l.campaign_id) AS call_domain,
+              l.ai_agent_id AS agent_id,
+              a.display_name AS agent_name,
+              n.phone_number AS from_number,
+              d.phone_number AS to_number,
+              l.created_at AS time_start,
+              l.duration_sec AS duration,
+              l.status,
+              l.result,
+              COALESCE(m.msg_count, 0) AS message_count
+       FROM dialer_call_logs l
+       LEFT JOIN dialer_leads d ON d.id = l.lead_id
+       LEFT JOIN ai_agents a ON a.id = l.ai_agent_id
+       LEFT JOIN (
+         SELECT user_id, agent_id, MIN(phone_number) AS phone_number
+         FROM ai_numbers
+         GROUP BY user_id, agent_id
+       ) n ON n.user_id = l.user_id AND n.agent_id = l.ai_agent_id
+       LEFT JOIN (
+         SELECT call_domain, call_id, COUNT(*) AS msg_count
+         FROM ai_call_messages
+         WHERE user_id = ?
+         GROUP BY call_domain, call_id
+       ) m ON m.call_domain = CONCAT('dialer-', l.campaign_id) AND m.call_id = l.call_id
+       ${whereSql}
+       ORDER BY l.created_at DESC, l.id DESC
+       LIMIT ${parseInt(pageSize, 10)} OFFSET ${parseInt(offset, 10)}`,
+      [userId, ...params]
+    );
+
+    return res.json({ success: true, data: rows || [], total });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.outboundConversations.sessions] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load outbound sessions' });
+  }
+});
+
 // List conversation messages for a single inbound session.
 app.get('/api/me/ai/conversations/messages', requireAuth, async (req, res) => {
   try {
