@@ -12841,9 +12841,11 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
       if (DEBUG) console.warn('[me.stats.inbound.ai] failed:', e.message || e);
     }
 
-    // Outbound calls grouped by day from user_mb_cdrs
+    // Outbound calls grouped by day from user_mb_cdrs (MagnusBilling) + dialer_call_logs (AI outbound dialer)
     let outboundCount = 0;
     const outboundByDayMap = new Map();
+
+    // Standard SIP/telephony outbound (MagnusBilling mirror)
     try {
       const [rows] = await pool.query(
         `SELECT DATE(time_start) AS d, COUNT(*) AS calls
@@ -12861,7 +12863,32 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
         outboundByDayMap.set(day, (outboundByDayMap.get(day) || 0) + c);
       }
     } catch (e) {
-      if (DEBUG) console.warn('[me.stats.outbound] failed:', e.message || e);
+      if (DEBUG) console.warn('[me.stats.outbound.mb] failed:', e.message || e);
+    }
+
+    // AI outbound dialer (Pipecat dial-out) from dialer_call_logs
+    // NOTE: dialer_call_logs does not have time_start; use created_at as the call attempt timestamp.
+    // Exclude "queued" so we count actual dial attempts, not just queued rows.
+    try {
+      const [rows] = await pool.query(
+        `SELECT DATE(created_at) AS d, COUNT(*) AS calls
+         FROM dialer_call_logs
+         WHERE user_id = ?
+           AND DATE(created_at) BETWEEN ? AND ?
+           AND (status IS NULL OR status <> 'queued')
+         GROUP BY DATE(created_at)
+         ORDER BY DATE(created_at)`,
+        [userId, from, to]
+      );
+      for (const r of rows) {
+        const dObj = r.d instanceof Date ? r.d : null;
+        const day = dObj ? dObj.toISOString().slice(0, 10) : String(r.d || '');
+        const c = Number(r.calls || 0);
+        outboundCount += c;
+        outboundByDayMap.set(day, (outboundByDayMap.get(day) || 0) + c);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[me.stats.outbound.dialer] failed:', e.message || e);
     }
 
 // SIP users: count total + online
