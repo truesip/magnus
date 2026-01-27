@@ -60,6 +60,25 @@ Created a manual status update endpoint for testing:
 
 Location: `server.js:7633-7692`
 
+### 3. Pipecat Direct Callback (✓ Done) - **PRIMARY FIX**
+Added code to the Pipecat bot to send status updates directly to your server when calls end, bypassing the need for Daily webhook configuration:
+
+**What Changed**:
+- Bot tracks call start/end times and calculates duration
+- Bot sends webhook to `/webhooks/pipecat/dialout-completed` when calls finish
+- Server endpoint updates both `dialer_call_logs` and `dialer_leads` tables
+- Works for answered, transferred, and completed calls
+
+**Files Modified**:
+- `pipecat-agent/bot.py` - Added callback sending logic
+- `server.js` - Added `/webhooks/pipecat/dialout-completed` endpoint (lines 15613-15672)
+
+**Configuration Required**:
+You must set `PORTAL_BASE_URL` in your Pipecat agent's environment (secret set):
+```
+PORTAL_BASE_URL=https://www.talkusa.net
+```
+
 ## Next Steps
 
 ### Step 1: Check Server Logs

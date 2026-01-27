@@ -15607,6 +15607,70 @@ app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
   }
 });
 
+// Pipecat agent callback for dialout calls completing.
+// The Pipecat bot sends this when a dialout call ends, allowing us to update call status
+// without relying on Daily webhooks (which need to be configured separately).
+app.post('/webhooks/pipecat/dialout-completed', async (req, res) => {
+  try {
+    if (!pool) return res.status(200).json({ success: true });
+
+    const callId = String(req.body?.call_id || '').trim();
+    const result = String(req.body?.result || '').trim();
+    const durationSec = req.body?.duration_sec != null ? Number(req.body.duration_sec) : null;
+
+    if (!callId) {
+      if (DEBUG) console.warn('[pipecat.dialout-completed] Missing call_id');
+      return res.status(400).json({ success: false, message: 'Missing call_id' });
+    }
+
+    if (DEBUG) {
+      console.log('[pipecat.dialout-completed] Received:', { callId, result, durationSec });
+    }
+
+    // Find the call log by call_id
+    const [logRows] = await pool.execute(
+      'SELECT id, lead_id, user_id FROM dialer_call_logs WHERE call_id = ? ORDER BY id DESC LIMIT 1',
+      [callId]
+    );
+    const logRow = logRows && logRows[0] ? logRows[0] : null;
+
+    if (!logRow) {
+      if (DEBUG) console.warn('[pipecat.dialout-completed] Call log not found:', callId);
+      return res.status(404).json({ success: false, message: 'Call log not found' });
+    }
+
+    // Update call log
+    const status = 'completed';
+    const resultVal = result || 'answered';
+    await pool.execute(
+      `UPDATE dialer_call_logs
+       SET status = ?, result = ?, duration_sec = COALESCE(?, duration_sec), updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? LIMIT 1`,
+      [status, resultVal, durationSec, logRow.id]
+    );
+
+    // Update lead if we have one
+    if (logRow.lead_id) {
+      const leadStatus = ['answered', 'voicemail', 'transferred'].includes(resultVal)
+        ? resultVal
+        : 'completed';
+      await pool.execute(
+        'UPDATE dialer_leads SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? LIMIT 1',
+        [leadStatus, logRow.lead_id, logRow.user_id]
+      );
+    }
+
+    if (DEBUG) {
+      console.log('[pipecat.dialout-completed] Updated:', { logId: logRow.id, leadId: logRow.lead_id });
+    }
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[pipecat.dialout-completed] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Internal error' });
+  }
+});
+
 // Daily Webhooks (call state updates)
 // Configure a Daily webhook for dialin.connected + dialin.stopped (+ optional dialin.warning/dialin.error)
 // and dialout.* events (dialout.started/connected/answered/stopped/error/warning)

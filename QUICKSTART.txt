@@ -1,0 +1,72 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║              DIALER STATUS UPDATE FIX - QUICK START                          ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+PROBLEM:
+✗ Campaign stats stuck at "1 Live"
+✗ Call history shows "Queued" forever
+
+ROOT CAUSE:
+Pipecat bot wasn't sending call completion status back to your server.
+
+THE FIX:
+Added direct webhook callback from bot → server when calls complete.
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        DEPLOYMENT CHECKLIST                                  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+□ 1. Deploy updated server.js
+     - Upload to production server
+     - Restart Node.js process
+
+□ 2. Rebuild & push Pipecat bot image
+     cd pipecat-agent
+     docker build -t truesip/agenttalkusa:fix-dialout-status .
+     docker push truesip/agenttalkusa:fix-dialout-status
+
+□ 3. Update .env with new image tag
+     PIPECAT_AGENT_IMAGE=truesip/agenttalkusa:fix-dialout-status
+
+□ 4. Add to Pipecat Cloud secret set (CRITICAL!):
+     PORTAL_BASE_URL=https://www.talkusa.net
+
+□ 5. Redeploy Pipecat agent in Cloud dashboard
+
+□ 6. Test with a new call
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                           VERIFICATION                                       ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+SUCCESS LOOKS LIKE:
+✓ Campaign stats update within 1-2 seconds after call ends
+✓ Call history shows "completed", "answered", or "transferred"
+✓ Server logs show: [pipecat.dialout-completed] Received: { ... }
+✓ Pipecat logs show: Dialout callback sent: 200
+
+IF IT'S NOT WORKING:
+→ Check PORTAL_BASE_URL is set in Pipecat Cloud
+→ Check logs on both server and Pipecat
+→ See DEPLOYMENT_INSTRUCTIONS.md for detailed troubleshooting
+→ Use manual update API as workaround (see DIALER_STATUS_UPDATE_FIX.md)
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         FILES MODIFIED                                       ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+✎ server.js (lines 15613-15672, 7633-7692, 15571-15573, 15945-15958)
+✎ pipecat-agent/bot.py (lines 2852, 2906, 3012-3043)
+✎ DIALER_STATUS_UPDATE_FIX.md (troubleshooting guide)
+✎ DEPLOYMENT_INSTRUCTIONS.md (detailed deployment steps)
+✎ QUICKSTART.txt (this file)
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    NEED HELP? SEE THESE FILES:                               ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+→ DEPLOYMENT_INSTRUCTIONS.md - Step-by-step deployment guide
+→ DIALER_STATUS_UPDATE_FIX.md - Comprehensive troubleshooting & background
+→ Both files include rollback procedures if needed
+
+Last Updated: 2026-01-27

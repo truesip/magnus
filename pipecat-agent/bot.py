@@ -2849,6 +2849,7 @@ async def bot(session_args: Any):
     if has_transfer_tool:
         async def _transfer_call(params: FunctionCallParams) -> None:
             nonlocal call_transfer_in_progress
+            nonlocal call_transferred
 
             if call_transfer_in_progress:
                 await params.result_callback({
@@ -2902,6 +2903,7 @@ async def bot(session_args: Any):
                     return
 
                 # We successfully initiated the transfer; end the bot's pipeline.
+                call_transferred = True
                 await params.result_callback({"success": True})
 
                 # Stop the pipeline and leave the room so the bot disconnects.
@@ -3009,10 +3011,39 @@ async def bot(session_args: Any):
         if normalized == "joined":
             await _maybe_start_dialout()
 
+    # Track call start time for duration calculation
+    call_start_time = asyncio.get_event_loop().time()
+    call_result = "completed"  # Default result; updated by call outcome
+    call_transferred = False
+
     runner = PipelineRunner()
     try:
         await runner.run(task)
     finally:
+        # Calculate call duration
+        call_end_time = asyncio.get_event_loop().time()
+        call_duration_sec = int(call_end_time - call_start_time)
+
+        # Send dialout status callback to portal if this was a dialer call
+        if dialout_settings and call_id and portal_base_url:
+            try:
+                webhook_url = f"{portal_base_url}/webhooks/pipecat/dialout-completed"
+                webhook_payload = {
+                    "call_id": call_id,
+                    "call_domain": call_domain,
+                    "result": "transferred" if call_transferred else call_result,
+                    "duration_sec": call_duration_sec,
+                    "dialout_phone": dialout_settings.get("phoneNumber") or dialout_settings.get("phone_number") or "",
+                }
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    headers = {"Content-Type": "application/json"}
+                    if portal_token:
+                        headers["Authorization"] = f"Bearer {portal_token}"
+                    resp = await client.post(webhook_url, json=webhook_payload, headers=headers)
+                    logger.info(f"Dialout callback sent: {resp.status_code}")
+            except Exception as e:
+                logger.warning(f"Failed to send dialout callback: {e}")
+
         # Best-effort: flush a few pending transcript log tasks.
         try:
             if pending_log_tasks:
