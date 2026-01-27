@@ -99,6 +99,8 @@ const DIALER_MAX_CONCURRENCY = 20;
 const DIALER_MAX_LEADS_PER_UPLOAD = Math.max(1, parseInt(process.env.DIALER_MAX_LEADS_PER_UPLOAD || '5000', 10) || 5000);
 const DIALER_CAMPAIGN_STATUSES = ['draft', 'running', 'paused', 'completed', 'deleted'];
 const DIALER_LEAD_STATUSES = ['pending', 'queued', 'dialing', 'answered', 'voicemail', 'transferred', 'failed', 'completed'];
+const DIALER_WORKER_INTERVAL_SECONDS = Math.max(0, parseInt(process.env.DIALER_WORKER_INTERVAL_SECONDS || '0', 10) || 0);
+const DIALER_DAILY_ROOM_TTL_SECONDS = Math.max(0, parseInt(process.env.DIALER_DAILY_ROOM_TTL_SECONDS || '1800', 10) || 1800);
 
 const dialerLeadUpload = multer({
   storage: multer.memoryStorage(),
@@ -7337,7 +7339,6 @@ app.post('/api/me/dialer/campaigns', requireAuth, async (req, res) => {
     const concurrencyRaw = parseInt(req.body?.concurrency_limit ?? req.body?.concurrencyLimit ?? 1, 10);
     if (!name) return res.status(400).json({ success: false, message: 'Campaign name is required' });
     if (!aiAgentId) return res.status(400).json({ success: false, message: 'AI agent is required' });
-    if (!sipAccountId) return res.status(400).json({ success: false, message: 'SIP account is required' });
 
     const concurrency = Math.min(
       DIALER_MAX_CONCURRENCY,
@@ -7345,13 +7346,16 @@ app.post('/api/me/dialer/campaigns', requireAuth, async (req, res) => {
     );
 
     const agent = await ensureAiAgentForUser({ userId, agentId: aiAgentId });
-    const sipAccount = await ensureSipAccountForUser({ req, sipAccountId });
+    let sipAccount = { id: '', label: 'Pipecat Dial-out' };
+    if (sipAccountId) {
+      sipAccount = await ensureSipAccountForUser({ req, sipAccountId });
+    }
 
     const [result] = await pool.execute(
       `INSERT INTO dialer_campaigns
         (user_id, name, ai_agent_id, ai_agent_name, sip_account_id, sip_account_label, concurrency_limit)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [userId, name, agent.id, agent.name, sipAccount.id, sipAccount.label, concurrency]
+      [userId, name, agent.id, agent.name, sipAccount.id || '', sipAccount.label || 'Pipecat Dial-out', concurrency]
     );
 
     const campaignId = result && result.insertId ? Number(result.insertId) : null;
@@ -7578,6 +7582,262 @@ app.get('/api/me/dialer/campaigns/:campaignId/stats', requireAuth, async (req, r
     return res.status(500).json({ success: false, message: 'Failed to load stats' });
   }
 });
+
+function buildDialerCallIdentifiers({ campaignId, leadId }) {
+  const ts = Date.now().toString(36);
+  const callId = `d${campaignId}l${leadId}-${ts}`.slice(0, 64);
+  const callDomain = `dialer-${campaignId}`.slice(0, 64);
+  return { callId, callDomain };
+}
+
+function buildDialerDailyRoomProperties({ displayName }) {
+  const props = {
+    sip: {
+      enable_dialout: true
+    }
+  };
+  if (displayName) props.sip.display_name = String(displayName).slice(0, 64);
+  if (DIALER_DAILY_ROOM_TTL_SECONDS > 0) {
+    props.exp = Math.floor(Date.now() / 1000) + DIALER_DAILY_ROOM_TTL_SECONDS;
+  }
+  return props;
+}
+
+async function resolveDialerCallerId({ userId, agentId }) {
+  if (!pool) return '';
+  try {
+    const [rows] = await pool.execute(
+      'SELECT phone_number FROM ai_numbers WHERE user_id = ? AND agent_id = ? AND cancel_pending = 0 ORDER BY updated_at DESC LIMIT 1',
+      [userId, agentId]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    if (row && row.phone_number) return String(row.phone_number);
+  } catch {}
+
+  try {
+    const [rows] = await pool.execute(
+      'SELECT phone_number FROM ai_numbers WHERE user_id = ? AND cancel_pending = 0 ORDER BY updated_at DESC LIMIT 1',
+      [userId]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    if (row && row.phone_number) return String(row.phone_number);
+  } catch {}
+
+  return '';
+}
+
+async function startDialerLeadCall({ campaign, lead }) {
+  if (!pool || !campaign || !lead) return false;
+  const campaignId = Number(campaign.id);
+  const userId = Number(campaign.user_id);
+  const leadId = Number(lead.id);
+  const agentId = Number(campaign.ai_agent_id);
+
+  let agent = null;
+  try {
+    const [rows] = await pool.execute(
+      'SELECT id, display_name, pipecat_agent_name, pipecat_region FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1',
+      [agentId, userId]
+    );
+    agent = rows && rows[0] ? rows[0] : null;
+  } catch (e) {
+    if (DEBUG) console.warn('[dialer.worker] Failed to lookup AI agent:', e?.message || e);
+    agent = null;
+  }
+
+  if (!agent || !agent.pipecat_agent_name) {
+    try {
+      await pool.execute(
+        'UPDATE dialer_leads SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? LIMIT 1',
+        ['failed', leadId, userId]
+      );
+      await pool.execute(
+        `UPDATE dialer_call_logs
+         SET status = 'error', result = 'failed', notes = COALESCE(NULLIF(notes,''), ?), updated_at = CURRENT_TIMESTAMP
+         WHERE lead_id = ? ORDER BY id DESC LIMIT 1`,
+        ['Missing Pipecat agent configuration', leadId]
+      );
+    } catch {}
+    return false;
+  }
+
+  const callerId = await resolveDialerCallerId({ userId, agentId });
+  const { callId, callDomain } = buildDialerCallIdentifiers({ campaignId, leadId });
+  const displayName = lead.lead_name || 'TalkUSA Dialer';
+
+  const dialoutSettings = {
+    phoneNumber: String(lead.phone_number || '').trim()
+  };
+  if (callerId) dialoutSettings.callerId = String(callerId);
+  if (displayName) dialoutSettings.displayName = String(displayName);
+
+  const metadata = {
+    campaign_id: campaignId,
+    lead_id: leadId,
+    phone_number: lead.phone_number,
+    call_id: callId,
+    call_domain: callDomain,
+    dialout_settings: dialoutSettings
+  };
+
+  try {
+    await pool.execute(
+      `INSERT INTO dialer_call_logs
+        (campaign_id, lead_id, user_id, ai_agent_id, sip_account_id, call_id, status, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        campaignId,
+        leadId,
+        userId,
+        agentId,
+        campaign.sip_account_id || null,
+        callId,
+        'queued',
+        JSON.stringify(metadata)
+      ]
+    );
+  } catch (e) {
+    if (DEBUG) console.warn('[dialer.worker] Failed to insert call log row:', e?.message || e);
+  }
+
+  const dailyRoomProperties = buildDialerDailyRoomProperties({ displayName });
+
+  const startBody = {
+    createDailyRoom: true,
+    dailyRoomProperties,
+    body: {
+      dialout_settings: dialoutSettings,
+      call_id: callId,
+      call_domain: callDomain,
+      mode: 'dialout',
+      dialer: {
+        campaign_id: campaignId,
+        lead_id: leadId
+      }
+    }
+  };
+
+  try {
+    await pipecatApiCall({
+      method: 'POST',
+      path: `/public/${encodeURIComponent(agent.pipecat_agent_name)}/start`,
+      body: startBody
+    });
+
+    try {
+      await pool.execute(
+        'UPDATE dialer_leads SET status = ?, last_call_at = NOW(), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? LIMIT 1',
+        ['dialing', leadId, userId]
+      );
+      await pool.execute(
+        'UPDATE dialer_call_logs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE lead_id = ? ORDER BY id DESC LIMIT 1',
+        ['dialing', leadId]
+      );
+    } catch {}
+
+    return true;
+  } catch (e) {
+    const msg = e?.message || 'Failed to start Pipecat dial-out';
+    if (DEBUG) console.warn('[dialer.worker] Pipecat dial-out failed:', msg);
+    try {
+      await pool.execute(
+        'UPDATE dialer_leads SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? LIMIT 1',
+        ['failed', leadId, userId]
+      );
+      await pool.execute(
+        `UPDATE dialer_call_logs
+         SET status = 'error', result = 'failed', notes = COALESCE(NULLIF(notes,''), ?), updated_at = CURRENT_TIMESTAMP
+         WHERE lead_id = ? ORDER BY id DESC LIMIT 1`,
+        [String(msg).slice(0, 500), leadId]
+      );
+    } catch {}
+    return false;
+  }
+}
+
+let dialerWorkerRunning = false;
+async function runDialerWorkerTick() {
+  if (!pool) return;
+  if (dialerWorkerRunning) {
+    if (DEBUG) console.log('[dialer.worker] tick skipped (already running)');
+    return;
+  }
+  if (!PIPECAT_PUBLIC_API_KEY) {
+    if (DEBUG) console.warn('[dialer.worker] PIPECAT_PUBLIC_API_KEY not set; skipping tick');
+    return;
+  }
+
+  dialerWorkerRunning = true;
+  try {
+    const [campaigns] = await pool.query(
+      `SELECT id, user_id, name, ai_agent_id, ai_agent_name, sip_account_id, sip_account_label, concurrency_limit
+       FROM dialer_campaigns
+       WHERE status = 'running'
+       ORDER BY updated_at DESC, id DESC
+       LIMIT 200`
+    );
+
+    for (const c of campaigns || []) {
+      const campaignId = Number(c.id);
+      const userId = Number(c.user_id);
+      const concurrency = Math.max(1, Number(c.concurrency_limit || 1));
+
+      let inProgress = 0;
+      try {
+        const [[cntRow]] = await pool.execute(
+          `SELECT COUNT(*) AS cnt
+           FROM dialer_leads
+           WHERE campaign_id = ? AND user_id = ? AND status IN ('queued','dialing')`,
+          [campaignId, userId]
+        );
+        inProgress = cntRow && cntRow.cnt != null ? Number(cntRow.cnt || 0) : 0;
+      } catch {}
+
+      const available = Math.max(0, concurrency - inProgress);
+      if (!available) continue;
+
+      const limit = Math.min(available, 50);
+      const [leads] = await pool.query(
+        `SELECT id, phone_number, lead_name, metadata
+         FROM dialer_leads
+         WHERE campaign_id = ? AND user_id = ? AND status = 'pending'
+         ORDER BY id ASC
+         LIMIT ${parseInt(limit, 10)}`,
+        [campaignId, userId]
+      );
+
+      for (const lead of leads || []) {
+        const leadId = Number(lead.id);
+        if (!leadId) continue;
+        const [claim] = await pool.execute(
+          `UPDATE dialer_leads
+           SET status = 'queued', attempt_count = attempt_count + 1, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND user_id = ? AND status = 'pending'`,
+          [leadId, userId]
+        );
+        if (!claim || !claim.affectedRows) continue;
+
+        await startDialerLeadCall({ campaign: c, lead });
+      }
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[dialer.worker] tick error:', e?.message || e);
+  } finally {
+    dialerWorkerRunning = false;
+  }
+}
+
+function startDialerWorker() {
+  const intervalMs = (DIALER_WORKER_INTERVAL_SECONDS || 0) * 1000;
+  if (!intervalMs) {
+    if (DEBUG) console.log('[dialer.worker] Disabled (no interval set)');
+    return;
+  }
+  if (DEBUG) console.log('[dialer.worker] Enabled with interval (ms):', intervalMs);
+  setInterval(() => {
+    runDialerWorkerTick();
+  }, intervalMs);
+}
 
 // ========== AI Agents ==========
 const AI_MAX_AGENTS = Math.max(1, parseInt(process.env.AI_MAX_AGENTS || '5', 10) || 5);
@@ -15179,6 +15439,7 @@ app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
 
 // Daily Webhooks (call state updates)
 // Configure a Daily webhook for dialin.connected + dialin.stopped (+ optional dialin.warning/dialin.error)
+// and dialout.* events (dialout.started/connected/answered/stopped/error/warning)
 // to this endpoint, e.g.:
 //   https://www.talkusa.net/webhooks/daily/events?token=<DAILY_DIALIN_WEBHOOK_TOKEN>
 // These events allow us to update AI call durations/status automatically.
@@ -15228,7 +15489,7 @@ app.post('/webhooks/daily/events', async (req, res) => {
 
         const src = (payload && Object.keys(payload).length) ? payload : evt;
 
-        if (!type || !type.startsWith('dialin.')) {
+        if (!type || (!type.startsWith('dialin.') && !type.startsWith('dialout.'))) {
           ignored += 1;
           continue;
         }
@@ -15274,7 +15535,7 @@ app.post('/webhooks/daily/events', async (req, res) => {
 
         if (!callIdCandidates.length && !toDigits) {
           if (DEBUG) {
-            console.warn('[daily.webhook] Missing call identifiers (and no to_number) for dialin event:', {
+            console.warn('[daily.webhook] Missing call identifiers (and no to_number) for Daily event:', {
               type: typeRaw,
               keys: Object.keys(src || {}).slice(0, 25)
             });
@@ -15384,6 +15645,200 @@ app.post('/webhooks/daily/events', async (req, res) => {
             from: fromNumber || null,
             ts: ts.toISOString()
           });
+        }
+
+        async function findDialerCallLogByCallId() {
+          for (const cid of callIdCandidates) {
+            const [rows] = await pool.execute(
+              'SELECT id, lead_id, campaign_id, user_id FROM dialer_call_logs WHERE call_id = ? ORDER BY id DESC LIMIT 1',
+              [cid]
+            );
+            const row = rows && rows[0] ? rows[0] : null;
+            if (row) return row;
+          }
+          return null;
+        }
+
+        async function findDialerLeadByToDigits() {
+          if (!toDigits) return null;
+          try {
+            const [rows] = await pool.query(
+              `SELECT id, campaign_id, user_id, status
+               FROM dialer_leads
+               WHERE REGEXP_REPLACE(phone_number, '[^0-9]', '') = ?
+                 AND status IN ('queued','dialing','pending','answered','voicemail','transferred')
+                 AND updated_at >= DATE_SUB(?, INTERVAL 12 HOUR)
+               ORDER BY updated_at DESC, id DESC
+               LIMIT 1`,
+              [toDigits, ts]
+            );
+            return rows && rows[0] ? rows[0] : null;
+          } catch (e) {
+            if (DEBUG) console.warn('[daily.webhook] Dialer lead lookup failed:', e?.message || e);
+            return null;
+          }
+        }
+
+        function dialoutOutcomeFromReason(reasonLower) {
+          if (!reasonLower) return null;
+          if (reasonLower.includes('voicemail')) {
+            return { result: 'voicemail', leadStatus: 'voicemail' };
+          }
+          if (reasonLower.includes('transfer')) {
+            return { result: 'transferred', leadStatus: 'transferred' };
+          }
+          if (
+            reasonLower.includes('busy')
+            || reasonLower.includes('no_answer')
+            || reasonLower.includes('no answer')
+            || reasonLower.includes('failed')
+            || reasonLower.includes('error')
+            || reasonLower.includes('cancel')
+          ) {
+            return { result: 'failed', leadStatus: 'failed' };
+          }
+          if (reasonLower.includes('answer') || reasonLower.includes('connect')) {
+            return { result: 'answered', leadStatus: 'answered' };
+          }
+          return null;
+        }
+
+        if (type.startsWith('dialout.')) {
+          const reasonRaw = String(
+            src.reason
+              || src.status
+              || src.result
+              || src.error
+              || src.error_message
+              || src.errorMessage
+              || ''
+          ).trim();
+          const reasonLower = reasonRaw.toLowerCase();
+
+          const durationRaw = (
+            src.duration
+              ?? src.duration_sec
+              ?? src.duration_seconds
+              ?? src.durationSeconds
+              ?? src.billsec
+              ?? src.call_duration
+              ?? src.callDuration
+          );
+          let durationSec = null;
+          if (durationRaw != null && String(durationRaw).trim() !== '') {
+            const parsed = Number(durationRaw);
+            if (Number.isFinite(parsed)) durationSec = Math.max(0, Math.round(parsed));
+          }
+
+          const outcome = dialoutOutcomeFromReason(reasonLower);
+          let leadStatus = null;
+          let logStatus = null;
+          let resultVal = null;
+
+          if (type === 'dialout.started' || type === 'dialout.ringing') {
+            leadStatus = 'dialing';
+            logStatus = 'dialing';
+          } else if (type === 'dialout.connected' || type === 'dialout.answered') {
+            leadStatus = 'answered';
+            logStatus = 'connected';
+            resultVal = 'answered';
+          } else if (type === 'dialout.warning') {
+            logStatus = 'warning';
+          } else if (type === 'dialout.error') {
+            leadStatus = 'failed';
+            logStatus = 'error';
+            resultVal = 'failed';
+          } else if (type === 'dialout.stopped') {
+            if (outcome) {
+              leadStatus = outcome.leadStatus;
+              resultVal = outcome.result;
+            }
+            if (!logStatus) logStatus = (resultVal === 'failed') ? 'error' : 'completed';
+          }
+
+          let logRow = null;
+          let leadRow = null;
+          try { logRow = await findDialerCallLogByCallId(); } catch {}
+          if (logRow && logRow.lead_id) {
+            leadRow = { id: logRow.lead_id, campaign_id: logRow.campaign_id, user_id: logRow.user_id };
+          }
+          if (!leadRow) {
+            try { leadRow = await findDialerLeadByToDigits(); } catch {}
+          }
+
+          let leadUpdated = false;
+          if (leadRow) {
+            if (type === 'dialout.stopped') {
+              const statusToken = leadStatus || '';
+              const [r] = await pool.execute(
+                `UPDATE dialer_leads
+                 SET status = CASE
+                   WHEN ? = 'failed' THEN 'failed'
+                   WHEN ? = 'voicemail' THEN 'voicemail'
+                   WHEN ? = 'transferred' THEN 'transferred'
+                   WHEN status IN ('answered','voicemail','transferred') THEN status
+                   ELSE 'completed'
+                 END,
+                 updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ? AND user_id = ? LIMIT 1`,
+                [statusToken, statusToken, statusToken, leadRow.id, leadRow.user_id]
+              );
+              if (r && r.affectedRows) leadUpdated = true;
+            } else if (leadStatus) {
+              const setLastCall = (type === 'dialout.started' || type === 'dialout.connected' || type === 'dialout.answered');
+              const [r] = await pool.execute(
+                `UPDATE dialer_leads
+                 SET status = ?, updated_at = CURRENT_TIMESTAMP${setLastCall ? ', last_call_at = NOW()' : ''}
+                 WHERE id = ? AND user_id = ? LIMIT 1`,
+                [leadStatus, leadRow.id, leadRow.user_id]
+              );
+              if (r && r.affectedRows) leadUpdated = true;
+            }
+          }
+
+          const notes = reasonRaw ? String(reasonRaw).slice(0, 1000) : '';
+          const statusVal = logStatus || null;
+          const resultOut = resultVal || null;
+          const durationOut = Number.isFinite(durationSec) ? durationSec : null;
+
+          async function updateDialerCallLog(whereClause, whereParams) {
+            const [r] = await pool.execute(
+              `UPDATE dialer_call_logs
+               SET status = COALESCE(?, status),
+                   result = COALESCE(?, result),
+                   duration_sec = COALESCE(?, duration_sec),
+                   notes = CASE WHEN ? <> '' THEN COALESCE(NULLIF(notes,''), ?) ELSE notes END,
+                   updated_at = CURRENT_TIMESTAMP
+               ${whereClause}`,
+              [statusVal, resultOut, durationOut, notes, notes].concat(whereParams)
+            );
+            return r && r.affectedRows;
+          }
+
+          let logUpdated = false;
+          try {
+            if (logRow && logRow.id) {
+              logUpdated = await updateDialerCallLog('WHERE id = ? LIMIT 1', [logRow.id]);
+            } else if (leadRow && leadRow.id) {
+              logUpdated = await updateDialerCallLog('WHERE lead_id = ? ORDER BY id DESC LIMIT 1', [leadRow.id]);
+            }
+          } catch (e) {
+            if (DEBUG) console.warn('[daily.webhook] Dialer call log update failed:', e?.message || e);
+          }
+
+          if ((leadUpdated || logUpdated) && (leadRow || logRow)) {
+            updated += 1;
+          } else {
+            ignored += 1;
+            if (DEBUG) {
+              console.warn('[daily.webhook] No matching dialer rows for dialout event', {
+                type: typeRaw,
+                callIdCandidates: callIdCandidates.slice(0, 5),
+                toDigits: toDigits || null
+              });
+            }
+          }
+          continue;
         }
 
         if (type === 'dialin.connected') {
@@ -21059,6 +21514,7 @@ async function startServer() {
       if (DEBUG) console.log('Debug logging enabled');
       startBillingScheduler();
       startCdrImportScheduler();
+      startDialerWorker();
     });
   } catch (e) {
     console.error('Fatal startup error', e.message || e);

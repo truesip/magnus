@@ -188,6 +188,44 @@ def _extract_dialin_settings(body: Any) -> Optional[DailyDialinSettings]:
     return None
 
 
+def _extract_dialout_settings(body: Any) -> Optional[dict]:
+    if not isinstance(body, dict):
+        return None
+
+    dialout = body.get("dialout_settings") or body.get("dialoutSettings") or body.get("dialout")
+    if isinstance(dialout, list):
+        dialout = dialout[0] if dialout else None
+    if not isinstance(dialout, dict):
+        return None
+
+    settings = {k: v for k, v in dialout.items() if v is not None}
+
+    phone = (
+        dialout.get("phone_number")
+        or dialout.get("phoneNumber")
+        or dialout.get("to")
+        or dialout.get("to_number")
+        or dialout.get("toNumber")
+    )
+    caller_id = (
+        dialout.get("caller_id")
+        or dialout.get("callerId")
+        or dialout.get("from")
+        or dialout.get("from_number")
+        or dialout.get("fromNumber")
+    )
+    display_name = dialout.get("display_name") or dialout.get("displayName")
+
+    if phone and "phoneNumber" not in settings:
+        settings["phoneNumber"] = str(phone)
+    if caller_id and "callerId" not in settings:
+        settings["callerId"] = str(caller_id)
+    if display_name and "displayName" not in settings:
+        settings["displayName"] = str(display_name)
+
+    return settings if settings else None
+
+
 def _extract_daily_api(body: Any) -> tuple[Optional[str], Optional[str]]:
     """Return (api_key, api_url) if present in request body or env."""
     api_key = None
@@ -627,6 +665,7 @@ async def bot(session_args: Any):
 
     body = getattr(session_args, "body", None)
     dialin_settings = _extract_dialin_settings(body)
+    dialout_settings = _extract_dialout_settings(body)
     daily_api_key, daily_api_url = _extract_daily_api(body)
 
     caller_memory = None
@@ -693,6 +732,26 @@ async def bot(session_args: Any):
     # Used for per-session transcript logging back to the portal
     call_id = str(dialin_settings.call_id) if dialin_settings else ""
     call_domain = str(dialin_settings.call_domain) if dialin_settings else ""
+    try:
+        if isinstance(body, dict):
+            if not call_id:
+                call_id = str(
+                    body.get("call_id")
+                    or body.get("callId")
+                    or (dialout_settings or {}).get("call_id")
+                    or (dialout_settings or {}).get("callId")
+                    or ""
+                ).strip()
+            if not call_domain:
+                call_domain = str(
+                    body.get("call_domain")
+                    or body.get("callDomain")
+                    or (dialout_settings or {}).get("call_domain")
+                    or (dialout_settings or {}).get("callDomain")
+                    or ""
+                ).strip()
+    except Exception:
+        pass
 
     daily_params = DailyParams(
         api_key=daily_api_key or "",
@@ -723,6 +782,23 @@ async def bot(session_args: Any):
         bot_name=bot_name,
         params=daily_params,
     )
+
+    if dialout_settings:
+        async def _start_dialout():
+            try:
+                await asyncio.sleep(0.5)
+                session_id, err = await transport.start_dialout(dialout_settings)
+                if err:
+                    logger.error(f"Dialout start failed: {err}")
+                elif session_id:
+                    logger.info(f"Dialout started: session_id={session_id}")
+            except Exception as e:
+                logger.error(f"Dialout start failed: {e}")
+
+        try:
+            asyncio.create_task(_start_dialout())
+        except Exception:
+            await _start_dialout()
 
     # STT / LLM / TTS
     deepgram_model = _env("DEEPGRAM_MODEL", "nova-3-general").strip()
@@ -822,9 +898,9 @@ async def bot(session_args: Any):
             if subject:
                 payload["subject"] = subject
 
-            if dialin_settings:
-                payload["call_id"] = str(dialin_settings.call_id)
-                payload["call_domain"] = str(dialin_settings.call_domain)
+            if call_id and call_domain:
+                payload["call_id"] = str(call_id)
+                payload["call_domain"] = str(call_domain)
 
             url = f"{portal_base_url}/api/ai/agent/send-document"
             headers = {
@@ -882,9 +958,9 @@ async def bot(session_args: Any):
             if subject:
                 payload["subject"] = subject
 
-            if dialin_settings:
-                payload["call_id"] = str(dialin_settings.call_id)
-                payload["call_domain"] = str(dialin_settings.call_domain)
+            if call_id and call_domain:
+                payload["call_id"] = str(call_id)
+                payload["call_domain"] = str(call_domain)
 
             url = f"{portal_base_url}/api/ai/agent/send-email"
             headers = {
@@ -957,9 +1033,9 @@ async def bot(session_args: Any):
             if from_didww_did_id:
                 payload["from_didww_did_id"] = from_didww_did_id
 
-            if dialin_settings:
-                payload["call_id"] = str(dialin_settings.call_id)
-                payload["call_domain"] = str(dialin_settings.call_domain)
+            if call_id and call_domain:
+                payload["call_id"] = str(call_id)
+                payload["call_domain"] = str(call_domain)
 
             url = f"{portal_base_url}/api/ai/agent/send-sms"
             headers = {
@@ -1086,9 +1162,9 @@ async def bot(session_args: Any):
             if subject:
                 payload["subject"] = subject
 
-            if dialin_settings:
-                payload["call_id"] = str(dialin_settings.call_id)
-                payload["call_domain"] = str(dialin_settings.call_domain)
+            if call_id and call_domain:
+                payload["call_id"] = str(call_id)
+                payload["call_domain"] = str(call_domain)
 
             url = f"{portal_base_url}/api/ai/agent/send-video-meeting-link"
             headers = {
@@ -1189,9 +1265,9 @@ async def bot(session_args: Any):
                 # Ignore if not parseable; portal will validate
                 pass
 
-            if dialin_settings:
-                payload["call_id"] = str(dialin_settings.call_id)
-                payload["call_domain"] = str(dialin_settings.call_domain)
+            if call_id and call_domain:
+                payload["call_id"] = str(call_id)
+                payload["call_domain"] = str(call_domain)
 
             url = f"{portal_base_url}/api/ai/agent/send-physical-mail"
             headers = {
@@ -1304,9 +1380,9 @@ async def bot(session_args: Any):
             if to_address3:
                 payload["to_address3"] = to_address3
 
-            if dialin_settings:
-                payload["call_id"] = str(dialin_settings.call_id)
-                payload["call_domain"] = str(dialin_settings.call_domain)
+            if call_id and call_domain:
+                payload["call_id"] = str(call_id)
+                payload["call_domain"] = str(call_domain)
 
             url = f"{portal_base_url}/api/ai/agent/send-custom-physical-mail"
             headers = {

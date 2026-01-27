@@ -733,7 +733,7 @@
       <section id="view-dialer" style="display:none">
         <h2>Outbound Dialer</h2>
         <div class="muted" style="margin-bottom:10px">
-          Launch AI-powered outbound campaigns: pick an AI agent, connect one of your SIP accounts, upload leads from CSV,
+          Launch AI-powered outbound campaigns: pick an AI agent, upload leads from CSV,
           then start, pause, or complete the run while tracking answer/voicemail/transfer metrics.
         </div>
         <div class="toolbar" id="dialer-toolbar">
@@ -746,7 +746,6 @@
             <tr>
               <th>Campaign</th>
               <th>AI Agent</th>
-              <th>SIP Account</th>
               <th>Leads</th>
               <th>Concurrency</th>
               <th>Status</th>
@@ -1260,10 +1259,6 @@
             <select id="dialerAgentSelect"><option value="">Loading agents…</option></select>
           </label>
           <label style="display:flex;flex-direction:column;gap:4px">
-            <span>SIP Account *</span>
-            <select id="dialerSipSelect"><option value="">Loading SIP accounts…</option></select>
-          </label>
-          <label style="display:flex;flex-direction:column;gap:4px">
             <span>Concurrent Calls</span>
             <input id="dialerConcurrencyInput" type="range" min="1" max="20" value="1">
             <div class="muted" style="font-size:12px;color:rgba(255,255,255,.60)">Simultaneous calls: <strong id="dialerConcurrencyValue">1</strong></div>
@@ -1517,7 +1512,6 @@
     let dialerPage = 0;
     const dialerPageSize = 25;
     let dialerTotal = 0;
-    let dialerSipOptions = [];
     let dialerUploadCampaignId = null;
 
     function setDialerStatus(msg, isError){
@@ -1593,7 +1587,6 @@
         const stats = c.stats || {};
         const updatedAt = c.updated_at ? new Date(c.updated_at).toLocaleString() : '—';
         const aiName = c.ai_agent_name || `Agent ${c.ai_agent_id || ''}`;
-        const sipLabel = c.sip_account_label || c.sip_account_id || '—';
         const leadsSummary = `${dialerNumber(stats.completed)} / ${dialerNumber(stats.totalLeads)} completed`;
         const actions = [];
         actions.push(`<button class="btn--muted" data-dialer-action="upload" data-id="${escapeHtml(String(c.id))}">Upload CSV</button>`);
@@ -1617,7 +1610,6 @@
             <div class="dialer-chip-grid">${dialerStatsChips(stats)}</div>
           </td>
           <td>${escapeHtml(aiName)}</td>
-          <td>${escapeHtml(sipLabel)}</td>
           <td>${escapeHtml(leadsSummary)}</td>
           <td>${dialerNumber(c.concurrency_limit || c.concurrency || 1)}</td>
           <td>${dialerStatusBadge(c.status)}</td>
@@ -1659,30 +1651,6 @@
       }
     }
 
-    async function ensureDialerSipOptions(force=false){
-      if (!force && dialerSipOptions.length) return dialerSipOptions;
-      try {
-        const r = await fetch('/api/me/sip-users?page=0&pageSize=200');
-        const j = await r.json();
-        if (!r.ok || !j || j.success === false){
-          throw new Error(j?.message || 'Failed to load SIP accounts');
-        }
-        const rows = grabRows(j);
-        dialerSipOptions = rows.map(row => {
-          const id = row && (row.id || row.id_sip || row.idUser || row.id_user || row.idsip);
-          const username = row && (row.username || row.name || row.sipuser || '');
-          const callerId = row && (row.callerid || row.cid || row.calleridname || '');
-          return {
-            id: id != null ? String(id) : '',
-            label: (username && String(username).trim()) || (callerId && String(callerId).trim()) || `SIP ${id || ''}`
-          };
-        }).filter(opt => opt.id);
-      } catch (err) {
-        dialerSipOptions = [];
-        throw err;
-      }
-      return dialerSipOptions;
-    }
 
     function populateDialerAgentSelect(){
       const sel = $('#dialerAgentSelect');
@@ -1707,26 +1675,6 @@
       sel.value = still ? prev : '';
     }
 
-    function populateDialerSipSelect(){
-      const sel = $('#dialerSipSelect');
-      if (!sel) return;
-      const prev = sel.value;
-      sel.innerHTML = '';
-      if (!dialerSipOptions.length){
-        const opt = new Option('Create a SIP account first', '');
-        opt.disabled = true;
-        sel.appendChild(opt);
-        sel.disabled = true;
-        return;
-      }
-      sel.disabled = false;
-      sel.appendChild(new Option('Select SIP account…', ''));
-      for (const s of dialerSipOptions){
-        sel.appendChild(new Option(s.label || s.id, s.id));
-      }
-      const still = Array.from(sel.options || []).some(o => o.value === prev);
-      sel.value = still ? prev : '';
-    }
 
     async function openDialerCreateModal(){
       const modal = $('#dialerCreateModal');
@@ -1742,12 +1690,6 @@
       } catch (e) {
         setDialerStatus(e?.message || 'Load AI agents first', true);
       }
-      try {
-        await ensureDialerSipOptions();
-        populateDialerSipSelect();
-      } catch (e) {
-        setDialerStatus(e?.message || 'Failed to load SIP accounts', true);
-      }
       modal.style.display = 'flex';
       setTimeout(() => { try { $('#dialerCampaignNameInput').focus(); } catch {} }, 0);
     }
@@ -1760,13 +1702,12 @@
     async function submitDialerCreateForm(){
       const name = ($('#dialerCampaignNameInput').value || '').trim();
       const agentId = ($('#dialerAgentSelect').value || '').trim();
-      const sipId = ($('#dialerSipSelect').value || '').trim();
       const concurrency = parseInt($('#dialerConcurrencyInput').value || '1', 10) || 1;
       const errorEl = $('#dialerCreateError');
-
+      if (!name || !agentId){
       if (!name || !agentId || !sipId){
         if (errorEl){
-          errorEl.textContent = 'Name, AI agent, and SIP account are required.';
+          errorEl.textContent = 'Name and AI agent are required.';
           errorEl.style.display = 'block';
         }
         return;
@@ -1783,7 +1724,6 @@
         const payload = {
           name,
           ai_agent_id: agentId,
-          sip_account_id: sipId,
           concurrency_limit: concurrency
         };
         const r = await fetch('/api/me/dialer/campaigns', {
@@ -1996,7 +1936,6 @@
       initDialerUi();
       loadDialerCampaigns();
       ensureDialerAgentOptions().then(populateDialerAgentSelect).catch(() => {});
-      ensureDialerSipOptions().then(populateDialerSipSelect).catch(() => {});
     }
     function grabRows(payload){
       const d = (payload && typeof payload === 'object') ? (payload.data ?? payload) : payload;
