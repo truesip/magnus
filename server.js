@@ -7309,7 +7309,7 @@ app.get('/api/me/dialer/campaigns', requireAuth, async (req, res) => {
     const total = countRow && countRow.cnt != null ? Number(countRow.cnt) : 0;
     const offset = page * pageSize;
 
-    const [rows] = await pool.execute(
+    const [rows] = await pool.query(
       `SELECT * FROM dialer_campaigns
        WHERE user_id = ? AND status <> 'deleted'
        ORDER BY created_at DESC
