@@ -783,22 +783,6 @@ async def bot(session_args: Any):
         params=daily_params,
     )
 
-    if dialout_settings:
-        async def _start_dialout():
-            try:
-                await asyncio.sleep(0.5)
-                session_id, err = await transport.start_dialout(dialout_settings)
-                if err:
-                    logger.error(f"Dialout start failed: {err}")
-                elif session_id:
-                    logger.info(f"Dialout started: session_id={session_id}")
-            except Exception as e:
-                logger.error(f"Dialout start failed: {e}")
-
-        try:
-            asyncio.create_task(_start_dialout())
-        except Exception:
-            await _start_dialout()
 
     # STT / LLM / TTS
     deepgram_model = _env("DEEPGRAM_MODEL", "nova-3-general").strip()
@@ -2934,6 +2918,8 @@ async def bot(session_args: Any):
 
     greeted = False
     video_capture_started = False
+    dialout_started = False
+    dialout_starting = False
 
     @transport.event_handler("on_first_participant_joined")
     async def on_first_participant_joined(_transport, _participant):
@@ -2981,6 +2967,47 @@ async def bot(session_args: Any):
                     logger.info(f"Vision capture: capturing participant camera (id={pid}) at {akool_vision_fps}fps")
                 except Exception as e:
                     logger.warning(f"Vision capture: failed to capture participant camera (id={pid}): {e}")
+
+    async def _maybe_start_dialout():
+        nonlocal dialout_started
+        nonlocal dialout_starting
+
+        if not dialout_settings or dialout_started or dialout_starting:
+            return
+
+        dialout_starting = True
+        try:
+            for attempt in range(6):
+                session_id, err = await transport.start_dialout(dialout_settings)
+                if err:
+                    err_text = str(err)
+                    if "missing task manager" in err_text.lower() and attempt < 5:
+                        await asyncio.sleep(0.4 + (attempt * 0.2))
+                        continue
+                    logger.error(f"Dialout start failed: {err_text}")
+                    break
+                dialout_started = True
+                if session_id:
+                    logger.info(f"Dialout started: session_id={session_id}")
+                break
+        except Exception as e:
+            logger.error(f"Dialout start failed: {e}")
+        finally:
+            dialout_starting = False
+
+    @transport.event_handler("on_call_state_updated")
+    async def on_call_state_updated(_transport, state):
+        try:
+            if isinstance(state, dict):
+                raw_state = state.get("state") or state.get("call_state") or state.get("callState") or state
+            else:
+                raw_state = state
+            normalized = str(raw_state or "").strip().lower()
+        except Exception:
+            normalized = ""
+
+        if normalized == "joined":
+            await _maybe_start_dialout()
 
     runner = PipelineRunner()
     try:
