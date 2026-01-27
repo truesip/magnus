@@ -3,7 +3,7 @@
 #
 # We intentionally base on the last-known-good image in this repo to avoid re-uploading
 # a large dependency layer to Docker Hub (which has been failing intermittently).
-FROM truesip/agenttalkusa:ambience-2025-12-26
+FROM truesip/agenttalkusa:ambience-2026-01-19-a7959c8
 
 WORKDIR /app
 
