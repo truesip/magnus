@@ -866,6 +866,7 @@
         <div class="ai-subtabs">
           <button id="ai-subtab-agents" type="button" class="ai-subtab active">Agents</button>
           <button id="ai-subtab-conversations" type="button" class="ai-subtab">Inbound Conversations</button>
+          <button id="ai-subtab-outbound-conversations" type="button" class="ai-subtab">Outbound Conversations</button>
           <button id="ai-subtab-emails" type="button" class="ai-subtab">Emails</button>
           <button id="ai-subtab-sms" type="button" class="ai-subtab">SMS</button>
           <button id="ai-subtab-meetings" type="button" class="ai-subtab">Meeting</button>
@@ -1147,6 +1148,40 @@
             </div>
           </div>
         </div>
+
+        <div id="ai-pane-outbound-conversations" style="display:none">
+          <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
+            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                <h3 style="margin:0">Outbound Sessions</h3>
+                <div style="margin-left:auto"></div>
+                <select id="aiOutboundConvAgentFilter" style="width:170px">
+                  <option value="">All agents</option>
+                </select>
+                <button id="aiOutboundConvRefreshBtn" type="button" class="btn--muted">Refresh</button>
+              </div>
+              <table id="ai-outbound-conv-sessions-table" style="display:none">
+                <thead><tr><th>Start</th><th>To</th><th>Agent</th><th>Msgs</th><th>Status</th><th>Actions</th></tr></thead>
+                <tbody></tbody>
+              </table>
+              <div id="ai-outbound-conv-sessions-empty" class="muted">Loading…</div>
+              <div class="toolbar" id="ai-outbound-conv-sessions-pager" style="display:none">
+                <button id="aiOutboundConvPrev">Prev</button>
+                <span id="aiOutboundConvPageInfo" class="muted"></span>
+                <button id="aiOutboundConvNext">Next</button>
+              </div>
+            </div>
+
+            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                <h3 style="margin:0">Conversation</h3>
+                <span id="aiOutboundConvSessionMeta" class="muted" style="margin-left:auto"></span>
+              </div>
+              <div id="aiOutboundConvMessages" style="max-height:520px;overflow:auto;border:1px solid #e5e7eb;border-radius:12px;padding:10px;background:#f9fafb"></div>
+              <div id="aiOutboundConvMessagesEmpty" class="muted" style="margin-top:8px">Select a session to view the transcript.</div>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section id="view-billing" style="display:none">
@@ -1408,6 +1443,7 @@
     const aiSubtabs = {
       agents: document.getElementById('ai-subtab-agents'),
       conversations: document.getElementById('ai-subtab-conversations'),
+      'outbound-conversations': document.getElementById('ai-subtab-outbound-conversations'),
       emails: document.getElementById('ai-subtab-emails'),
       sms: document.getElementById('ai-subtab-sms'),
       meetings: document.getElementById('ai-subtab-meetings'),
@@ -1417,6 +1453,7 @@
     const aiPanes = {
       agents: document.getElementById('ai-pane-agents'),
       conversations: document.getElementById('ai-pane-conversations'),
+      'outbound-conversations': document.getElementById('ai-pane-outbound-conversations'),
       emails: document.getElementById('ai-pane-emails'),
       sms: document.getElementById('ai-pane-sms'),
       meetings: document.getElementById('ai-pane-meetings'),
@@ -1426,7 +1463,7 @@
 
     function activateAiSubtab(name){
       const n = String(name || '').toLowerCase();
-      const active = (n === 'tools' || n === 'conversations' || n === 'emails' || n === 'sms' || n === 'meetings' || n === 'mail') ? n : 'agents';
+      const active = (n === 'tools' || n === 'conversations' || n === 'outbound-conversations' || n === 'emails' || n === 'sms' || n === 'meetings' || n === 'mail') ? n : 'agents';
       Object.keys(aiSubtabs).forEach(k => {
         const el = aiSubtabs[k];
         if (!el) return;
@@ -1464,6 +1501,13 @@
         e.preventDefault();
         activateAiSubtab('conversations');
         openAiConversationsTab();
+      });
+    }
+    if (aiSubtabs['outbound-conversations']) {
+      aiSubtabs['outbound-conversations'].addEventListener('click', (e) => {
+        e.preventDefault();
+        activateAiSubtab('outbound-conversations');
+        openAiOutboundConversationsTab();
       });
     }
     if (aiSubtabs.emails) {
@@ -2431,6 +2475,14 @@
     let aiConvSessionsData = [];
     let aiConvSelected = null; // { call_id, call_domain }
 
+    // AI Outbound Conversations
+    let aiOutboundConvUiInit = false;
+    let aiOutboundConvPage = 0;
+    const aiOutboundConvPageSize = 25;
+    let aiOutboundConvTotal = 0;
+    let aiOutboundConvSessionsData = [];
+    let aiOutboundConvSelected = null; // { call_id, call_domain }
+
     // AI Meetings
     let aiMeetingsUiInit = false;
     let aiMeetingsPage = 0;
@@ -2561,6 +2613,98 @@
 
       // Load sessions
       loadAiConversationSessions();
+    }
+
+    // ========== AI Outbound Conversations ==========
+    function clearAiOutboundConvMessages(msg){
+      const box = $('#aiOutboundConvMessages');
+      const empty = $('#aiOutboundConvMessagesEmpty');
+      const meta = $('#aiOutboundConvSessionMeta');
+      if (box) box.innerHTML = '';
+      if (meta) meta.textContent = '';
+      if (empty) {
+        empty.style.display = 'block';
+        empty.textContent = msg || 'Select a session to view the transcript.';
+      }
+    }
+
+    function renderAiOutboundConvAgentFilter(){
+      const sel = $('#aiOutboundConvAgentFilter');
+      if (!sel) return;
+      const current = String(sel.value || '');
+      sel.innerHTML = '';
+      sel.appendChild(new Option('All agents', ''));
+      for (const a of (aiAgentsData || [])) {
+        const id = a && a.id != null ? String(a.id) : '';
+        if (!id) continue;
+        const name = String(a.display_name || '').trim();
+        sel.appendChild(new Option(name || `Agent ${id}`, id));
+      }
+      const still = Array.from(sel.options || []).some(o => String(o.value) === current);
+      sel.value = still ? current : '';
+    }
+
+    function initAiOutboundConversationsUI(){
+      if (aiOutboundConvUiInit) return;
+      aiOutboundConvUiInit = true;
+
+      const refreshBtn = $('#aiOutboundConvRefreshBtn');
+      if (refreshBtn) refreshBtn.addEventListener('click', (e) => { e.preventDefault(); loadAiOutboundConversationSessions(); });
+
+      const agentSel = $('#aiOutboundConvAgentFilter');
+      if (agentSel) agentSel.addEventListener('change', () => {
+        aiOutboundConvPage = 0;
+        aiOutboundConvSelected = null;
+        clearAiOutboundConvMessages();
+        loadAiOutboundConversationSessions();
+      });
+
+      const prev = $('#aiOutboundConvPrev');
+      if (prev) prev.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (aiOutboundConvPage > 0) {
+          aiOutboundConvPage -= 1;
+          loadAiOutboundConversationSessions();
+        }
+      });
+
+      const next = $('#aiOutboundConvNext');
+      if (next) next.addEventListener('click', (e) => {
+        e.preventDefault();
+        if ((aiOutboundConvPage + 1) * aiOutboundConvPageSize < aiOutboundConvTotal) {
+          aiOutboundConvPage += 1;
+          loadAiOutboundConversationSessions();
+        }
+      });
+
+      document.addEventListener('click', (ev) => {
+        const t = ev.target;
+        if (!t || !t.classList || !t.classList.contains('ai-outbound-conv-open')) return;
+        ev.preventDefault();
+        const callId = String(t.getAttribute('data-call-id') || '');
+        const callDomain = String(t.getAttribute('data-call-domain') || '');
+        const found = (aiOutboundConvSessionsData || []).find(s => String(s.call_id || '') === callId && String(s.call_domain || '') === callDomain);
+        if (found) {
+          selectAiOutboundConversationSession(found);
+        } else if (callId && callDomain) {
+          selectAiOutboundConversationSession({ call_id: callId, call_domain: callDomain });
+        }
+      });
+    }
+
+    async function openAiOutboundConversationsTab(){
+      initAiOutboundConversationsUI();
+
+      // Populate agent filter
+      try {
+        if (!Array.isArray(aiAgentsData) || aiAgentsData.length === 0) {
+          await loadAiAgents();
+        }
+      } catch {}
+      renderAiOutboundConvAgentFilter();
+
+      // Load sessions
+      loadAiOutboundConversationSessions();
     }
 
     // ========== AI Meetings ==========
@@ -3868,6 +4012,189 @@
       }
 
       loadAiConversationMessages(callDomain, callId);
+    }
+
+    function renderAiOutboundConversationSessions(){
+      const table = $('#ai-outbound-conv-sessions-table');
+      const empty = $('#ai-outbound-conv-sessions-empty');
+      const pager = $('#ai-outbound-conv-sessions-pager');
+      const pageInfo = $('#aiOutboundConvPageInfo');
+      const prev = $('#aiOutboundConvPrev');
+      const next = $('#aiOutboundConvNext');
+      if (!table || !empty) return;
+      const tbody = table.querySelector('tbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+
+      if (!aiOutboundConvSessionsData || !aiOutboundConvSessionsData.length) {
+        table.style.display = 'none';
+        if (pager) pager.style.display = 'none';
+        if (pageInfo) pageInfo.textContent = '';
+        empty.style.display = 'block';
+        empty.textContent = 'No sessions yet.';
+        return;
+      }
+
+      for (const s of aiOutboundConvSessionsData) {
+        const callId = String(s.call_id || '');
+        const callDomain = String(s.call_domain || '');
+        const start = s.time_start ? fmtDateTime(s.time_start) : '';
+        const to = String(s.to_number || '-');
+        const agentName = String(s.agent_name || '-');
+        const msgCount = (s.message_count != null ? String(s.message_count) : '0');
+        const status = String(s.status || '').trim();
+        const result = String(s.result || '').trim();
+        const statusText = (status && result && result !== status) ? `${status} • ${result}` : (status || result || '-');
+        const isSelected = aiOutboundConvSelected && String(aiOutboundConvSelected.call_id || '') === callId && String(aiOutboundConvSelected.call_domain || '') === callDomain;
+
+        const tr = document.createElement('tr');
+        if (isSelected) tr.style.background = 'rgba(79,70,229,.18)';
+        tr.innerHTML =
+          `<td>${escapeHtml(start)}</td>`+
+          `<td>${escapeHtml(to)}</td>`+
+          `<td>${escapeHtml(agentName)}</td>`+
+          `<td>${escapeHtml(msgCount)}</td>`+
+          `<td>${escapeHtml(statusText)}</td>`+
+          `<td><button type="button" class="ai-outbound-conv-open" data-call-id="${escapeHtml(callId)}" data-call-domain="${escapeHtml(callDomain)}">Open</button></td>`;
+        tbody.appendChild(tr);
+      }
+
+      empty.style.display = 'none';
+      table.style.display = 'table';
+
+      const totalPages = aiOutboundConvTotal > 0 ? Math.max(1, Math.ceil(aiOutboundConvTotal / aiOutboundConvPageSize)) : 1;
+      if (pageInfo) pageInfo.textContent = `Page ${aiOutboundConvPage + 1} of ${totalPages}`;
+
+      if (pager) {
+        pager.style.display = (aiOutboundConvTotal > aiOutboundConvPageSize) ? 'flex' : 'none';
+      }
+      if (prev) prev.disabled = (aiOutboundConvPage <= 0);
+      if (next) next.disabled = ((aiOutboundConvPage + 1) * aiOutboundConvPageSize >= aiOutboundConvTotal);
+    }
+
+    async function loadAiOutboundConversationSessions(){
+      const table = $('#ai-outbound-conv-sessions-table');
+      const empty = $('#ai-outbound-conv-sessions-empty');
+      const pager = $('#ai-outbound-conv-sessions-pager');
+      if (empty) { empty.style.display = 'block'; empty.textContent = 'Loading…'; }
+      if (table) table.style.display = 'none';
+      if (pager) pager.style.display = 'none';
+
+      try {
+        const agentSel = $('#aiOutboundConvAgentFilter');
+        const agentId = agentSel ? String(agentSel.value || '').trim() : '';
+        const url = `/api/me/ai/outbound-conversations/sessions?page=${aiOutboundConvPage}&pageSize=${aiOutboundConvPageSize}` + (agentId ? `&agent_id=${encodeURIComponent(agentId)}` : '');
+        const r = await fetch(url);
+        const j = await r.json();
+        if (!j || j.success === false) {
+          aiOutboundConvSessionsData = [];
+          aiOutboundConvTotal = 0;
+          renderAiOutboundConversationSessions();
+          if (empty) empty.textContent = j?.message || 'Failed to load sessions';
+          return;
+        }
+        aiOutboundConvSessionsData = Array.isArray(j.data) ? j.data : [];
+        const total = Number(j.total);
+        aiOutboundConvTotal = Number.isFinite(total) ? total : aiOutboundConvSessionsData.length;
+
+        // If current page is out of bounds (e.g. filter changed), jump back and refetch.
+        if (aiOutboundConvTotal > 0 && aiOutboundConvPage > 0 && aiOutboundConvPage * aiOutboundConvPageSize >= aiOutboundConvTotal) {
+          aiOutboundConvPage = 0;
+          return loadAiOutboundConversationSessions();
+        }
+
+        renderAiOutboundConversationSessions();
+      } catch (e) {
+        aiOutboundConvSessionsData = [];
+        aiOutboundConvTotal = 0;
+        renderAiOutboundConversationSessions();
+        if (empty) empty.textContent = 'Failed to load sessions';
+      }
+    }
+
+    function renderAiOutboundConversationMessages(msgs){
+      const box = $('#aiOutboundConvMessages');
+      const empty = $('#aiOutboundConvMessagesEmpty');
+      if (!box || !empty) return;
+
+      box.innerHTML = '';
+
+      const arr = Array.isArray(msgs) ? msgs : [];
+      if (!arr.length) {
+        empty.style.display = 'block';
+        empty.textContent = 'No messages recorded for this session.';
+        return;
+      }
+
+      empty.style.display = 'none';
+
+      for (const m of arr) {
+        const role = String(m.role || '').toLowerCase();
+        const isUser = role === 'user';
+        const who = isUser ? 'Callee' : 'AI';
+        const ts = m.created_at ? fmtDateTime(m.created_at) : '';
+
+        const card = document.createElement('div');
+        card.className = `ai-chat-card ${isUser ? 'ai-chat-card--user' : 'ai-chat-card--ai'}`;
+
+        const header = document.createElement('div');
+        header.className = 'ai-chat-meta';
+        header.textContent = ts ? `${who} • ${ts}` : who;
+
+        const body = document.createElement('div');
+        body.className = 'ai-chat-body';
+        body.textContent = String(m.content || '');
+
+        card.appendChild(header);
+        card.appendChild(body);
+        box.appendChild(card);
+      }
+
+      box.scrollTop = box.scrollHeight;
+    }
+
+    async function loadAiOutboundConversationMessages(callDomain, callId){
+      const empty = $('#aiOutboundConvMessagesEmpty');
+      if (empty) {
+        empty.style.display = 'block';
+        empty.textContent = 'Loading…';
+      }
+      const box = $('#aiOutboundConvMessages');
+      if (box) box.innerHTML = '';
+
+      try {
+        const url = `/api/me/ai/conversations/messages?call_id=${encodeURIComponent(String(callId || ''))}&call_domain=${encodeURIComponent(String(callDomain || ''))}&limit=5000`;
+        const r = await fetch(url);
+        const j = await r.json();
+        if (!j || j.success === false) {
+          if (empty) empty.textContent = j?.message || 'Failed to load messages';
+          return;
+        }
+        renderAiOutboundConversationMessages(j.data);
+      } catch (e) {
+        if (empty) empty.textContent = 'Failed to load messages';
+      }
+    }
+
+    function selectAiOutboundConversationSession(session){
+      const callId = String(session && session.call_id ? session.call_id : '');
+      const callDomain = String(session && session.call_domain ? session.call_domain : '');
+      if (!callId || !callDomain) return;
+
+      aiOutboundConvSelected = { call_id: callId, call_domain: callDomain };
+      renderAiOutboundConversationSessions();
+
+      const meta = $('#aiOutboundConvSessionMeta');
+      if (meta) {
+        const parts = [];
+        if (session.to_number) parts.push(`To ${String(session.to_number)}`);
+        if (session.time_start) parts.push(fmtDateTime(session.time_start));
+        if (session.status) parts.push(String(session.status));
+        parts.push(`${callDomain}/${callId}`);
+        meta.textContent = parts.join(' • ');
+      }
+
+      loadAiOutboundConversationMessages(callDomain, callId);
     }
 
     function refreshAgentDefaultTemplateSelectOptions(){
