@@ -1590,7 +1590,6 @@
         { label: 'Live', value: s.inProgress },
         { label: 'Done', value: s.completed },
         { label: 'Failed', value: s.failed },
-        { label: 'Answered', value: s.answered },
         { label: 'Voicemail', value: s.voicemail },
         { label: 'Transferred', value: s.transferred }
       ].map(item => `<span class="dialer-chip"><strong>${dialerNumber(item.value)}</strong> ${escapeHtml(item.label)}</span>`).join('');
