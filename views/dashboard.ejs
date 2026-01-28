@@ -896,6 +896,7 @@
                 <div style="margin-left:auto"></div>
                 <button id="buyAiNumberBtn" class="btn--primary">➕ Buy Number</button>
               </div>
+              <div id="aiNumbersBalanceLockNote" class="muted" style="display:none;margin:-4px 0 10px 0">Balance must be positive to buy/assign AI numbers. Add funds to continue.</div>
               <table id="ai-numbers-table" style="display:none">
                 <thead><tr><th>Number</th><th>Assigned Agent</th><th>Actions</th></tr></thead>
                 <tbody></tbody>
@@ -4748,6 +4749,44 @@
       table.style.display = 'table';
     }
 
+    function getCurrentUserBalance(){
+      const b = (meProfile && meProfile.balance != null) ? Number(meProfile.balance) : null;
+      return Number.isFinite(b) ? b : null;
+    }
+
+    function aiNumbersBalanceLocked(){
+      const b = getCurrentUserBalance();
+      // Require a positive balance (> 0) to buy/assign/unassign AI numbers.
+      return (b != null && b <= 0);
+    }
+
+    function applyAiNumbersBalanceLock(){
+      const locked = aiNumbersBalanceLocked();
+
+      const note = document.getElementById('aiNumbersBalanceLockNote');
+      if (note) note.style.display = locked ? 'block' : 'none';
+
+      const buyBtn = document.getElementById('buyAiNumberBtn');
+      if (buyBtn) {
+        buyBtn.disabled = locked;
+        buyBtn.title = locked ? 'Add funds to enable buying/assigning AI numbers.' : '';
+      }
+
+      document.querySelectorAll('select.ai-number-agent-select').forEach((el) => {
+        try {
+          el.disabled = locked;
+          el.title = locked ? 'Add funds to enable assigning AI numbers.' : '';
+        } catch {}
+      });
+
+      document.querySelectorAll('button.ai-number-unassign').forEach((el) => {
+        try {
+          el.disabled = locked;
+          el.title = locked ? 'Add funds to enable unassigning AI numbers.' : '';
+        } catch {}
+      });
+    }
+
     function renderAiNumbers(){
       const table = $('#ai-numbers-table');
       const empty = $('#ai-numbers-empty');
@@ -4762,6 +4801,7 @@
         table.style.display = 'none';
         empty.style.display = 'block';
         empty.textContent = 'No phone numbers yet. Click “Buy Number”.';
+        applyAiNumbersBalanceLock();
         return;
       }
 
@@ -4785,6 +4825,7 @@
 
       empty.style.display = 'none';
       table.style.display = 'table';
+      applyAiNumbersBalanceLock();
     }
 
     async function loadAiAgents(){
@@ -5097,6 +5138,11 @@
 
     // Buy number
     $('#buyAiNumberBtn').addEventListener('click', async () => {
+      if (aiNumbersBalanceLocked()) {
+        showToast('Balance must be positive to buy/assign AI numbers. Add funds to continue.', 'error');
+        applyAiNumbersBalanceLock();
+        return;
+      }
       const btn = $('#buyAiNumberBtn');
       btn.disabled = true;
       const old = btn.textContent;
@@ -5170,6 +5216,11 @@
         }
       }
       if (ev.target && ev.target.classList.contains('ai-number-unassign')) {
+        if (aiNumbersBalanceLocked()) {
+          showToast('Balance must be positive to buy/assign AI numbers. Add funds to continue.', 'error');
+          applyAiNumbersBalanceLock();
+          return;
+        }
         const numberId = ev.target.getAttribute('data-number-id');
         try {
           const r = await fetch(`/api/me/ai/numbers/${encodeURIComponent(numberId)}/unassign`, { method: 'POST' });
@@ -5210,6 +5261,13 @@
       const select = ev.target;
       const numberId = select.getAttribute('data-number-id');
       const agentId = select.value;
+
+      if (aiNumbersBalanceLocked()) {
+        showToast('Balance must be positive to buy/assign AI numbers. Add funds to continue.', 'error');
+        applyAiNumbersBalanceLock();
+        await loadAiNumbers();
+        return;
+      }
 
       select.disabled = true;
       try {
@@ -5397,6 +5455,9 @@
           if (d.balance !== null && d.balance !== undefined && $('#currentBalance')) {
 $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15\">$${Number(d.balance).toFixed(2)}</strong>`;
           }
+
+          // Apply AI-number assignment lock when balance isn't positive.
+          try { applyAiNumbersBalanceLock(); } catch {}
           const callLimitDisplay = d.callLimit !== null && d.callLimit !== undefined ? String(d.callLimit) : '0';
           const cpsLimitDisplay = d.cpsLimit !== null && d.cpsLimit !== undefined ? String(d.cpsLimit) : '0';
 
@@ -6226,6 +6287,15 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         // Update balance display in header if element exists
         if (balance !== undefined && balance !== null && $('#currentBalance')) {
 $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15\">$${Number(balance).toFixed(2)}</strong>`;
+        }
+
+        // Keep in-memory profile balance in sync so AI-number assignment locking stays accurate.
+        if (balance !== undefined && balance !== null) {
+          try {
+            if (!meProfile) meProfile = {};
+            meProfile.balance = balance;
+          } catch {}
+          try { applyAiNumbersBalanceLock(); } catch {}
         }
         
         const tbody = $('#billing-table tbody');

@@ -959,6 +959,49 @@ async function ensureMagnusUserId(req, { httpsAgent, hostHeader }) {
   // Last resort: use cached session value
   return (req.session && req.session.magnusUserId) ? String(req.session.magnusUserId) : '';
 }
+
+function getSessionMagnusCredit(req, maxAgeMs = 60_000) {
+  try {
+    const credit = Number(req?.session?.magnusCredit);
+    const at = Number(req?.session?.magnusCreditAt);
+    const hasCredit = Number.isFinite(credit);
+    const hasAt = Number.isFinite(at);
+    if (!hasCredit) return null;
+    if (!hasAt) return credit;
+    if ((Date.now() - at) <= maxAgeMs) return credit;
+  } catch {}
+  return null;
+}
+
+async function fetchMagnusCreditForReq(req, { httpsAgent, hostHeader } = {}) {
+  const magnusUserId = await ensureMagnusUserId(req, { httpsAgent, hostHeader });
+  if (!magnusUserId) return null;
+
+  // Reuse the shared Magnus credit helper used elsewhere in the codebase.
+  const info = await fetchMagnusUserCredit({ magnusUserId, httpsAgent, hostHeader });
+  const credit = (info && Number.isFinite(Number(info.credit))) ? Number(info.credit) : null;
+  return credit;
+}
+
+async function getMagnusUserCreditCached(req, { httpsAgent, hostHeader, maxAgeMs = 60_000 } = {}) {
+  const cached = getSessionMagnusCredit(req, maxAgeMs);
+  if (cached != null) return cached;
+
+  try {
+    const credit = await fetchMagnusCreditForReq(req, { httpsAgent, hostHeader });
+    if (credit == null) return null;
+    try {
+      req.session.magnusCredit = credit;
+      req.session.magnusCreditAt = Date.now();
+      await new Promise((res) => req.session.save(() => res()));
+    } catch {}
+    return credit;
+  } catch (e) {
+    if (DEBUG) console.warn('[magnus.credit] fetch failed:', e?.message || e);
+    return null;
+  }
+}
+
 async function prefetchUserData(req){
   try {
     const httpsAgent = magnusBillingAgent;
@@ -3585,6 +3628,23 @@ app.get('/api/me/profile', requireAuth, async (req, res) => {
           const callLimit = userRow.calllimit || userRow.credit_limit || userRow.creditlimit || 0;
           const cpsLimit = userRow.cpslimit || userRow.cps_limit || 0;
           if (DEBUG) console.log('[profile] Balance fetched:', { userId: idUser, username: userRow.username, balance, callLimit, cpsLimit, totalUsersChecked: allUsers.length });
+
+          // Cache balance/limits in session so other endpoints can quickly enforce credit-based rules.
+          try {
+            req.session.magnusCredit = balance;
+            req.session.magnusCreditAt = Date.now();
+          } catch {}
+
+          // If the balance is NEGATIVE, immediately unassign AI numbers (DIDs) from agents.
+          // This prevents call routing and clears assignments in the dashboard until the user adds funds.
+          if (Number.isFinite(balance) && balance < 0) {
+            try {
+              await unassignAiNumbersForUser({ localUserId: userId });
+            } catch (e) {
+              if (DEBUG) console.warn('[ai.numbers.unassignAll] failed during profile fetch:', e?.message || e);
+            }
+          }
+
           // Store call limit and CPS limit for response
           req.session.callLimit = callLimit;
           req.session.cpsLimit = cpsLimit;
@@ -8824,6 +8884,49 @@ async function disableAiDialinRoutingForUser({ localUserId }) {
   return { disabledCount };
 }
 
+// Balance enforcement: when a user's balance goes NEGATIVE, unassign all AI numbers.
+// This removes inbound routing (Daily dial-in config) and clears the UI assignment.
+async function unassignAiNumbersForUser({ localUserId }) {
+  if (!pool || !localUserId) return { unassignedCount: 0 };
+  let unassignedCount = 0;
+
+  const [rows] = await pool.execute(
+    'SELECT id, dialin_config_id, agent_id FROM ai_numbers WHERE user_id = ? AND (agent_id IS NOT NULL OR dialin_config_id IS NOT NULL)',
+    [localUserId]
+  );
+
+  for (const r of rows || []) {
+    const numId = r?.id;
+    const dialinConfigId = r?.dialin_config_id;
+    if (!numId) continue;
+
+    if (dialinConfigId) {
+      try { await dailyDeleteDialinConfig(dialinConfigId); } catch (e) {
+        if (DEBUG) console.warn('[ai.numbers.unassignAll] dialin delete failed', {
+          localUserId,
+          numId,
+          dialinConfigId,
+          message: e?.message || e
+        });
+      }
+    }
+
+    try {
+      await pool.execute(
+        'UPDATE ai_numbers SET agent_id = NULL, dialin_config_id = NULL WHERE id = ? AND user_id = ? LIMIT 1',
+        [numId, localUserId]
+      );
+    } catch (e) {
+      if (DEBUG) console.warn('[ai.numbers.unassignAll] DB update failed', e?.message || e);
+      continue;
+    }
+
+    unassignedCount += 1;
+  }
+
+  return { unassignedCount };
+}
+
 async function enableAiDialinRoutingForUser({ localUserId }) {
   if (!pool || !localUserId) return { enabledCount: 0 };
   let enabledCount = 0;
@@ -11454,6 +11557,21 @@ app.get('/api/me/ai/numbers', requireAuth, async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     const userId = req.session.userId;
+
+    // If the user's balance is NEGATIVE, auto-unassign AI numbers from agents.
+    // (Keeps numbers owned by the user, but removes routing/assignment until balance is positive.)
+    try {
+      const credit = await getMagnusUserCreditCached(req, {
+        httpsAgent: magnusBillingAgent,
+        hostHeader: process.env.MAGNUSBILLING_HOST_HEADER
+      });
+      if (credit != null && credit < 0) {
+        await unassignAiNumbersForUser({ localUserId: userId });
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[ai.numbers.list] balance enforcement failed:', e?.message || e);
+    }
+
     const [rows] = await pool.execute(
       `SELECT n.id, n.daily_number_id, n.phone_number, n.agent_id, n.dialin_config_id, n.created_at, n.updated_at,
               a.display_name AS agent_name
@@ -11480,6 +11598,19 @@ app.post('/api/me/ai/numbers/buy', requireAuth, async (req, res) => {
     const total = Number(cnt?.total || 0);
     if (total >= AI_MAX_NUMBERS) {
       return res.status(400).json({ success: false, message: `You can have up to ${AI_MAX_NUMBERS} phone numbers.` });
+    }
+
+    // Balance must be positive to buy/assign AI phone numbers.
+    // NOTE: call routing/billing are tied to the TalkUSA (MagnusBilling) balance.
+    const buyCredit = await getMagnusUserCreditCached(req, {
+      httpsAgent: magnusBillingAgent,
+      hostHeader: process.env.MAGNUSBILLING_HOST_HEADER
+    });
+    if (buyCredit != null && buyCredit <= 0) {
+      return res.status(402).json({
+        success: false,
+        message: `Insufficient balance. Your current balance is $${buyCredit.toFixed(2)}. Please add funds and try again.`
+      });
     }
 
     // Optional: balance check before buying a number (same pattern as DIDWW).
@@ -11574,6 +11705,18 @@ app.post('/api/me/ai/numbers/:id/assign', requireAuth, async (req, res) => {
     const agentId = req.body?.agent_id;
     if (!agentId) return res.status(400).json({ success: false, message: 'agent_id is required' });
 
+    // Balance must be positive to change AI number assignments.
+    const assignCredit = await getMagnusUserCreditCached(req, {
+      httpsAgent: magnusBillingAgent,
+      hostHeader: process.env.MAGNUSBILLING_HOST_HEADER
+    });
+    if (assignCredit != null && assignCredit <= 0) {
+      return res.status(402).json({
+        success: false,
+        message: `Insufficient balance. Your current balance is $${assignCredit.toFixed(2)}. Please add funds and try again.`
+      });
+    }
+
     const [nrows] = await pool.execute('SELECT * FROM ai_numbers WHERE id = ? AND user_id = ? LIMIT 1', [numberId, userId]);
     const num = nrows && nrows[0];
     if (!num) return res.status(404).json({ success: false, message: 'Number not found' });
@@ -11660,6 +11803,18 @@ app.post('/api/me/ai/numbers/:id/unassign', requireAuth, async (req, res) => {
     const userId = req.session.userId;
     const numberId = req.params.id;
 
+    // Balance must be positive to change AI number assignments.
+    const unassignCredit = await getMagnusUserCreditCached(req, {
+      httpsAgent: magnusBillingAgent,
+      hostHeader: process.env.MAGNUSBILLING_HOST_HEADER
+    });
+    if (unassignCredit != null && unassignCredit <= 0) {
+      return res.status(402).json({
+        success: false,
+        message: `Insufficient balance. Your current balance is $${unassignCredit.toFixed(2)}. Please add funds and try again.`
+      });
+    }
+
     const [rows] = await pool.execute('SELECT * FROM ai_numbers WHERE id = ? AND user_id = ? LIMIT 1', [numberId, userId]);
     const num = rows && rows[0];
     if (!num) return res.status(404).json({ success: false, message: 'Number not found' });
@@ -11737,7 +11892,20 @@ app.get('/api/me/billing-history', requireAuth, async (req, res) => {
         const resp = await mbSignedCall({ relPath: '/index.php/user/read', params, httpsAgent, hostHeader });
         const allUsers = resp?.data?.rows || resp?.data?.data || [];
         const userRow = allUsers.find(u => String(u.id || u.user_id || u.uid || u.id_user || '') === String(idUser));
-        if (userRow) balance = Number(userRow.credit || 0);
+        if (userRow) {
+          balance = Number(userRow.credit || 0);
+          try {
+            req.session.magnusCredit = balance;
+            req.session.magnusCreditAt = Date.now();
+          } catch {}
+
+          // If the balance is NEGATIVE, immediately unassign AI numbers (DIDs) from agents.
+          if (Number.isFinite(balance) && balance < 0) {
+            try { await unassignAiNumbersForUser({ localUserId: userId }); } catch (e) {
+              if (DEBUG) console.warn('[ai.numbers.unassignAll] failed during billing-history fetch:', e?.message || e);
+            }
+          }
+        }
       }
     } catch (e) { if (DEBUG) console.warn('[billing.balance] fetch failed:', e.message); }
 
@@ -15603,8 +15771,14 @@ app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
       // Best-effort: disable AI number routing while the user is blocked.
       // Only do this when we *confirmed* the balance is below threshold.
       if (AI_INBOUND_DISABLE_NUMBERS_WHEN_BALANCE_LOW && blockReason === 'insufficient_funds') {
-        disableAiDialinRoutingForUser({ localUserId: agentRow.user_id })
-          .catch(() => {});
+        const localUserId = agentRow.user_id;
+
+        // If the balance went NEGATIVE, also clear the UI assignment until the user adds funds.
+        if (credit != null && Number.isFinite(credit) && credit < 0) {
+          unassignAiNumbersForUser({ localUserId }).catch(() => {});
+        } else {
+          disableAiDialinRoutingForUser({ localUserId }).catch(() => {});
+        }
       }
 
       // Return non-2xx so Daily rejects the call.
