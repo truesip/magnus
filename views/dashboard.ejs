@@ -4814,10 +4814,17 @@
         const unassignBtn = n.agent_id
           ? `<button class="ai-number-unassign btn--muted" data-number-id="${escapeHtml(String(n.id))}">Unassign</button>`
           : '';
+        // Calculate age in days for delete button
+        const createdAt = n.created_at ? new Date(n.created_at) : null;
+        const ageInDays = createdAt ? Math.floor((new Date() - createdAt) / (1000 * 60 * 60 * 24)) : 0;
+        const canDelete = ageInDays >= 28;
+        const daysRemaining = Math.max(0, 28 - ageInDays);
+        const deleteTitle = canDelete ? 'Delete this number' : `Can delete in ${daysRemaining} day${daysRemaining === 1 ? '' : 's'}`;
+        const deleteBtn = `<button class="ai-number-delete btn--danger" data-number-id="${escapeHtml(String(n.id))}" ${canDelete ? '' : 'disabled'} title="${deleteTitle}">Delete</button>`;
         tr.innerHTML =
           `<td>${escapeHtml(n.phone_number || '')}</td>`+
           `<td><select class="ai-number-agent-select" data-number-id="${escapeHtml(String(n.id))}" style="width:200px">${agentOptions}</select></td>`+
-          `<td>${unassignBtn}</td>`;
+          `<td>${unassignBtn} ${deleteBtn}</td>`;
         tbody.appendChild(tr);
         const sel = tr.querySelector('select');
         if (sel) sel.value = n.agent_id ? String(n.agent_id) : '';
@@ -5234,6 +5241,31 @@
           await loadAiNumbers();
         } catch {
           showToast('Failed to unassign number', 'error');
+        }
+      }
+      if (ev.target && ev.target.classList.contains('ai-number-delete')) {
+        const numberId = ev.target.getAttribute('data-number-id');
+        if (!confirm('Delete this AI phone number? This will release the number and cannot be undone.')) return;
+        const btn = ev.target;
+        btn.disabled = true;
+        const old = btn.textContent;
+        btn.textContent = 'Deleting...';
+        try {
+          const r = await fetch(`/api/me/ai/numbers/${encodeURIComponent(numberId)}`, { method: 'DELETE' });
+          const j = await r.json();
+          if (!j || j.success === false) {
+            showToast(j?.message || 'Failed to delete number', 'error');
+            btn.disabled = false;
+            btn.textContent = old;
+            return;
+          }
+          showToast('Number deleted.');
+          await loadAiAgents();
+          await loadAiNumbers();
+        } catch {
+          showToast('Failed to delete number', 'error');
+          btn.disabled = false;
+          btn.textContent = old;
         }
       }
       if (ev.target && ev.target.classList.contains('ai-doc-template-delete')) {

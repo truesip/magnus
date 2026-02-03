@@ -11835,6 +11835,63 @@ app.post('/api/me/ai/numbers/:id/unassign', requireAuth, async (req, res) => {
   }
 });
 
+// Delete AI number (release from Daily)
+// Daily phone numbers can only be released after 28 days from purchase.
+app.delete('/api/me/ai/numbers/:id', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const numberId = req.params.id;
+
+    const [rows] = await pool.execute(
+      'SELECT * FROM ai_numbers WHERE id = ? AND user_id = ? LIMIT 1',
+      [numberId, userId]
+    );
+    const num = rows && rows[0];
+    if (!num) return res.status(404).json({ success: false, message: 'Number not found' });
+
+    // Check if number is at least 28 days old (Daily restriction)
+    const createdAt = num.created_at ? new Date(num.created_at) : null;
+    const now = new Date();
+    const ageInDays = createdAt ? Math.floor((now - createdAt) / (1000 * 60 * 60 * 24)) : 0;
+    const MIN_AGE_DAYS = 28;
+
+    if (ageInDays < MIN_AGE_DAYS) {
+      const daysRemaining = MIN_AGE_DAYS - ageInDays;
+      return res.status(400).json({
+        success: false,
+        message: `This number cannot be deleted yet. Daily phone numbers can only be released after ${MIN_AGE_DAYS} days. Please wait ${daysRemaining} more day${daysRemaining === 1 ? '' : 's'}.`
+      });
+    }
+
+    // Remove dial-in config if assigned
+    if (num.dialin_config_id) {
+      try {
+        await dailyDeleteDialinConfig(num.dialin_config_id);
+      } catch (e) {
+        if (DEBUG) console.warn('[ai.numbers.delete] dialin delete failed', e.message || e);
+      }
+    }
+
+    // Release the phone number from Daily
+    try {
+      await dailyReleasePhoneNumber(num.daily_number_id);
+    } catch (e) {
+      const msg = e?.message || 'Failed to release phone number from Daily';
+      if (DEBUG) console.error('[ai.numbers.delete] Daily release failed:', e?.data || msg);
+      return res.status(502).json({ success: false, message: msg });
+    }
+
+    // Delete from local database
+    await pool.execute('DELETE FROM ai_numbers WHERE id = ? AND user_id = ?', [numberId, userId]);
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[ai.numbers.delete] error:', e.data || e.message || e);
+    return res.status(500).json({ success: false, message: e.message || 'Failed to delete number' });
+  }
+});
+
 // ========== Billing History ==========
 // Get billing history for current user
 // NOTE: We intentionally hide raw DIDWW purchase rows ("DID Purchase (Order: ...)")
