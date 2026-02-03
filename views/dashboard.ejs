@@ -484,7 +484,8 @@
     #dialerCreateModal,
     #dialerUploadModal,
     #aiEmailPreviewModal,
-    #aiAgentModal{
+    #aiAgentModal,
+    #aiTemplateModal{
       /* Keep the dimmed overlay so the page behind is still visible. */
       background: rgba(0,0,0,.55) !important;
     }
@@ -495,7 +496,8 @@
     #dialerCreateModal > div,
     #dialerUploadModal > div,
     #aiEmailPreviewModal > div,
-    #aiAgentModal .ai-agent-modal-card{
+    #aiAgentModal .ai-agent-modal-card,
+    #aiTemplateModal .ai-agent-modal-card{
       /* Solid modal cards (no transparency / no see-through). */
       background: #0b1024 !important;
       border:1px solid rgba(255,255,255,.14) !important;
@@ -515,7 +517,9 @@
     #aiEmailPreviewModal [style*="color:#4b5563"],
     #aiEmailPreviewModal [style*="color:#6b7280"],
     #aiAgentModal [style*="color:#4b5563"],
-    #aiAgentModal [style*="color:#6b7280"]{
+    #aiAgentModal [style*="color:#6b7280"],
+    #aiTemplateModal [style*="color:#4b5563"],
+    #aiTemplateModal [style*="color:#6b7280"]{
       color: rgba(255,255,255,.65) !important;
     }
 
@@ -1328,6 +1332,74 @@
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
           <button id="dialerUploadCloseBtn" class="btn--muted" type="button">Close</button>
           <button id="dialerUploadSubmitBtn" class="btn--primary" type="button">Upload Leads</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI Agent Template Selection Modal -->
+    <div id="aiTemplateModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9997;align-items:center;justify-content:center">
+      <div class="ai-agent-modal-card" style="background:#fff;padding:18px;border-radius:14px;width:520px;max-width:94%;max-height:92vh;overflow:auto">
+        <h3 style="margin:0 0 6px 0">🤖 Create Assistant</h3>
+        <div class="muted" style="margin-bottom:14px;font-size:12px">Choose a template to get started, or create your own from scratch.</div>
+        
+        <div style="margin-bottom:10px">
+          <label style="display:block;margin-bottom:4px;font-size:12px;font-weight:700">Assistant Name <span class="muted">(can be adjusted later)</span></label>
+          <input id="aiTemplateAgentName" type="text" placeholder="New Assistant" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:10px">
+        </div>
+
+        <!-- Blank Template -->
+        <div class="ai-template-card" data-template="blank" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px;margin-bottom:10px;cursor:pointer;transition:all .15s ease">
+          <div style="display:flex;align-items:center;gap:10px">
+            <div style="font-size:18px">➕</div>
+            <div>
+              <div style="font-weight:700;font-size:13px">Blank Template</div>
+              <div class="muted" style="font-size:11px">Start from scratch with minimal configuration.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin:14px 0 8px 0;color:rgba(255,255,255,.5)">Quickstart</div>
+
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px">
+          <div class="ai-template-card" data-template="customer-support" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
+            <div style="font-size:16px;margin-bottom:6px">💜</div>
+            <div style="font-weight:700;font-size:12px;margin-bottom:4px">Customer Support Specialist</div>
+            <div class="muted" style="font-size:10px;line-height:1.4">A comprehensive template for resolving product issues, answering questions, and ensuring satisfying customer experiences with technical knowledge and empathy.</div>
+          </div>
+
+          <div class="ai-template-card" data-template="lead-qualification" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
+            <div style="font-size:16px;margin-bottom:6px">👤</div>
+            <div style="font-weight:700;font-size:12px;margin-bottom:4px">Lead Qualification Specialist</div>
+            <div class="muted" style="font-size:10px;line-height:1.4">A consultative template designed to identify qualified prospects, understand business challenges, and connect them with appropriate sales representatives.</div>
+          </div>
+
+          <div class="ai-template-card" data-template="appointment-scheduler" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
+            <div style="font-size:16px;margin-bottom:6px">📅</div>
+            <div style="font-weight:700;font-size:12px;margin-bottom:4px">Appointment Scheduler</div>
+            <div class="muted" style="font-size:10px;line-height:1.4">A specialized template for efficiently booking, confirming, rescheduling, or canceling appointments while providing clear service information.</div>
+          </div>
+
+          <div class="ai-template-card" data-template="info-collector" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
+            <div style="font-size:16px;margin-bottom:6px">📋</div>
+            <div style="font-weight:700;font-size:12px;margin-bottom:4px">Info Collector</div>
+            <div class="muted" style="font-size:10px;line-height:1.4">A methodical template for gathering accurate and complete information from customers while ensuring data quality and regulatory compliance.</div>
+          </div>
+
+          <div class="ai-template-card" data-template="care-coordinator" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
+            <div style="font-size:16px;margin-bottom:6px">💚</div>
+            <div style="font-weight:700;font-size:12px;margin-bottom:4px">Care Coordinator</div>
+            <div class="muted" style="font-size:10px;line-height:1.4">A compassionate template for scheduling medical appointments, answering health questions, and coordinating patient services with HIPAA compliance.</div>
+          </div>
+
+          <div class="ai-template-card" data-template="feedback-gatherer" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
+            <div style="font-size:16px;margin-bottom:6px">⭐</div>
+            <div style="font-weight:700;font-size:12px;margin-bottom:4px">Feedback Gatherer</div>
+            <div class="muted" style="font-size:10px;line-height:1.4">An engaging template for conducting surveys, collecting customer feedback, and gathering market research with high completion rates.</div>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:14px">
+          <button id="cancelAiTemplateBtn" class="btn--muted">Close</button>
         </div>
       </div>
     </div>
@@ -4950,8 +5022,233 @@
       if (modal) modal.style.display = 'none';
     }
 
+    // AI Agent quickstart templates
+    const AI_TEMPLATES = {
+      'blank': {
+        greeting: '',
+        prompt: ''
+      },
+      'customer-support': {
+        greeting: 'Hello! Thank you for calling. My name is Alex and I\'m here to help you with any questions or issues you may have. How can I assist you today?',
+        prompt: `You are a Customer Support Specialist for our company. Your role is to provide exceptional customer service by:
+
+1. Listening carefully to customer concerns and questions
+2. Providing accurate information about products and services
+3. Troubleshooting technical issues step-by-step
+4. Escalating complex issues to human agents when necessary
+5. Following up to ensure customer satisfaction
+
+Guidelines:
+- Always be patient, empathetic, and professional
+- Ask clarifying questions to fully understand the issue
+- Offer solutions and alternatives when possible
+- If you cannot resolve an issue, offer to transfer to a specialist
+- Thank customers for their patience and business`
+      },
+      'lead-qualification': {
+        greeting: 'Hi there! Thanks for your interest in learning more about our solutions. I\'m here to understand your needs and see how we might be able to help. May I ask what prompted your call today?',
+        prompt: `You are a Lead Qualification Specialist. Your role is to identify and qualify potential customers by:
+
+1. Understanding their business needs and challenges
+2. Determining their timeline and budget considerations
+3. Identifying decision-makers and buying process
+4. Assessing fit with our products/services
+5. Scheduling qualified leads with sales representatives
+
+Qualification Criteria:
+- Business size and industry
+- Current pain points and goals
+- Budget range and timeline
+- Decision-making authority
+- Level of interest and urgency
+
+Guidelines:
+- Be consultative, not pushy
+- Ask open-ended questions
+- Listen more than you talk
+- Provide value in every interaction
+- If qualified, offer to schedule a meeting with a sales rep`
+      },
+      'appointment-scheduler': {
+        greeting: 'Hello! Thank you for calling. I can help you schedule, reschedule, or manage your appointments. What would you like to do today?',
+        prompt: `You are an Appointment Scheduler. Your role is to efficiently manage appointment bookings by:
+
+1. Helping callers book new appointments
+2. Rescheduling or canceling existing appointments
+3. Confirming appointment details and requirements
+4. Providing information about services and preparation needed
+5. Sending confirmation details via email when requested
+
+Information to Collect:
+- Full name and contact information
+- Preferred date and time
+- Type of appointment/service needed
+- Any special requirements or notes
+
+Guidelines:
+- Confirm all details before finalizing
+- Offer alternative times if preferred slot is unavailable
+- Explain any preparation required for the appointment
+- Provide clear confirmation of what was scheduled`
+      },
+      'info-collector': {
+        greeting: 'Hello! I\'m here to help collect some information from you. This should only take a few minutes. Are you ready to begin?',
+        prompt: `You are an Information Collector. Your role is to gather accurate and complete information by:
+
+1. Asking clear, specific questions one at a time
+2. Confirming information for accuracy
+3. Explaining why information is needed when asked
+4. Ensuring data privacy and compliance
+5. Providing a summary at the end
+
+Guidelines:
+- Be patient and allow time for responses
+- Repeat back information to confirm accuracy
+- Explain data handling practices if asked
+- Thank the caller for their cooperation
+- Offer to email a summary of collected information
+
+Remember to:
+- Ask one question at a time
+- Use simple, clear language
+- Be respectful of the caller's time
+- Handle sensitive information appropriately`
+      },
+      'care-coordinator': {
+        greeting: 'Hello, thank you for calling. I\'m here to help coordinate your care and answer any health-related questions. How may I assist you today?',
+        prompt: `You are a Care Coordinator. Your role is to assist patients with healthcare coordination while maintaining HIPAA compliance:
+
+1. Scheduling medical appointments
+2. Answering general health questions
+3. Coordinating between healthcare providers
+4. Providing pre-appointment instructions
+5. Following up on patient care
+
+Important Guidelines:
+- Never provide medical diagnoses or specific medical advice
+- For emergencies, direct callers to call 911
+- Maintain patient confidentiality at all times
+- Verify patient identity before discussing personal health information
+- Transfer to medical staff for clinical questions
+
+Services You Can Help With:
+- Appointment scheduling and rescheduling
+- General office information
+- Insurance and billing questions (general)
+- Prescription refill requests (forwarding to appropriate staff)
+- Post-visit follow-up coordination`
+      },
+      'feedback-gatherer': {
+        greeting: 'Hi! Thank you for taking the time to share your feedback with us. Your input helps us improve our products and services. This survey will only take about 5 minutes. Ready to begin?',
+        prompt: `You are a Feedback Gatherer. Your role is to collect valuable customer feedback through engaging conversations:
+
+1. Conduct customer satisfaction surveys
+2. Gather product/service feedback
+3. Collect Net Promoter Score (NPS) responses
+4. Document suggestions and complaints
+5. Thank customers for their valuable input
+
+Survey Best Practices:
+- Keep questions clear and concise
+- Use a mix of rating scales and open-ended questions
+- Don't lead or bias responses
+- Show appreciation for feedback
+- Offer to connect them with support if issues arise
+
+Sample Questions:
+- On a scale of 1-10, how likely are you to recommend us?
+- What did you like most about your experience?
+- What could we improve?
+- Is there anything else you'd like to share?
+
+Guidelines:
+- Be enthusiastic but not pushy
+- Respect if they want to end the survey early
+- Summarize key feedback at the end
+- Offer to email a thank-you note`
+      }
+    };
+
+    function openAiTemplateModal(){
+      const modal = $('#aiTemplateModal');
+      if (!modal) return;
+      // Reset name input
+      const nameInput = $('#aiTemplateAgentName');
+      if (nameInput) nameInput.value = '';
+      modal.style.display = 'flex';
+      if (nameInput) nameInput.focus();
+    }
+
+    function closeAiTemplateModal(){
+      const modal = $('#aiTemplateModal');
+      if (modal) modal.style.display = 'none';
+    }
+
+    function selectTemplate(templateId){
+      const template = AI_TEMPLATES[templateId] || AI_TEMPLATES['blank'];
+      const agentName = ($('#aiTemplateAgentName').value || '').trim() || 'New Assistant';
+      closeAiTemplateModal();
+      // Open agent modal with template data pre-filled
+      openAiAgentModalWithTemplate(agentName, template);
+    }
+
+    function openAiAgentModalWithTemplate(name, template){
+      const modal = $('#aiAgentModal');
+      if (!modal) return;
+      $('#aiAgentId').value = '';
+      $('#aiAgentModalTitle').textContent = '🤖 Create AI Agent';
+      $('#aiAgentName').value = name || '';
+      $('#aiAgentGreeting').value = template.greeting || '';
+      $('#aiAgentPrompt').value = template.prompt || '';
+      try { $('#aiAgentTransferNumber').value = ''; } catch {}
+
+      // Reset background audio fields
+      try { $('#aiAgentBackgroundAudioUrl').value = ''; } catch {}
+      try { $('#aiAgentBackgroundAudioGain').value = ''; } catch {}
+      try { $('#aiAgentBackgroundAudioFile').value = ''; } catch {}
+      const bgRemoveBtn = $('#aiRemoveBackgroundAudioBtn');
+      if (bgRemoveBtn) bgRemoveBtn.style.display = 'none';
+      const fileLabel = $('#aiAgentBackgroundAudioFileName');
+      if (fileLabel) {
+        fileLabel.textContent = 'No file uploaded.';
+        fileLabel.dataset.defaultText = fileLabel.textContent;
+      }
+
+      // Reset template selection
+      refreshAgentDefaultTemplateSelectOptions();
+      try { $('#aiAgentDefaultTemplateSelect').value = ''; } catch {}
+
+      // Reset voice selection
+      applyAiVoiceSelection('');
+      loadCartesiaVoices(false);
+
+      modal.style.display = 'flex';
+      try { $('#aiAgentName').focus(); } catch {}
+    }
+
+    // Template modal handlers
+    $('#cancelAiTemplateBtn').addEventListener('click', () => closeAiTemplateModal());
+    $('#aiTemplateModal').addEventListener('click', (e) => { if (e.target === $('#aiTemplateModal')) closeAiTemplateModal(); });
+
+    // Template card click handlers
+    document.querySelectorAll('.ai-template-card').forEach(card => {
+      card.addEventListener('click', () => {
+        const templateId = card.getAttribute('data-template');
+        if (templateId) selectTemplate(templateId);
+      });
+      // Hover effect
+      card.addEventListener('mouseenter', () => {
+        card.style.borderColor = 'rgba(34,211,238,.45)';
+        card.style.background = 'rgba(34,211,238,.08)';
+      });
+      card.addEventListener('mouseleave', () => {
+        card.style.borderColor = 'rgba(255,255,255,.12)';
+        card.style.background = 'rgba(255,255,255,.06)';
+      });
+    });
+
     // AI modal handlers
-    $('#createAiAgentBtn').addEventListener('click', () => openAiAgentModal(null));
+    $('#createAiAgentBtn').addEventListener('click', () => openAiTemplateModal());
     $('#cancelAiAgentBtn').addEventListener('click', () => closeAiAgentModal());
     $('#aiAgentModal').addEventListener('click', (e) => { if (e.target === $('#aiAgentModal')) closeAiAgentModal(); });
 
