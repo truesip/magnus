@@ -172,6 +172,23 @@
     .hint a{color:rgba(255,255,255,.86);text-decoration:underline;text-decoration-color: rgba(34,211,238,.65);text-underline-offset:3px}
     .hint a:hover{color:#fff;text-decoration-color: rgba(167,139,250,.85)}
 
+    .forgot-link{font-size:13px;color:var(--muted2);text-align:right;margin-top:8px}
+    .forgot-link a{color:rgba(255,255,255,.72);text-decoration:none}
+    .forgot-link a:hover{color:#fff;text-decoration:underline}
+
+    /* Modal styles */
+    .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);backdrop-filter:blur(4px);display:none;place-items:center;z-index:100}
+    .modal-overlay.active{display:grid}
+    .modal{background:linear-gradient(180deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.05) 100%);border:1px solid rgba(255,255,255,.12);border-radius:var(--radius2);padding:26px 22px;max-width:420px;width:calc(100% - 40px);position:relative;box-shadow:var(--shadow)}
+    .modal h2{margin:0 0 8px 0;font-size:18px;text-align:center}
+    .modal-sub{color:var(--muted);font-size:13px;text-align:center;margin-bottom:16px}
+    .modal-close{position:absolute;top:12px;right:12px;background:none;border:none;color:var(--muted);cursor:pointer;font-size:20px;padding:4px 8px}
+    .modal-close:hover{color:#fff}
+    .success-msg{background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.35);color:rgba(255,255,255,.88);border-radius:12px;padding:12px;font-size:13px;margin-bottom:14px;text-align:center}
+    .btn--secondary{width:100%;margin:10px 0 0;padding:12px 16px;background:rgba(255,255,255,.08);color:var(--text);border:1px solid rgba(255,255,255,.15);border-radius:12px;font-weight:700;cursor:pointer;transition:background .15s ease}
+    .btn--secondary:hover{background:rgba(255,255,255,.12)}
+    .hidden{display:none!important}
+
     /* Footer */
     .site-footer{background: rgba(0,0,0,.22);border-top: 1px solid rgba(255,255,255,.08);padding:52px 20px 26px;text-align:center;margin-top:auto}
     .footer-brand{font-weight:900;font-size:20px;letter-spacing:.2px;color:#fff;margin-bottom:6px}
@@ -224,10 +241,49 @@
         <label>Password</label>
         <input type="password" name="password" required>
       </div>
+      <div class="forgot-link"><a href="#" id="forgotPasswordLink">Forgot password?</a></div>
       <button class="btn" type="submit">Sign in</button>
     </form>
     <div class="hint">Don't have an account? <a href="/signup">Sign up</a></div>
   </div>
+  </div>
+
+  <!-- Forgot Password Modal -->
+  <div class="modal-overlay" id="forgotModal">
+    <div class="modal">
+      <button class="modal-close" id="closeForgotModal">&times;</button>
+      
+      <!-- Step 1: Enter Email -->
+      <div id="forgotStep1">
+        <h2>🔐 Reset Password</h2>
+        <div class="modal-sub">Enter your email address and we'll send you a verification code.</div>
+        <div id="forgotError" class="error" style="display:none"></div>
+        <div class="field">
+          <label>Email Address</label>
+          <input type="email" id="forgotEmail" placeholder="you@example.com" required>
+        </div>
+        <button class="btn" id="sendResetCode">Send Reset Code</button>
+        <button class="btn--secondary" id="backToLogin1">Back to Login</button>
+      </div>
+
+      <!-- Step 2: Enter Code + New Password -->
+      <div id="forgotStep2" class="hidden">
+        <h2>🔑 Enter Code</h2>
+        <div class="modal-sub">We sent a 6-digit code to your email. Enter it below with your new password.</div>
+        <div id="resetError" class="error" style="display:none"></div>
+        <div id="resetSuccess" class="success-msg" style="display:none"></div>
+        <div class="field">
+          <label>Verification Code</label>
+          <input type="text" id="resetCode" placeholder="123456" maxlength="6" pattern="[0-9]{6}" required>
+        </div>
+        <div class="field">
+          <label>New Password</label>
+          <input type="password" id="newPassword" placeholder="Letters and numbers only, max 10 chars" maxlength="10" required>
+        </div>
+        <button class="btn" id="resetPasswordBtn">Reset Password</button>
+        <button class="btn--secondary" id="backToStep1">Back</button>
+      </div>
+    </div>
   </div>
 
   <!-- Footer -->
@@ -254,6 +310,185 @@
     <div class="footer-copyright">Copyright © 2026 TrueSIP USA LLC — TalkUSA</div>
   </footer>
 
+
+<script>
+  (function() {
+    const forgotModal = document.getElementById('forgotModal');
+    const forgotStep1 = document.getElementById('forgotStep1');
+    const forgotStep2 = document.getElementById('forgotStep2');
+    const forgotEmail = document.getElementById('forgotEmail');
+    const resetCode = document.getElementById('resetCode');
+    const newPassword = document.getElementById('newPassword');
+    const forgotError = document.getElementById('forgotError');
+    const resetError = document.getElementById('resetError');
+    const resetSuccess = document.getElementById('resetSuccess');
+    
+    let resetToken = null;
+
+    function showError(el, msg) {
+      el.textContent = msg;
+      el.style.display = 'block';
+    }
+    function hideError(el) {
+      el.style.display = 'none';
+    }
+    function hideSuccess(el) {
+      el.style.display = 'none';
+    }
+
+    // Open modal
+    document.getElementById('forgotPasswordLink').addEventListener('click', function(e) {
+      e.preventDefault();
+      forgotModal.classList.add('active');
+      forgotStep1.classList.remove('hidden');
+      forgotStep2.classList.add('hidden');
+      hideError(forgotError);
+      forgotEmail.value = '';
+      forgotEmail.focus();
+    });
+
+    // Close modal
+    document.getElementById('closeForgotModal').addEventListener('click', function() {
+      forgotModal.classList.remove('active');
+    });
+    document.getElementById('backToLogin1').addEventListener('click', function() {
+      forgotModal.classList.remove('active');
+    });
+
+    // Click outside to close
+    forgotModal.addEventListener('click', function(e) {
+      if (e.target === forgotModal) forgotModal.classList.remove('active');
+    });
+
+    // Step 1: Send reset code
+    document.getElementById('sendResetCode').addEventListener('click', async function() {
+      const email = forgotEmail.value.trim();
+      if (!email) {
+        showError(forgotError, 'Please enter your email address.');
+        return;
+      }
+      hideError(forgotError);
+      
+      const btn = this;
+      btn.disabled = true;
+      btn.textContent = 'Sending...';
+
+      try {
+        const res = await fetch('/api/forgot-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email })
+        });
+        const data = await res.json();
+        
+        if (data.success) {
+          resetToken = data.token || null;
+          forgotStep1.classList.add('hidden');
+          forgotStep2.classList.remove('hidden');
+          hideError(resetError);
+          hideSuccess(resetSuccess);
+          resetCode.value = '';
+          newPassword.value = '';
+          resetCode.focus();
+        } else {
+          showError(forgotError, data.message || 'Failed to send reset code.');
+        }
+      } catch (err) {
+        showError(forgotError, 'Network error. Please try again.');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Send Reset Code';
+      }
+    });
+
+    // Back to step 1
+    document.getElementById('backToStep1').addEventListener('click', function() {
+      forgotStep2.classList.add('hidden');
+      forgotStep1.classList.remove('hidden');
+      hideError(forgotError);
+    });
+
+    // Step 2: Reset password
+    document.getElementById('resetPasswordBtn').addEventListener('click', async function() {
+      const code = resetCode.value.trim();
+      const password = newPassword.value;
+      
+      if (!code || code.length !== 6) {
+        showError(resetError, 'Please enter the 6-digit code.');
+        return;
+      }
+      if (!password) {
+        showError(resetError, 'Please enter a new password.');
+        return;
+      }
+      if (!/^[a-zA-Z0-9]+$/.test(password) || password.length > 10) {
+        showError(resetError, 'Password must be letters and numbers only, max 10 characters.');
+        return;
+      }
+      
+      hideError(resetError);
+      hideSuccess(resetSuccess);
+      
+      const btn = this;
+      btn.disabled = true;
+      btn.textContent = 'Resetting...';
+
+      try {
+        const res = await fetch('/api/reset-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: resetToken, code, password })
+        });
+        const data = await res.json();
+        
+        if (data.success) {
+          resetSuccess.textContent = data.message || 'Password updated! You can now log in.';
+          resetSuccess.style.display = 'block';
+          // Hide form fields after success
+          resetCode.parentElement.style.display = 'none';
+          newPassword.parentElement.style.display = 'none';
+          btn.style.display = 'none';
+          document.getElementById('backToStep1').textContent = 'Go to Login';
+          document.getElementById('backToStep1').onclick = function() {
+            forgotModal.classList.remove('active');
+            // Reset the form for next time
+            resetCode.parentElement.style.display = 'block';
+            newPassword.parentElement.style.display = 'block';
+            btn.style.display = 'block';
+            document.getElementById('backToStep1').textContent = 'Back';
+          };
+        } else {
+          showError(resetError, data.message || 'Failed to reset password.');
+        }
+      } catch (err) {
+        showError(resetError, 'Network error. Please try again.');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Reset Password';
+      }
+    });
+
+    // Allow Enter key in inputs
+    forgotEmail.addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        document.getElementById('sendResetCode').click();
+      }
+    });
+    resetCode.addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        newPassword.focus();
+      }
+    });
+    newPassword.addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        document.getElementById('resetPasswordBtn').click();
+      }
+    });
+  })();
+</script>
 
 <!-- Start of LiveChat (www.livechat.com) code -->
 <script>

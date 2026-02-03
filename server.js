@@ -1320,6 +1320,21 @@ async function initDb() {
     UNIQUE KEY uniq_email (email)
   )`);
 
+  // Password reset tokens table
+  await pool.query(`CREATE TABLE IF NOT EXISTS password_resets (
+    token VARCHAR(64) PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    email VARCHAR(255) NOT NULL,
+    code_hash CHAR(64) NOT NULL,
+    expires_at BIGINT NOT NULL,
+    used TINYINT(1) NOT NULL DEFAULT 0,
+    attempts INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_user_id (user_id),
+    KEY idx_email (email),
+    FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
   // Ensure signup_users address + signup IP columns exist
   for (const colDef of [
     { name: 'address1', ddl: "ALTER TABLE signup_users ADD COLUMN address1 VARCHAR(255) NULL AFTER phone" },
@@ -3526,6 +3541,150 @@ app.post('/login', loginLimiter, async (req, res) => {
   }
 });
 app.post('/logout', (req, res) => { try { req.session.destroy(()=>{}); } catch {} res.redirect('/login'); });
+
+// ========== Forgot Password ==========
+const PASSWORD_RESET_TTL_MS = (parseInt(process.env.PASSWORD_RESET_TTL_MINUTES) || 15) * 60 * 1000;
+const PASSWORD_RESET_MAX_ATTEMPTS = parseInt(process.env.PASSWORD_RESET_MAX_ATTEMPTS || '5', 10);
+
+async function sendPasswordResetEmail(toEmail, code) {
+  const apiKey = process.env.SMTP2GO_API_KEY;
+  const sender = process.env.SMTP2GO_SENDER || `no-reply@${(process.env.SENDER_DOMAIN || 'talkusa.net')}`;
+  if (!apiKey) throw new Error('SMTP2GO_API_KEY missing');
+  const subject = 'TalkUSA Password Reset Code';
+  const minutes = Math.round(PASSWORD_RESET_TTL_MS / 60000);
+  const text = `Your password reset code is ${code}. It expires in ${minutes} minutes.\n\nIf you did not request this, please ignore this email.`;
+  const html = `<p>Your password reset code is <b>${code}</b>.</p><p>This code expires in ${minutes} minutes.</p><p style="color:#666;">If you did not request this, please ignore this email.</p>`;
+  const payload = { api_key: apiKey, to: [toEmail], sender, subject, text_body: text, html_body: html };
+  await smtp2goSendEmail(payload, { kind: 'password-reset', to: toEmail, subject });
+}
+
+// Request password reset - sends code to email
+app.post('/api/forgot-password', otpSendLimiter, async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    const emailTrimmed = String(email || '').trim().toLowerCase();
+    
+    if (!emailTrimmed) {
+      return res.status(400).json({ success: false, message: 'Email is required' });
+    }
+    
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    
+    // Find user by email
+    const [rows] = await pool.execute(
+      'SELECT id, email, username FROM signup_users WHERE email = ? LIMIT 1',
+      [emailTrimmed]
+    );
+    const user = rows && rows[0];
+    
+    // Always return success to prevent email enumeration
+    // But only actually send email if user exists
+    if (!user) {
+      if (DEBUG) console.log('[forgot-password] Email not found:', emailTrimmed);
+      return res.json({ success: true, message: 'If an account exists with that email, a reset code has been sent.' });
+    }
+    
+    // Generate token and code
+    const token = crypto.randomBytes(16).toString('hex');
+    const code = otp();
+    const codeHash = sha256(code);
+    const expiresAt = Date.now() + PASSWORD_RESET_TTL_MS;
+    
+    // Store reset token
+    await pool.execute(
+      `INSERT INTO password_resets (token, user_id, email, code_hash, expires_at, used, attempts)
+       VALUES (?, ?, ?, ?, ?, 0, 0)`,
+      [token, user.id, user.email, codeHash, expiresAt]
+    );
+    
+    // Send email
+    await sendPasswordResetEmail(user.email, code);
+    if (DEBUG) console.log('[forgot-password] Reset code sent:', { email: user.email, token });
+    
+    return res.json({ success: true, token, message: 'If an account exists with that email, a reset code has been sent.' });
+  } catch (e) {
+    console.error('[forgot-password] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to process request' });
+  }
+});
+
+// Complete password reset - verify code and update password
+app.post('/api/reset-password', otpVerifyLimiter, async (req, res) => {
+  try {
+    const { token, code, password } = req.body || {};
+    
+    if (!token || !code || !password) {
+      return res.status(400).json({ success: false, message: 'Token, code, and new password are required' });
+    }
+    
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    
+    // Validate password format (same rules as signup)
+    if (!passwordIsAlnumMax10(password)) {
+      return res.status(400).json({ success: false, message: 'Password must be letters and numbers only, maximum 10 characters.' });
+    }
+    
+    // Fetch reset record
+    const [rows] = await pool.execute(
+      'SELECT * FROM password_resets WHERE token = ? LIMIT 1',
+      [token]
+    );
+    const rec = rows && rows[0];
+    
+    if (!rec) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired reset token' });
+    }
+    
+    if (rec.used) {
+      return res.status(400).json({ success: false, message: 'This reset code was already used' });
+    }
+    
+    if (Date.now() > Number(rec.expires_at)) {
+      await pool.execute('UPDATE password_resets SET used = 1 WHERE token = ?', [token]);
+      return res.status(400).json({ success: false, message: 'Reset code expired. Please request a new one.' });
+    }
+    
+    const attempts = Number(rec.attempts || 0);
+    if (attempts >= PASSWORD_RESET_MAX_ATTEMPTS) {
+      await pool.execute('UPDATE password_resets SET used = 1 WHERE token = ?', [token]);
+      return res.status(400).json({ success: false, message: 'Too many invalid attempts. Please request a new reset code.' });
+    }
+    
+    // Verify code
+    if (sha256(code) !== rec.code_hash) {
+      await pool.execute('UPDATE password_resets SET attempts = attempts + 1 WHERE token = ?', [token]);
+      if (attempts + 1 >= PASSWORD_RESET_MAX_ATTEMPTS) {
+        await pool.execute('UPDATE password_resets SET used = 1 WHERE token = ?', [token]);
+        return res.status(400).json({ success: false, message: 'Too many invalid attempts. Please request a new reset code.' });
+      }
+      return res.status(400).json({ success: false, message: 'Invalid code' });
+    }
+    
+    // Code is valid - update password
+    const passwordHash = await bcrypt.hash(password, 12);
+    
+    await pool.execute(
+      'UPDATE signup_users SET password_hash = ? WHERE id = ?',
+      [passwordHash, rec.user_id]
+    );
+    
+    // Mark reset as used
+    await pool.execute('UPDATE password_resets SET used = 1 WHERE token = ?', [token]);
+    
+    // Clean up old reset tokens for this user
+    try {
+      await pool.execute('DELETE FROM password_resets WHERE user_id = ? AND used = 1 AND token != ?', [rec.user_id, token]);
+    } catch {}
+    
+    if (DEBUG) console.log('[reset-password] Password updated:', { userId: rec.user_id, email: rec.email });
+    
+    return res.json({ success: true, message: 'Password updated successfully. You can now log in.' });
+  } catch (e) {
+    console.error('[reset-password] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to reset password' });
+  }
+});
+
 app.get('/dashboard', requireAuth, (req, res) => {
   const localMarkup = parseFloat(process.env.DID_LOCAL_MONTHLY_MARKUP || '10.20') || 0;
   const tollfreeMarkup = parseFloat(process.env.DID_TOLLFREE_MONTHLY_MARKUP || '25.20') || 0;
