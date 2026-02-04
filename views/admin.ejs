@@ -302,12 +302,12 @@
 
   <div class="wrap">
     <aside>
-      <a href="/admin" class="active">📊 Overview</a>
-      <a href="#users" onclick="showSection('users');return false">👥 Users</a>
-      <a href="#financial" onclick="showSection('financial');return false">💰 Financial</a>
-      <a href="#telephony" onclick="showSection('telephony');return false">📞 Telephony</a>
-      <a href="#ai" onclick="showSection('ai');return false">🤖 AI Platform</a>
-      <a href="#integrations" onclick="showSection('integrations');return false">🔌 Integrations</a>
+      <a href="#overview" onclick="showSection('overview');return false" class="active" data-section="overview">📊 Overview</a>
+      <a href="#users" onclick="showSection('users');return false" data-section="users">👥 Users</a>
+      <a href="#financial" onclick="showSection('financial');return false" data-section="financial">💰 Financial</a>
+      <a href="#telephony" onclick="showSection('telephony');return false" data-section="telephony">📞 Telephony</a>
+      <a href="#ai" onclick="showSection('ai');return false" data-section="ai">🤖 AI Platform</a>
+      <a href="#integrations" onclick="showSection('integrations');return false" data-section="integrations">🔌 Integrations</a>
       <a href="/dashboard">← Back to Dashboard</a>
     </aside>
 
@@ -416,8 +416,8 @@
     document.querySelectorAll('main > section').forEach(s => s.style.display = 'none');
     const section = document.getElementById(id);
     if (section) section.style.display = 'block';
-    document.querySelectorAll('aside a').forEach(a => a.classList.remove('active'));
-    const link = document.querySelector(`aside a[href="#${id}"]`);
+    document.querySelectorAll('aside a[data-section]').forEach(a => a.classList.remove('active'));
+    const link = document.querySelector(`aside a[data-section="${id}"]`);
     if (link) link.classList.add('active');
   };
 
