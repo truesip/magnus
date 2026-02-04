@@ -400,7 +400,13 @@
 </div>
 
 <script>
-// Section navigation - defined globally so onclick handlers work
+// All variables and functions at global scope for onclick handlers
+var stats = null;
+var users = [];
+var userPagination = { page: 0, limit: 25, total: 0, totalPages: 0 };
+var selectedUserId = null;
+
+// Section navigation
 function showSection(id) {
   document.querySelectorAll('main > section').forEach(function(s) { s.style.display = 'none'; });
   var section = document.getElementById(id);
@@ -410,29 +416,19 @@ function showSection(id) {
   if (link) link.classList.add('active');
 }
 
-(function(){
-  let stats = null;
-  let users = [];
-  let userPagination = { page: 0, limit: 25, total: 0, totalPages: 0 };
-  let selectedUserId = null;
+// Format currency
+function fmt(n, decimals) {
+  if (decimals === undefined) decimals = 2;
+  return '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
 
-  // Load initial data
-  loadStats();
-  loadUsers(0);
-  loadIntegrations();
+// Format number
+function num(n) {
+  return Number(n || 0).toLocaleString('en-US');
+}
 
-  // Format currency
-  function fmt(n, decimals = 2) {
-    return '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
-  }
-
-  // Format number
-  function num(n) {
-    return Number(n || 0).toLocaleString('en-US');
-  }
-
-  // Load platform stats
-  async function loadStats() {
+// Load platform stats
+async function loadStats() {
     try {
       const res = await fetch('/api/admin/stats');
       const data = await res.json();
@@ -570,73 +566,70 @@ function showSection(id) {
     document.getElementById('telephonyStats').innerHTML = html;
   }
 
-  function renderAi() {
-    if (!stats) return;
-    const a = stats.ai;
-    const html = `
-      <div class="kpi-grid">
-        <div class="kpi-card">
-          <div class="kpi-value">${num(a.agents)}</div>
-          <div class="kpi-label">AI Agents</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-value">${num(a.conversations)}</div>
-          <div class="kpi-label">Conversations</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-value">${num(a.dialer.campaigns)}</div>
-          <div class="kpi-label">Dialer Campaigns</div>
-          <div class="kpi-sub">${num(a.dialer.running)} running</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-value">${num(a.dialer.leads)}</div>
-          <div class="kpi-label">Dialer Leads</div>
-        </div>
+function renderAi() {
+  if (!stats) return;
+  var a = stats.ai;
+  var html = `
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-value">${num(a.agents)}</div>
+        <div class="kpi-label">AI Agents</div>
       </div>
-      <div class="stats-grid" style="margin-top:16px">
-        <div class="stats-box">
-          <h4>Communication Stats</h4>
-          <div class="stat-row"><span class="stat-label">Emails Sent</span><span class="stat-value">${num(a.emails.completed)} / ${num(a.emails.total)}</span></div>
-          <div class="stat-row"><span class="stat-label">SMS Sent</span><span class="stat-value">${num(a.sms.completed)} / ${num(a.sms.total)}</span></div>
-          <div class="stat-row"><span class="stat-label">Physical Mail</span><span class="stat-value">${num(a.mail.completed)} / ${num(a.mail.total)}</span></div>
-          <div class="stat-row"><span class="stat-label">Meeting Links</span><span class="stat-value">${num(a.meetings.completed)} / ${num(a.meetings.total)}</span></div>
-        </div>
-        <div class="stats-box">
-          <h4>Delivery Status</h4>
-          <div class="stat-row"><span class="stat-label">Email Failed</span><span class="stat-value" style="color:var(--danger)">${num(a.emails.failed)}</span></div>
-          <div class="stat-row"><span class="stat-label">SMS Failed</span><span class="stat-value" style="color:var(--danger)">${num(a.sms.failed)}</span></div>
-          <div class="stat-row"><span class="stat-label">Mail Failed</span><span class="stat-value" style="color:var(--danger)">${num(a.mail.failed)}</span></div>
-          <div class="stat-row"><span class="stat-label">Email Pending</span><span class="stat-value" style="color:var(--warning)">${num(a.emails.pending)}</span></div>
-        </div>
+      <div class="kpi-card">
+        <div class="kpi-value">${num(a.conversations)}</div>
+        <div class="kpi-label">Conversations</div>
       </div>
-    `;
-    document.getElementById('aiStats').innerHTML = html;
+      <div class="kpi-card">
+        <div class="kpi-value">${num(a.dialer.campaigns)}</div>
+        <div class="kpi-label">Dialer Campaigns</div>
+        <div class="kpi-sub">${num(a.dialer.running)} running</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-value">${num(a.dialer.leads)}</div>
+        <div class="kpi-label">Dialer Leads</div>
+      </div>
+    </div>
+    <div class="stats-grid" style="margin-top:16px">
+      <div class="stats-box">
+        <h4>Communication Stats</h4>
+        <div class="stat-row"><span class="stat-label">Emails Sent</span><span class="stat-value">${num(a.emails.completed)} / ${num(a.emails.total)}</span></div>
+        <div class="stat-row"><span class="stat-label">SMS Sent</span><span class="stat-value">${num(a.sms.completed)} / ${num(a.sms.total)}</span></div>
+        <div class="stat-row"><span class="stat-label">Physical Mail</span><span class="stat-value">${num(a.mail.completed)} / ${num(a.mail.total)}</span></div>
+        <div class="stat-row"><span class="stat-label">Meeting Links</span><span class="stat-value">${num(a.meetings.completed)} / ${num(a.meetings.total)}</span></div>
+      </div>
+      <div class="stats-box">
+        <h4>Delivery Status</h4>
+        <div class="stat-row"><span class="stat-label">Email Failed</span><span class="stat-value" style="color:var(--danger)">${num(a.emails.failed)}</span></div>
+        <div class="stat-row"><span class="stat-label">SMS Failed</span><span class="stat-value" style="color:var(--danger)">${num(a.sms.failed)}</span></div>
+        <div class="stat-row"><span class="stat-label">Mail Failed</span><span class="stat-value" style="color:var(--danger)">${num(a.mail.failed)}</span></div>
+        <div class="stat-row"><span class="stat-label">Email Pending</span><span class="stat-value" style="color:var(--warning)">${num(a.emails.pending)}</span></div>
+      </div>
+    </div>
+  `;
+  document.getElementById('aiStats').innerHTML = html;
+}
+
+// Load users
+async function loadUsers(page) {
+  if (page === undefined) page = 0;
+  try {
+    var search = document.getElementById('userSearch') ? document.getElementById('userSearch').value : '';
+    var res = await fetch('/api/admin/users?page=' + page + '&limit=25&search=' + encodeURIComponent(search));
+    var data = await res.json();
+    if (!data.success) throw new Error(data.message);
+    users = data.data.users;
+    userPagination = data.data.pagination;
+    renderUserTable();
+  } catch (e) {
+    document.getElementById('userTableContainer').innerHTML = '<div class="empty-state">Failed to load users: ' + e.message + '</div>';
   }
+}
 
-  // Load users
-  window.loadUsers = async function(page = 0) {
-    try {
-      const search = document.getElementById('userSearch')?.value || '';
-      const res = await fetch(`/api/admin/users?page=${page}&limit=25&search=${encodeURIComponent(search)}`);
-      const data = await res.json();
-      if (!data.success) throw new Error(data.message);
-      users = data.data.users;
-      userPagination = data.data.pagination;
-      renderUserTable();
-    } catch (e) {
-      document.getElementById('userTableContainer').innerHTML = '<div class="empty-state">Failed to load users: ' + e.message + '</div>';
-    }
-  };
+function searchUsers() {
+  loadUsers(0);
+}
 
-  window.searchUsers = function() {
-    loadUsers(0);
-  };
-
-  document.getElementById('userSearch')?.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') searchUsers();
-  });
-
-  function renderUserTable() {
+function renderUserTable() {
     if (!users.length) {
       document.getElementById('userTableContainer').innerHTML = '<div class="empty-state">No users found</div>';
       return;
@@ -696,21 +689,21 @@ function showSection(id) {
     document.getElementById('userTableContainer').innerHTML = html;
   }
 
-  // View user details
-  window.viewUser = async function(id) {
-    selectedUserId = id;
-    document.getElementById('userModal').classList.add('active');
-    document.getElementById('userModalContent').innerHTML = '<div class="loading"><div class="spinner"></div>Loading...</div>';
-    
-    try {
-      const res = await fetch(`/api/admin/users/${id}`);
-      const data = await res.json();
-      if (!data.success) throw new Error(data.message);
-      renderUserDetail(data.data);
-    } catch (e) {
-      document.getElementById('userModalContent').innerHTML = '<div class="empty-state">Failed to load user: ' + e.message + '</div>';
-    }
-  };
+// View user details
+async function viewUser(id) {
+  selectedUserId = id;
+  document.getElementById('userModal').classList.add('active');
+  document.getElementById('userModalContent').innerHTML = '<div class="loading"><div class="spinner"></div>Loading...</div>';
+  
+  try {
+    var res = await fetch('/api/admin/users/' + id);
+    var data = await res.json();
+    if (!data.success) throw new Error(data.message);
+    renderUserDetail(data.data);
+  } catch (e) {
+    document.getElementById('userModalContent').innerHTML = '<div class="empty-state">Failed to load user: ' + e.message + '</div>';
+  }
+}
 
   function renderUserDetail(data) {
     const u = data.user;
@@ -775,151 +768,165 @@ function showSection(id) {
     document.getElementById('userModalContent').innerHTML = html;
   }
 
-  window.closeUserModal = function() {
-    document.getElementById('userModal').classList.remove('active');
-  };
+function closeUserModal() {
+  document.getElementById('userModal').classList.remove('active');
+}
 
-  // Suspend user
-  window.suspendUser = async function(id) {
-    if (!confirm('Are you sure you want to suspend this user?')) return;
-    try {
-      const res = await fetch(`/api/admin/users/${id}/suspend`, { method: 'POST' });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.message);
-      alert('User suspended');
-      loadUsers(userPagination.page);
-    } catch (e) {
-      alert('Error: ' + e.message);
-    }
-  };
-
-  // Unsuspend user
-  window.unsuspendUser = async function(id) {
-    try {
-      const res = await fetch(`/api/admin/users/${id}/unsuspend`, { method: 'POST' });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.message);
-      alert('User unsuspended');
-      loadUsers(userPagination.page);
-    } catch (e) {
-      alert('Error: ' + e.message);
-    }
-  };
-
-  // Toggle admin
-  window.toggleAdmin = async function(id) {
-    if (!confirm('Are you sure you want to change admin status for this user?')) return;
-    try {
-      const res = await fetch(`/api/admin/users/${id}/toggle-admin`, { method: 'POST' });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.message);
-      alert(data.message);
-      loadUsers(userPagination.page);
-      closeUserModal();
-    } catch (e) {
-      alert('Error: ' + e.message);
-    }
-  };
-
-  // Balance adjustment
-  window.openBalanceModal = function(id) {
-    selectedUserId = id;
-    document.getElementById('balanceAmount').value = '';
-    document.getElementById('balanceDescription').value = '';
-    document.getElementById('balanceModal').classList.add('active');
-  };
-
-  window.closeBalanceModal = function() {
-    document.getElementById('balanceModal').classList.remove('active');
-  };
-
-  window.submitBalanceAdjustment = async function() {
-    const amount = parseFloat(document.getElementById('balanceAmount').value);
-    const description = document.getElementById('balanceDescription').value.trim() || 'Admin adjustment';
-    
-    if (!Number.isFinite(amount) || amount === 0) {
-      alert('Please enter a valid non-zero amount');
-      return;
-    }
-    
-    try {
-      const res = await fetch(`/api/admin/users/${selectedUserId}/adjust-balance`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount, description })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.message);
-      alert(data.message);
-      closeBalanceModal();
-      viewUser(selectedUserId);
-    } catch (e) {
-      alert('Error: ' + e.message);
-    }
-  };
-
-  // Load integrations
-  async function loadIntegrations() {
-    try {
-      const res = await fetch('/api/admin/integrations');
-      const data = await res.json();
-      if (!data.success) throw new Error(data.message);
-      renderIntegrations(data.data);
-    } catch (e) {
-      document.getElementById('integrationStatus').innerHTML = '<div class="empty-state">Failed to load integrations: ' + e.message + '</div>';
-    }
+// Suspend user
+async function suspendUser(id) {
+  if (!confirm('Are you sure you want to suspend this user?')) return;
+  try {
+    var res = await fetch('/api/admin/users/' + id + '/suspend', { method: 'POST' });
+    var data = await res.json();
+    if (!data.success) throw new Error(data.message);
+    alert('User suspended');
+    loadUsers(userPagination.page);
+  } catch (e) {
+    alert('Error: ' + e.message);
   }
+}
 
-  function renderIntegrations(integrations) {
-    const icons = {
-      magnusBilling: '📞',
-      didww: '🌐',
-      daily: '📹',
-      stripe: '💳',
-      smtp: '📧',
-      click2mail: '📬',
-      database: '🗄️'
-    };
-    const names = {
-      magnusBilling: 'MagnusBilling',
-      didww: 'DIDWW',
-      daily: 'Daily (Pipecat)',
-      stripe: 'Stripe',
-      smtp: 'SMTP2GO',
-      click2mail: 'Click2Mail',
-      database: 'Database'
-    };
-    
-    let html = '<div class="integration-grid">';
-    for (const [key, val] of Object.entries(integrations)) {
-      html += `
-        <div class="integration-card">
-          <div class="integration-icon">${icons[key] || '🔌'}</div>
-          <div class="integration-info">
-            <div class="integration-name">${names[key] || key}</div>
-            <div class="integration-status ${val.status}">${val.message}</div>
-          </div>
-          <span class="badge badge--${val.status}">${val.status}</span>
-        </div>
-      `;
-    }
-    html += '</div>';
-    document.getElementById('integrationStatus').innerHTML = html;
+// Unsuspend user
+async function unsuspendUser(id) {
+  try {
+    var res = await fetch('/api/admin/users/' + id + '/unsuspend', { method: 'POST' });
+    var data = await res.json();
+    if (!data.success) throw new Error(data.message);
+    alert('User unsuspended');
+    loadUsers(userPagination.page);
+  } catch (e) {
+    alert('Error: ' + e.message);
   }
+}
 
-  function escapeHtml(str) {
-    if (!str) return '';
-    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+// Toggle admin
+async function toggleAdmin(id) {
+  if (!confirm('Are you sure you want to change admin status for this user?')) return;
+  try {
+    var res = await fetch('/api/admin/users/' + id + '/toggle-admin', { method: 'POST' });
+    var data = await res.json();
+    if (!data.success) throw new Error(data.message);
+    alert(data.message);
+    loadUsers(userPagination.page);
+    closeUserModal();
+  } catch (e) {
+    alert('Error: ' + e.message);
   }
+}
 
+// Balance adjustment
+function openBalanceModal(id) {
+  selectedUserId = id;
+  document.getElementById('balanceAmount').value = '';
+  document.getElementById('balanceDescription').value = '';
+  document.getElementById('balanceModal').classList.add('active');
+}
+
+function closeBalanceModal() {
+  document.getElementById('balanceModal').classList.remove('active');
+}
+
+async function submitBalanceAdjustment() {
+  var amount = parseFloat(document.getElementById('balanceAmount').value);
+  var description = document.getElementById('balanceDescription').value.trim() || 'Admin adjustment';
+  
+  if (!Number.isFinite(amount) || amount === 0) {
+    alert('Please enter a valid non-zero amount');
+    return;
+  }
+  
+  try {
+    var res = await fetch('/api/admin/users/' + selectedUserId + '/adjust-balance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount: amount, description: description })
+    });
+    var data = await res.json();
+    if (!data.success) throw new Error(data.message);
+    alert(data.message);
+    closeBalanceModal();
+    viewUser(selectedUserId);
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+// Load integrations
+async function loadIntegrations() {
+  try {
+    var res = await fetch('/api/admin/integrations');
+    var data = await res.json();
+    if (!data.success) throw new Error(data.message);
+    renderIntegrations(data.data);
+  } catch (e) {
+    document.getElementById('integrationStatus').innerHTML = '<div class="empty-state">Failed to load integrations: ' + e.message + '</div>';
+  }
+}
+
+function renderIntegrations(integrations) {
+  var icons = {
+    magnusBilling: '📞',
+    didww: '🌐',
+    daily: '📹',
+    stripe: '💳',
+    smtp: '📧',
+    click2mail: '📬',
+    database: '🗄️'
+  };
+  var names = {
+    magnusBilling: 'MagnusBilling',
+    didww: 'DIDWW',
+    daily: 'Daily (Pipecat)',
+    stripe: 'Stripe',
+    smtp: 'SMTP2GO',
+    click2mail: 'Click2Mail',
+    database: 'Database'
+  };
+  
+  var html = '<div class="integration-grid">';
+  for (var key in integrations) {
+    var val = integrations[key];
+    html += '<div class="integration-card">' +
+      '<div class="integration-icon">' + (icons[key] || '🔌') + '</div>' +
+      '<div class="integration-info">' +
+        '<div class="integration-name">' + (names[key] || key) + '</div>' +
+        '<div class="integration-status ' + val.status + '">' + val.message + '</div>' +
+      '</div>' +
+      '<span class="badge badge--' + val.status + '">' + val.status + '</span>' +
+    '</div>';
+  }
+  html += '</div>';
+  document.getElementById('integrationStatus').innerHTML = html;
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
   // Click outside modal to close
-  document.getElementById('userModal').addEventListener('click', (e) => {
+  document.getElementById('userModal').addEventListener('click', function(e) {
     if (e.target.id === 'userModal') closeUserModal();
   });
-  document.getElementById('balanceModal').addEventListener('click', (e) => {
+  document.getElementById('balanceModal').addEventListener('click', function(e) {
     if (e.target.id === 'balanceModal') closeBalanceModal();
   });
-})();
+  
+  // Search on Enter
+  var searchInput = document.getElementById('userSearch');
+  if (searchInput) {
+    searchInput.addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') searchUsers();
+    });
+  }
+  
+  // Load initial data
+  loadStats();
+  loadUsers(0);
+  loadIntegrations();
+});
 </script>
 </body>
 </html>
