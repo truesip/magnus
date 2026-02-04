@@ -3792,65 +3792,92 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
 
+    // Helper to safely query - returns default if table doesn't exist or query fails
+    const safeQuery = async (sql, params = [], defaultVal = {}) => {
+      try {
+        const [rows] = await pool.execute(sql, params);
+        return rows;
+      } catch (e) {
+        if (DEBUG) console.warn('[admin.stats] Query failed:', e.message);
+        return [defaultVal];
+      }
+    };
+
     // User stats
-    const [[userStats]] = await pool.execute(`
+    const [userStatsRows] = await safeQuery(`
       SELECT 
         COUNT(*) as total,
         SUM(CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) as newThisMonth,
         SUM(CASE WHEN suspended = 1 THEN 1 ELSE 0 END) as suspended
       FROM signup_users
-    `);
+    `, [], { total: 0, newThisMonth: 0, suspended: 0 });
+    const userStats = userStatsRows || { total: 0, newThisMonth: 0, suspended: 0 };
 
     // Active users (had activity in last 30 days via billing_history or ai_call_logs)
-    const [[activeUsers]] = await pool.execute(`
+    const [activeUsersRows] = await safeQuery(`
       SELECT COUNT(DISTINCT user_id) as count FROM (
         SELECT user_id FROM billing_history WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
         UNION
         SELECT user_id FROM ai_call_logs WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
       ) active
-    `);
+    `, [], { count: 0 });
+    const activeUsers = activeUsersRows || { count: 0 };
 
-    // Financial stats
-    const [[stripeStats]] = await pool.execute(`
+    // Financial stats - use safeQuery for all to handle missing tables
+    const [stripeStatsRows] = await safeQuery(`
       SELECT COALESCE(SUM(amount), 0) as total, COUNT(*) as count 
       FROM stripe_payments WHERE status='completed' AND credited=1
-    `);
-    const [[dodoStats]] = await pool.execute(`
+    `, [], { total: 0, count: 0 });
+    const stripeStats = stripeStatsRows || { total: 0, count: 0 };
+
+    const [dodoStatsRows] = await safeQuery(`
       SELECT COALESCE(SUM(amount), 0) as total, COUNT(*) as count 
       FROM dodo_payments WHERE status='completed' AND credited=1
-    `);
-    const [[cryptoStats]] = await pool.execute(`
+    `, [], { total: 0, count: 0 });
+    const dodoStats = dodoStatsRows || { total: 0, count: 0 };
+
+    const [cryptoStatsRows] = await safeQuery(`
       SELECT COALESCE(SUM(price_amount), 0) as total, COUNT(*) as count 
       FROM nowpayments_payments WHERE payment_status IN ('finished','confirmed') AND credited=1
-    `);
-    const [[squareStats]] = await pool.execute(`
+    `, [], { total: 0, count: 0 });
+    const cryptoStats = cryptoStatsRows || { total: 0, count: 0 };
+
+    const [squareStatsRows] = await safeQuery(`
       SELECT COALESCE(SUM(amount), 0) as total, COUNT(*) as count 
       FROM square_payments WHERE status='completed' AND credited=1
-    `);
-    const [[billcomStats]] = await pool.execute(`
+    `, [], { total: 0, count: 0 });
+    const squareStats = squareStatsRows || { total: 0, count: 0 };
+
+    const [billcomStatsRows] = await safeQuery(`
       SELECT COUNT(*) as count FROM billcom_payments WHERE status='paid' AND credited=1
-    `);
-    const [[pendingPayments]] = await pool.execute(`
-      SELECT 
-        (SELECT COUNT(*) FROM stripe_payments WHERE status='pending') +
-        (SELECT COUNT(*) FROM dodo_payments WHERE status='pending') +
-        (SELECT COUNT(*) FROM nowpayments_payments WHERE payment_status='waiting') +
-        (SELECT COUNT(*) FROM square_payments WHERE status='pending') as count
-    `);
+    `, [], { count: 0 });
+    const billcomStats = billcomStatsRows || { count: 0 };
+
+    // Pending payments - count each individually for resilience
+    const [pendingStripe] = await safeQuery(`SELECT COUNT(*) as c FROM stripe_payments WHERE status='pending'`, [], { c: 0 });
+    const [pendingDodo] = await safeQuery(`SELECT COUNT(*) as c FROM dodo_payments WHERE status='pending'`, [], { c: 0 });
+    const [pendingCrypto] = await safeQuery(`SELECT COUNT(*) as c FROM nowpayments_payments WHERE payment_status='waiting'`, [], { c: 0 });
+    const [pendingSquare] = await safeQuery(`SELECT COUNT(*) as c FROM square_payments WHERE status='pending'`, [], { c: 0 });
+    const pendingPayments = { count: (Number(pendingStripe?.c) || 0) + (Number(pendingDodo?.c) || 0) + (Number(pendingCrypto?.c) || 0) + (Number(pendingSquare?.c) || 0) };
 
     // Telephony stats
-    const [[didStats]] = await pool.execute(`
+    const [didStatsRows] = await safeQuery(`
       SELECT COUNT(*) as total, SUM(CASE WHEN cancel_pending=0 THEN 1 ELSE 0 END) as active
       FROM user_dids
-    `);
-    const [[aiNumberStats]] = await pool.execute(`
+    `, [], { total: 0, active: 0 });
+    const didStats = didStatsRows || { total: 0, active: 0 };
+
+    const [aiNumberStatsRows] = await safeQuery(`
       SELECT COUNT(*) as total, SUM(CASE WHEN cancel_pending=0 THEN 1 ELSE 0 END) as active
       FROM ai_numbers
-    `);
-    const [[trunkStats]] = await pool.execute(`SELECT COUNT(*) as total FROM user_trunks`);
+    `, [], { total: 0, active: 0 });
+    const aiNumberStats = aiNumberStatsRows || { total: 0, active: 0 };
+
+    const [trunkStatsRows] = await safeQuery(`SELECT COUNT(*) as total FROM user_trunks`, [], { total: 0 });
+    const trunkStats = trunkStatsRows || { total: 0 };
     
     // Call stats (AI calls)
-    const [[aiCallStats]] = await pool.execute(`
+    const [aiCallStatsRows] = await safeQuery(`
       SELECT 
         COUNT(*) as totalCalls,
         COALESCE(SUM(CASE WHEN direction='inbound' THEN 1 ELSE 0 END), 0) as inboundCalls,
@@ -3858,36 +3885,42 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
         COALESCE(SUM(duration), 0) as totalSeconds,
         COALESCE(SUM(price), 0) as totalRevenue
       FROM ai_call_logs
-    `);
+    `, [], { totalCalls: 0, inboundCalls: 0, outboundCalls: 0, totalSeconds: 0, totalRevenue: 0 });
+    const aiCallStats = aiCallStatsRows || { totalCalls: 0, inboundCalls: 0, outboundCalls: 0, totalSeconds: 0, totalRevenue: 0 };
 
     // AI Platform stats
-    const [[agentStats]] = await pool.execute(`SELECT COUNT(*) as total FROM ai_agents`);
-    const [[conversationStats]] = await pool.execute(`
+    const [agentStatsRows] = await safeQuery(`SELECT COUNT(*) as total FROM ai_agents`, [], { total: 0 });
+    const agentStats = agentStatsRows || { total: 0 };
+
+    const [conversationStatsRows] = await safeQuery(`
       SELECT COUNT(DISTINCT call_id) as total FROM ai_call_messages
-    `);
+    `, [], { total: 0 });
+    const conversationStats = conversationStatsRows || { total: 0 };
     
     // Email stats
-    const [[emailStats]] = await pool.execute(`
+    const [emailStatsRows] = await safeQuery(`
       SELECT 
         COUNT(*) as total,
         SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
         SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed,
         SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending
       FROM ai_email_sends
-    `);
+    `, [], { total: 0, completed: 0, failed: 0, pending: 0 });
+    const emailStats = emailStatsRows || { total: 0, completed: 0, failed: 0, pending: 0 };
     
     // SMS stats
-    const [[smsStats]] = await pool.execute(`
+    const [smsStatsRows] = await safeQuery(`
       SELECT 
         COUNT(*) as total,
         SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
         SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed,
         SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending
       FROM ai_sms_sends
-    `);
+    `, [], { total: 0, completed: 0, failed: 0, pending: 0 });
+    const smsStats = smsStatsRows || { total: 0, completed: 0, failed: 0, pending: 0 };
     
     // Physical mail stats
-    const [[mailStats]] = await pool.execute(`
+    const [mailStatsRows] = await safeQuery(`
       SELECT 
         COUNT(*) as total,
         SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
@@ -3895,37 +3928,42 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
         SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed,
         SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending
       FROM ai_mail_sends
-    `);
+    `, [], { total: 0, completed: 0, submitted: 0, failed: 0, pending: 0 });
+    const mailStats = mailStatsRows || { total: 0, completed: 0, submitted: 0, failed: 0, pending: 0 };
 
     // Meeting links (emails with meeting_room_url)
-    const [[meetingStats]] = await pool.execute(`
+    const [meetingStatsRows] = await safeQuery(`
       SELECT 
         COUNT(*) as total,
         SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
         SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed
       FROM ai_email_sends WHERE meeting_room_url IS NOT NULL
-    `);
+    `, [], { total: 0, completed: 0, failed: 0 });
+    const meetingStats = meetingStatsRows || { total: 0, completed: 0, failed: 0 };
 
     // Dialer stats
-    const [[dialerStats]] = await pool.execute(`
+    const [dialerStatsRows] = await safeQuery(`
       SELECT 
         COUNT(*) as campaigns,
         SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) as running,
         SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed
       FROM dialer_campaigns WHERE status != 'deleted'
-    `);
-    const [[dialerLeadStats]] = await pool.execute(`
+    `, [], { campaigns: 0, running: 0, completed: 0 });
+    const dialerStats = dialerStatsRows || { campaigns: 0, running: 0, completed: 0 };
+
+    const [dialerLeadStatsRows] = await safeQuery(`
       SELECT COUNT(*) as total FROM dialer_leads
-    `);
+    `, [], { total: 0 });
+    const dialerLeadStats = dialerLeadStatsRows || { total: 0 };
 
     // Recent activity (last 7 days revenue)
-    const [recentRevenue] = await pool.execute(`
+    const recentRevenue = await safeQuery(`
       SELECT DATE(created_at) as date, SUM(amount) as amount
       FROM billing_history
       WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) AND amount > 0
       GROUP BY DATE(created_at)
       ORDER BY date ASC
-    `);
+    `, [], null) || [];
 
     const totalRevenue = Number(stripeStats.total) + Number(dodoStats.total) + Number(cryptoStats.total) + Number(squareStats.total);
 
