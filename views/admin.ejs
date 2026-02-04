@@ -1,0 +1,925 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TalkUSA — Admin Dashboard</title>
+  <style>
+    :root{
+      --bg:#050816;
+      --bg2:#0b1024;
+      --card:rgba(255,255,255,.06);
+      --card2:rgba(255,255,255,.08);
+      --border:rgba(255,255,255,.12);
+      --text:rgba(255,255,255,.92);
+      --muted:rgba(255,255,255,.72);
+      --muted2:rgba(255,255,255,.55);
+      --primary:#4f46e5;
+      --accent:#22d3ee;
+      --accent2:#a78bfa;
+      --success:#10b981;
+      --warning:#f59e0b;
+      --danger:#ef4444;
+      --shadow:0 18px 60px rgba(0,0,0,.55);
+      --shadow-sm:0 10px 28px rgba(0,0,0,.40);
+      --radius:14px;
+      --radius2:18px;
+    }
+
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      font-family: system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+      margin:0;
+      background: radial-gradient(1200px 600px at 20% 10%, rgba(79,70,229,.18) 0%, transparent 55%),
+                  radial-gradient(900px 520px at 85% 35%, rgba(34,211,238,.14) 0%, transparent 60%),
+                  radial-gradient(900px 520px at 55% 90%, rgba(167,139,250,.10) 0%, transparent 60%),
+                  linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
+      color:var(--text);
+      min-height:100vh;
+      display:flex;
+      flex-direction:column;
+      overflow-x:hidden;
+    }
+
+    #appRoot{display:flex;flex-direction:column;flex:1;min-height:0;}
+
+    a{color:var(--accent);text-decoration:none}
+    a:hover{color:#fff;text-decoration:underline;text-underline-offset:3px}
+
+    header{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      padding:12px 16px;
+      background: rgba(5,8,22,.72);
+      border-bottom:1px solid rgba(255,255,255,.08);
+      backdrop-filter: blur(14px);
+      color:#fff;
+    }
+
+    .brand{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      font-weight:900;
+      letter-spacing:.2px;
+      color:var(--text);
+      text-decoration:none;
+      white-space:nowrap;
+    }
+    .brand__mark{
+      width:34px;
+      height:34px;
+      border-radius:10px;
+      background: linear-gradient(135deg, rgba(79,70,229,1) 0%, rgba(34,211,238,1) 100%);
+      box-shadow: 0 14px 30px rgba(79,70,229,.25);
+      display:inline-block;
+      flex:none;
+    }
+    .brand__text{display:flex;flex-direction:column;line-height:1.08}
+    .brand__text small{font-weight:700;color:var(--muted2);font-size:11px;letter-spacing:.1px}
+
+    .header-right{display:flex;align-items:center;gap:12px;font-size:14px;flex-wrap:wrap}
+    .admin-badge{background:linear-gradient(135deg,var(--danger),var(--warning));color:#fff;padding:4px 10px;border-radius:8px;font-weight:700;font-size:12px;text-transform:uppercase}
+
+    .wrap{display:flex;flex:1;min-height:0}
+
+    aside{
+      width:216px;
+      border-right:1px solid rgba(255,255,255,.08);
+      background: rgba(0,0,0,.18);
+      backdrop-filter: blur(12px);
+      flex:none;
+    }
+    aside a{
+      display:flex;
+      align-items:center;
+      gap:9px;
+      padding:12.6px 14.4px;
+      color:rgba(255,255,255,.76);
+      text-decoration:none;
+      border-bottom:1px solid rgba(255,255,255,.08);
+      transition: background .15s ease, color .15s ease;
+    }
+    aside a:hover{background: rgba(255,255,255,.06);color:#fff}
+    aside a.active{
+      background: linear-gradient(135deg, rgba(79,70,229,.22) 0%, rgba(34,211,238,.14) 100%);
+      color:#fff;
+      font-weight:800;
+    }
+
+    main{flex:1;overflow:auto;padding:16px;min-width:0}
+    main > section{
+      background: linear-gradient(180deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.05) 100%);
+      border:1px solid rgba(255,255,255,.12);
+      border-radius: var(--radius2);
+      box-shadow: var(--shadow-sm);
+      padding:14px 14px;
+      margin-bottom:16px;
+      overflow-x:auto;
+    }
+
+    h2{margin:6px 0 12px 0;font-size:20px;letter-spacing:-.01em}
+    h3{margin:0 0 10px 0;font-size:16px;color:rgba(255,255,255,.90)}
+
+    /* KPI Cards */
+    .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px}
+    .kpi-card{
+      background: linear-gradient(135deg, rgba(79,70,229,.15) 0%, rgba(34,211,238,.10) 100%);
+      border:1px solid rgba(255,255,255,.12);
+      border-radius:var(--radius);
+      padding:14px;
+      text-align:center;
+    }
+    .kpi-card.success{background: linear-gradient(135deg, rgba(16,185,129,.15) 0%, rgba(34,211,238,.10) 100%);}
+    .kpi-card.warning{background: linear-gradient(135deg, rgba(245,158,11,.15) 0%, rgba(167,139,250,.10) 100%);}
+    .kpi-card.danger{background: linear-gradient(135deg, rgba(239,68,68,.15) 0%, rgba(167,139,250,.10) 100%);}
+    .kpi-value{font-size:28px;font-weight:900;color:#fff;line-height:1.2}
+    .kpi-label{font-size:12px;color:var(--muted);margin-top:4px;text-transform:uppercase;letter-spacing:.5px}
+    .kpi-sub{font-size:11px;color:var(--muted2);margin-top:2px}
+
+    /* Stats Grid */
+    .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+    .stats-box{
+      background:rgba(0,0,0,.15);
+      border:1px solid rgba(255,255,255,.10);
+      border-radius:var(--radius);
+      padding:14px;
+    }
+    .stats-box h4{margin:0 0 12px 0;font-size:14px;color:var(--accent);text-transform:uppercase;letter-spacing:.5px}
+    .stat-row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.06);font-size:13px}
+    .stat-row:last-child{border-bottom:none}
+    .stat-label{color:var(--muted)}
+    .stat-value{color:#fff;font-weight:600}
+
+    /* User Table */
+    table{width:100%;border-collapse:collapse;background:rgba(0,0,0,.12);border:1px solid rgba(255,255,255,.10)}
+    th,td{border-bottom:1px solid rgba(255,255,255,.10);padding:10px 8px;text-align:left;font-size:13px;vertical-align:middle}
+    th{color:rgba(255,255,255,.70);font-size:11px;letter-spacing:.5px;text-transform:uppercase;background:rgba(255,255,255,.06)}
+    tbody tr:hover td{background: rgba(255,255,255,.03)}
+    tbody tr.suspended td{opacity:.6}
+
+    .badge{display:inline-block;padding:3px 8px;border-radius:6px;font-size:11px;font-weight:700;text-transform:uppercase}
+    .badge--admin{background:rgba(79,70,229,.25);color:#a78bfa}
+    .badge--suspended{background:rgba(239,68,68,.25);color:#fca5a5}
+    .badge--ok{background:rgba(16,185,129,.25);color:#6ee7b7}
+    .badge--warning{background:rgba(245,158,11,.25);color:#fcd34d}
+    .badge--error{background:rgba(239,68,68,.25);color:#fca5a5}
+
+    /* Toolbar */
+    .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+    input[type="search"],input[type="text"],input[type="number"],select{
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(0,0,0,.22);
+      color:rgba(255,255,255,.90);
+      border-radius:10px;
+      padding:8px 12px;
+      outline:none;
+      font-size:13px;
+    }
+    input[type="search"]:focus,input[type="text"]:focus,input[type="number"]:focus,select:focus{
+      border-color:rgba(34,211,238,.45);
+      box-shadow:0 0 0 3px rgba(34,211,238,.10);
+    }
+    input::placeholder{color:rgba(255,255,255,.45)}
+
+    button{
+      background: rgba(255,255,255,.08);
+      color:rgba(255,255,255,.92);
+      border:1px solid rgba(255,255,255,.14);
+      border-radius:10px;
+      padding:8px 14px;
+      cursor:pointer;
+      font-size:13px;
+      transition: transform .15s ease, background .15s ease, border-color .15s ease;
+    }
+    button:hover{background: rgba(255,255,255,.12);border-color:rgba(255,255,255,.18)}
+    button:active{transform: translateY(1px)}
+    button[disabled]{opacity:.5;cursor:not-allowed}
+
+    button.btn--primary{
+      background: linear-gradient(135deg, rgba(79,70,229,1) 0%, rgba(34,211,238,1) 100%);
+      color:#071024;
+      border-color: rgba(79,70,229,.45);
+      font-weight:800;
+    }
+    button.btn--danger{
+      background: rgba(239,68,68,.18);
+      border-color: rgba(239,68,68,.40);
+      color: rgba(255,255,255,.92);
+    }
+    button.btn--success{
+      background: rgba(16,185,129,.18);
+      border-color: rgba(16,185,129,.40);
+      color: rgba(255,255,255,.92);
+    }
+    button.btn--sm{padding:5px 10px;font-size:11px}
+
+    /* Pagination */
+    .pagination{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:12px;font-size:13px}
+    .pagination button{min-width:32px}
+    .pagination span{color:var(--muted)}
+
+    /* Integration Cards */
+    .integration-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+    .integration-card{
+      background:rgba(0,0,0,.15);
+      border:1px solid rgba(255,255,255,.10);
+      border-radius:var(--radius);
+      padding:14px;
+      display:flex;
+      align-items:center;
+      gap:12px;
+    }
+    .integration-icon{width:40px;height:40px;border-radius:10px;background:rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center;font-size:20px}
+    .integration-info{flex:1}
+    .integration-name{font-weight:700;color:#fff;font-size:14px}
+    .integration-status{font-size:12px;margin-top:2px}
+    .integration-status.ok{color:var(--success)}
+    .integration-status.warning{color:var(--warning)}
+    .integration-status.error{color:var(--danger)}
+
+    /* Modal */
+    .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);backdrop-filter:blur(4px);display:none;place-items:center;z-index:100}
+    .modal-overlay.active{display:grid}
+    .modal{
+      background:linear-gradient(180deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.05) 100%);
+      border:1px solid rgba(255,255,255,.12);
+      border-radius:var(--radius2);
+      padding:20px;
+      max-width:600px;
+      width:calc(100% - 40px);
+      max-height:80vh;
+      overflow-y:auto;
+      position:relative;
+      box-shadow:var(--shadow);
+    }
+    .modal h3{margin:0 0 16px 0;font-size:18px}
+    .modal-close{position:absolute;top:12px;right:12px;background:none;border:none;color:var(--muted);cursor:pointer;font-size:20px;padding:4px 8px}
+    .modal-close:hover{color:#fff}
+    .modal-field{margin-bottom:14px}
+    .modal-field label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+    .modal-field input,.modal-field select{width:100%}
+    .modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:16px}
+
+    .detail-section{margin-bottom:16px}
+    .detail-section h4{margin:0 0 8px 0;font-size:13px;color:var(--accent);text-transform:uppercase}
+    .detail-row{display:flex;gap:12px;margin-bottom:6px;font-size:13px}
+    .detail-label{color:var(--muted);min-width:120px}
+    .detail-value{color:#fff;word-break:break-all}
+
+    /* Loading */
+    .loading{text-align:center;padding:40px;color:var(--muted)}
+    .spinner{width:32px;height:32px;border:3px solid rgba(255,255,255,.15);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 12px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+
+    /* Empty state */
+    .empty-state{text-align:center;padding:30px;color:var(--muted2)}
+
+    /* Responsive */
+    @media(max-width:768px){
+      aside{display:none}
+      .kpi-grid{grid-template-columns:repeat(2,1fr)}
+    }
+  </style>
+</head>
+<body>
+<div id="appRoot">
+  <header>
+    <a href="/dashboard" class="brand">
+      <span class="brand__mark"></span>
+      <span class="brand__text">TalkUSA <small>Admin Panel</small></span>
+    </a>
+    <div class="header-right">
+      <span class="admin-badge">Admin</span>
+      <span style="color:var(--muted)"><%= username %></span>
+      <form method="post" action="/logout" style="display:inline">
+        <button type="submit" style="background:transparent;border:1px solid rgba(255,255,255,.15);padding:6px 12px;font-size:12px">Logout</button>
+      </form>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <aside>
+      <a href="/admin" class="active">📊 Overview</a>
+      <a href="#users" onclick="showSection('users');return false">👥 Users</a>
+      <a href="#financial" onclick="showSection('financial');return false">💰 Financial</a>
+      <a href="#telephony" onclick="showSection('telephony');return false">📞 Telephony</a>
+      <a href="#ai" onclick="showSection('ai');return false">🤖 AI Platform</a>
+      <a href="#integrations" onclick="showSection('integrations');return false">🔌 Integrations</a>
+      <a href="/dashboard">← Back to Dashboard</a>
+    </aside>
+
+    <main>
+      <!-- Overview Section -->
+      <section id="overview">
+        <h2>📊 Platform Overview</h2>
+        <div class="kpi-grid" id="overviewKpis">
+          <div class="loading"><div class="spinner"></div>Loading stats...</div>
+        </div>
+      </section>
+
+      <!-- Users Section -->
+      <section id="users" style="display:none">
+        <h2>👥 User Management</h2>
+        <div class="toolbar">
+          <input type="search" id="userSearch" placeholder="Search users..." style="min-width:200px">
+          <button onclick="searchUsers()">Search</button>
+          <button onclick="loadUsers(0)">Refresh</button>
+        </div>
+        <div id="userTableContainer">
+          <div class="loading"><div class="spinner"></div>Loading users...</div>
+        </div>
+      </section>
+
+      <!-- Financial Section -->
+      <section id="financial" style="display:none">
+        <h2>💰 Financial Overview</h2>
+        <div id="financialStats">
+          <div class="loading"><div class="spinner"></div>Loading financial data...</div>
+        </div>
+      </section>
+
+      <!-- Telephony Section -->
+      <section id="telephony" style="display:none">
+        <h2>📞 Telephony Statistics</h2>
+        <div id="telephonyStats">
+          <div class="loading"><div class="spinner"></div>Loading telephony data...</div>
+        </div>
+      </section>
+
+      <!-- AI Platform Section -->
+      <section id="ai" style="display:none">
+        <h2>🤖 AI Platform Usage</h2>
+        <div id="aiStats">
+          <div class="loading"><div class="spinner"></div>Loading AI data...</div>
+        </div>
+      </section>
+
+      <!-- Integrations Section -->
+      <section id="integrations" style="display:none">
+        <h2>🔌 Integration Health</h2>
+        <div id="integrationStatus">
+          <div class="loading"><div class="spinner"></div>Checking integrations...</div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<!-- User Detail Modal -->
+<div class="modal-overlay" id="userModal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeUserModal()">&times;</button>
+    <h3>User Details</h3>
+    <div id="userModalContent">
+      <div class="loading"><div class="spinner"></div>Loading...</div>
+    </div>
+  </div>
+</div>
+
+<!-- Adjust Balance Modal -->
+<div class="modal-overlay" id="balanceModal">
+  <div class="modal" style="max-width:400px">
+    <button class="modal-close" onclick="closeBalanceModal()">&times;</button>
+    <h3>Adjust Balance</h3>
+    <div class="modal-field">
+      <label>Amount (positive to add, negative to deduct)</label>
+      <input type="number" id="balanceAmount" step="0.01" placeholder="10.00">
+    </div>
+    <div class="modal-field">
+      <label>Description</label>
+      <input type="text" id="balanceDescription" placeholder="Admin adjustment">
+    </div>
+    <div class="modal-actions">
+      <button onclick="closeBalanceModal()">Cancel</button>
+      <button class="btn--primary" onclick="submitBalanceAdjustment()">Apply</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  let stats = null;
+  let users = [];
+  let userPagination = { page: 0, limit: 25, total: 0, totalPages: 0 };
+  let selectedUserId = null;
+
+  // Load initial data
+  loadStats();
+  loadUsers(0);
+  loadIntegrations();
+
+  // Section navigation
+  window.showSection = function(id) {
+    document.querySelectorAll('main > section').forEach(s => s.style.display = 'none');
+    const section = document.getElementById(id);
+    if (section) section.style.display = 'block';
+    document.querySelectorAll('aside a').forEach(a => a.classList.remove('active'));
+    const link = document.querySelector(`aside a[href="#${id}"]`);
+    if (link) link.classList.add('active');
+  };
+
+  // Format currency
+  function fmt(n, decimals = 2) {
+    return '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  }
+
+  // Format number
+  function num(n) {
+    return Number(n || 0).toLocaleString('en-US');
+  }
+
+  // Load platform stats
+  async function loadStats() {
+    try {
+      const res = await fetch('/api/admin/stats');
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message);
+      stats = data.data;
+      renderOverview();
+      renderFinancial();
+      renderTelephony();
+      renderAi();
+    } catch (e) {
+      document.getElementById('overviewKpis').innerHTML = '<div class="empty-state">Failed to load stats: ' + e.message + '</div>';
+    }
+  }
+
+  function renderOverview() {
+    if (!stats) return;
+    const html = `
+      <div class="kpi-card">
+        <div class="kpi-value">${num(stats.users.total)}</div>
+        <div class="kpi-label">Total Users</div>
+        <div class="kpi-sub">${num(stats.users.newThisMonth)} new this month</div>
+      </div>
+      <div class="kpi-card success">
+        <div class="kpi-value">${num(stats.users.active30d)}</div>
+        <div class="kpi-label">Active Users</div>
+        <div class="kpi-sub">Last 30 days</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-value">${fmt(stats.financial.totalRevenue)}</div>
+        <div class="kpi-label">Total Revenue</div>
+        <div class="kpi-sub">${num(stats.financial.pendingPayments)} pending</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-value">${num(stats.telephony.calls.total)}</div>
+        <div class="kpi-label">Total Calls</div>
+        <div class="kpi-sub">${num(stats.telephony.calls.minutes)} minutes</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-value">${num(stats.ai.agents)}</div>
+        <div class="kpi-label">AI Agents</div>
+        <div class="kpi-sub">${num(stats.ai.conversations)} conversations</div>
+      </div>
+      <div class="kpi-card warning">
+        <div class="kpi-value">${num(stats.users.suspended)}</div>
+        <div class="kpi-label">Suspended</div>
+        <div class="kpi-sub">accounts</div>
+      </div>
+    `;
+    document.getElementById('overviewKpis').innerHTML = html;
+  }
+
+  function renderFinancial() {
+    if (!stats) return;
+    const f = stats.financial;
+    const html = `
+      <div class="kpi-grid">
+        <div class="kpi-card success">
+          <div class="kpi-value">${fmt(f.totalRevenue)}</div>
+          <div class="kpi-label">Total Revenue</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-value">${num(f.revenueByMethod.stripe.count)}</div>
+          <div class="kpi-label">Stripe Payments</div>
+          <div class="kpi-sub">${fmt(f.revenueByMethod.stripe.total)}</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-value">${num(f.revenueByMethod.crypto.count)}</div>
+          <div class="kpi-label">Crypto Payments</div>
+          <div class="kpi-sub">${fmt(f.revenueByMethod.crypto.total)}</div>
+        </div>
+        <div class="kpi-card warning">
+          <div class="kpi-value">${num(f.pendingPayments)}</div>
+          <div class="kpi-label">Pending Payments</div>
+        </div>
+      </div>
+      <div class="stats-grid" style="margin-top:16px">
+        <div class="stats-box">
+          <h4>Revenue by Method</h4>
+          <div class="stat-row"><span class="stat-label">Stripe</span><span class="stat-value">${fmt(f.revenueByMethod.stripe.total)} (${num(f.revenueByMethod.stripe.count)})</span></div>
+          <div class="stat-row"><span class="stat-label">Crypto</span><span class="stat-value">${fmt(f.revenueByMethod.crypto.total)} (${num(f.revenueByMethod.crypto.count)})</span></div>
+          <div class="stat-row"><span class="stat-label">Dodo</span><span class="stat-value">${fmt(f.revenueByMethod.dodo.total)} (${num(f.revenueByMethod.dodo.count)})</span></div>
+          <div class="stat-row"><span class="stat-label">Square</span><span class="stat-value">${fmt(f.revenueByMethod.square.total)} (${num(f.revenueByMethod.square.count)})</span></div>
+          <div class="stat-row"><span class="stat-label">Bill.com</span><span class="stat-value">${num(f.revenueByMethod.billcom.count)} payments</span></div>
+        </div>
+        <div class="stats-box">
+          <h4>Call Revenue</h4>
+          <div class="stat-row"><span class="stat-label">AI Call Revenue</span><span class="stat-value">${fmt(stats.telephony.calls.revenue)}</span></div>
+          <div class="stat-row"><span class="stat-label">Total Minutes</span><span class="stat-value">${num(stats.telephony.calls.minutes)}</span></div>
+        </div>
+      </div>
+    `;
+    document.getElementById('financialStats').innerHTML = html;
+  }
+
+  function renderTelephony() {
+    if (!stats) return;
+    const t = stats.telephony;
+    const html = `
+      <div class="kpi-grid">
+        <div class="kpi-card">
+          <div class="kpi-value">${num(t.dids.active)}</div>
+          <div class="kpi-label">Active DIDs</div>
+          <div class="kpi-sub">${num(t.dids.total)} total</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-value">${num(t.aiNumbers.active)}</div>
+          <div class="kpi-label">AI Numbers</div>
+          <div class="kpi-sub">${num(t.aiNumbers.total)} total</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-value">${num(t.trunks)}</div>
+          <div class="kpi-label">Trunks</div>
+        </div>
+        <div class="kpi-card success">
+          <div class="kpi-value">${num(t.calls.total)}</div>
+          <div class="kpi-label">Total Calls</div>
+        </div>
+      </div>
+      <div class="stats-grid" style="margin-top:16px">
+        <div class="stats-box">
+          <h4>Call Statistics</h4>
+          <div class="stat-row"><span class="stat-label">Inbound Calls</span><span class="stat-value">${num(t.calls.inbound)}</span></div>
+          <div class="stat-row"><span class="stat-label">Outbound Calls</span><span class="stat-value">${num(t.calls.outbound)}</span></div>
+          <div class="stat-row"><span class="stat-label">Total Minutes</span><span class="stat-value">${num(t.calls.minutes)}</span></div>
+          <div class="stat-row"><span class="stat-label">Revenue</span><span class="stat-value">${fmt(t.calls.revenue)}</span></div>
+        </div>
+        <div class="stats-box">
+          <h4>Number Inventory</h4>
+          <div class="stat-row"><span class="stat-label">DIDWW DIDs</span><span class="stat-value">${num(t.dids.active)} active</span></div>
+          <div class="stat-row"><span class="stat-label">AI Phone Numbers</span><span class="stat-value">${num(t.aiNumbers.active)} active</span></div>
+          <div class="stat-row"><span class="stat-label">Call Forwarding Trunks</span><span class="stat-value">${num(t.trunks)}</span></div>
+        </div>
+      </div>
+    `;
+    document.getElementById('telephonyStats').innerHTML = html;
+  }
+
+  function renderAi() {
+    if (!stats) return;
+    const a = stats.ai;
+    const html = `
+      <div class="kpi-grid">
+        <div class="kpi-card">
+          <div class="kpi-value">${num(a.agents)}</div>
+          <div class="kpi-label">AI Agents</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-value">${num(a.conversations)}</div>
+          <div class="kpi-label">Conversations</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-value">${num(a.dialer.campaigns)}</div>
+          <div class="kpi-label">Dialer Campaigns</div>
+          <div class="kpi-sub">${num(a.dialer.running)} running</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-value">${num(a.dialer.leads)}</div>
+          <div class="kpi-label">Dialer Leads</div>
+        </div>
+      </div>
+      <div class="stats-grid" style="margin-top:16px">
+        <div class="stats-box">
+          <h4>Communication Stats</h4>
+          <div class="stat-row"><span class="stat-label">Emails Sent</span><span class="stat-value">${num(a.emails.completed)} / ${num(a.emails.total)}</span></div>
+          <div class="stat-row"><span class="stat-label">SMS Sent</span><span class="stat-value">${num(a.sms.completed)} / ${num(a.sms.total)}</span></div>
+          <div class="stat-row"><span class="stat-label">Physical Mail</span><span class="stat-value">${num(a.mail.completed)} / ${num(a.mail.total)}</span></div>
+          <div class="stat-row"><span class="stat-label">Meeting Links</span><span class="stat-value">${num(a.meetings.completed)} / ${num(a.meetings.total)}</span></div>
+        </div>
+        <div class="stats-box">
+          <h4>Delivery Status</h4>
+          <div class="stat-row"><span class="stat-label">Email Failed</span><span class="stat-value" style="color:var(--danger)">${num(a.emails.failed)}</span></div>
+          <div class="stat-row"><span class="stat-label">SMS Failed</span><span class="stat-value" style="color:var(--danger)">${num(a.sms.failed)}</span></div>
+          <div class="stat-row"><span class="stat-label">Mail Failed</span><span class="stat-value" style="color:var(--danger)">${num(a.mail.failed)}</span></div>
+          <div class="stat-row"><span class="stat-label">Email Pending</span><span class="stat-value" style="color:var(--warning)">${num(a.emails.pending)}</span></div>
+        </div>
+      </div>
+    `;
+    document.getElementById('aiStats').innerHTML = html;
+  }
+
+  // Load users
+  window.loadUsers = async function(page = 0) {
+    try {
+      const search = document.getElementById('userSearch')?.value || '';
+      const res = await fetch(`/api/admin/users?page=${page}&limit=25&search=${encodeURIComponent(search)}`);
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message);
+      users = data.data.users;
+      userPagination = data.data.pagination;
+      renderUserTable();
+    } catch (e) {
+      document.getElementById('userTableContainer').innerHTML = '<div class="empty-state">Failed to load users: ' + e.message + '</div>';
+    }
+  };
+
+  window.searchUsers = function() {
+    loadUsers(0);
+  };
+
+  document.getElementById('userSearch')?.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') searchUsers();
+  });
+
+  function renderUserTable() {
+    if (!users.length) {
+      document.getElementById('userTableContainer').innerHTML = '<div class="empty-state">No users found</div>';
+      return;
+    }
+    let html = `
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Username</th>
+            <th>Email</th>
+            <th>Status</th>
+            <th>DIDs</th>
+            <th>AI#</th>
+            <th>Agents</th>
+            <th>Created</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+    `;
+    for (const u of users) {
+      const badges = [];
+      if (u.is_admin) badges.push('<span class="badge badge--admin">Admin</span>');
+      if (u.suspended) badges.push('<span class="badge badge--suspended">Suspended</span>');
+      const statusHtml = badges.length ? badges.join(' ') : '<span class="badge badge--ok">Active</span>';
+      const created = new Date(u.created_at).toLocaleDateString();
+      html += `
+        <tr class="${u.suspended ? 'suspended' : ''}">
+          <td>${u.id}</td>
+          <td><strong>${escapeHtml(u.username)}</strong></td>
+          <td>${escapeHtml(u.email)}</td>
+          <td>${statusHtml}</td>
+          <td>${u.dids || 0}</td>
+          <td>${u.aiNumbers || 0}</td>
+          <td>${u.agents || 0}</td>
+          <td>${created}</td>
+          <td>
+            <button class="btn--sm" onclick="viewUser(${u.id})">View</button>
+            ${u.suspended 
+              ? `<button class="btn--sm btn--success" onclick="unsuspendUser(${u.id})">Unsuspend</button>`
+              : `<button class="btn--sm btn--danger" onclick="suspendUser(${u.id})">Suspend</button>`}
+          </td>
+        </tr>
+      `;
+    }
+    html += '</tbody></table>';
+
+    // Pagination
+    html += `
+      <div class="pagination">
+        <button ${userPagination.page === 0 ? 'disabled' : ''} onclick="loadUsers(${userPagination.page - 1})">Prev</button>
+        <span>Page ${userPagination.page + 1} of ${userPagination.totalPages || 1} (${userPagination.total} total)</span>
+        <button ${userPagination.page >= userPagination.totalPages - 1 ? 'disabled' : ''} onclick="loadUsers(${userPagination.page + 1})">Next</button>
+      </div>
+    `;
+    document.getElementById('userTableContainer').innerHTML = html;
+  }
+
+  // View user details
+  window.viewUser = async function(id) {
+    selectedUserId = id;
+    document.getElementById('userModal').classList.add('active');
+    document.getElementById('userModalContent').innerHTML = '<div class="loading"><div class="spinner"></div>Loading...</div>';
+    
+    try {
+      const res = await fetch(`/api/admin/users/${id}`);
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message);
+      renderUserDetail(data.data);
+    } catch (e) {
+      document.getElementById('userModalContent').innerHTML = '<div class="empty-state">Failed to load user: ' + e.message + '</div>';
+    }
+  };
+
+  function renderUserDetail(data) {
+    const u = data.user;
+    const badges = [];
+    if (u.is_admin) badges.push('<span class="badge badge--admin">Admin</span>');
+    if (u.suspended) badges.push('<span class="badge badge--suspended">Suspended</span>');
+    
+    let html = `
+      <div class="detail-section">
+        <h4>Account Info ${badges.join(' ')}</h4>
+        <div class="detail-row"><span class="detail-label">ID:</span><span class="detail-value">${u.id}</span></div>
+        <div class="detail-row"><span class="detail-label">Username:</span><span class="detail-value">${escapeHtml(u.username)}</span></div>
+        <div class="detail-row"><span class="detail-label">Email:</span><span class="detail-value">${escapeHtml(u.email)}</span></div>
+        <div class="detail-row"><span class="detail-label">Name:</span><span class="detail-value">${escapeHtml((u.firstname || '') + ' ' + (u.lastname || ''))}</span></div>
+        <div class="detail-row"><span class="detail-label">Phone:</span><span class="detail-value">${escapeHtml(u.phone || '-')}</span></div>
+        <div class="detail-row"><span class="detail-label">Balance:</span><span class="detail-value">${u.balance != null ? fmt(u.balance) : 'N/A'}</span></div>
+        <div class="detail-row"><span class="detail-label">Magnus ID:</span><span class="detail-value">${u.magnus_user_id || '-'}</span></div>
+        <div class="detail-row"><span class="detail-label">Signup IP:</span><span class="detail-value">${u.signup_ip || '-'}</span></div>
+        <div class="detail-row"><span class="detail-label">Created:</span><span class="detail-value">${new Date(u.created_at).toLocaleString()}</span></div>
+      </div>
+      
+      <div class="detail-section">
+        <h4>Address</h4>
+        <div class="detail-row"><span class="detail-value">${escapeHtml(u.address1 || '-')}</span></div>
+        <div class="detail-row"><span class="detail-value">${escapeHtml([u.city, u.state, u.postal_code, u.country].filter(Boolean).join(', ') || '-')}</span></div>
+      </div>
+      
+      <div class="detail-section">
+        <h4>Resources</h4>
+        <div class="detail-row"><span class="detail-label">DIDs:</span><span class="detail-value">${data.dids.length}</span></div>
+        <div class="detail-row"><span class="detail-label">AI Numbers:</span><span class="detail-value">${data.aiNumbers.length}</span></div>
+        <div class="detail-row"><span class="detail-label">AI Agents:</span><span class="detail-value">${data.agents.length}</span></div>
+      </div>
+      
+      <div class="detail-section">
+        <h4>Recent Billing (Last 20)</h4>
+        ${data.recentBilling.length ? `
+          <table style="font-size:12px">
+            <thead><tr><th>Amount</th><th>Description</th><th>Status</th><th>Date</th></tr></thead>
+            <tbody>
+              ${data.recentBilling.map(b => `
+                <tr>
+                  <td style="color:${b.amount >= 0 ? 'var(--success)' : 'var(--danger)'}">${fmt(b.amount)}</td>
+                  <td>${escapeHtml((b.description || '').slice(0, 50))}</td>
+                  <td>${b.status}</td>
+                  <td>${new Date(b.created_at).toLocaleString()}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        ` : '<div class="empty-state">No billing history</div>'}
+      </div>
+      
+      <div class="modal-actions">
+        <button onclick="openBalanceModal(${u.id})">Adjust Balance</button>
+        <button onclick="toggleAdmin(${u.id})">${u.is_admin ? 'Remove Admin' : 'Make Admin'}</button>
+        ${u.suspended 
+          ? `<button class="btn--success" onclick="unsuspendUser(${u.id});closeUserModal();">Unsuspend</button>`
+          : `<button class="btn--danger" onclick="suspendUser(${u.id});closeUserModal();">Suspend</button>`}
+      </div>
+    `;
+    document.getElementById('userModalContent').innerHTML = html;
+  }
+
+  window.closeUserModal = function() {
+    document.getElementById('userModal').classList.remove('active');
+  };
+
+  // Suspend user
+  window.suspendUser = async function(id) {
+    if (!confirm('Are you sure you want to suspend this user?')) return;
+    try {
+      const res = await fetch(`/api/admin/users/${id}/suspend`, { method: 'POST' });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message);
+      alert('User suspended');
+      loadUsers(userPagination.page);
+    } catch (e) {
+      alert('Error: ' + e.message);
+    }
+  };
+
+  // Unsuspend user
+  window.unsuspendUser = async function(id) {
+    try {
+      const res = await fetch(`/api/admin/users/${id}/unsuspend`, { method: 'POST' });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message);
+      alert('User unsuspended');
+      loadUsers(userPagination.page);
+    } catch (e) {
+      alert('Error: ' + e.message);
+    }
+  };
+
+  // Toggle admin
+  window.toggleAdmin = async function(id) {
+    if (!confirm('Are you sure you want to change admin status for this user?')) return;
+    try {
+      const res = await fetch(`/api/admin/users/${id}/toggle-admin`, { method: 'POST' });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message);
+      alert(data.message);
+      loadUsers(userPagination.page);
+      closeUserModal();
+    } catch (e) {
+      alert('Error: ' + e.message);
+    }
+  };
+
+  // Balance adjustment
+  window.openBalanceModal = function(id) {
+    selectedUserId = id;
+    document.getElementById('balanceAmount').value = '';
+    document.getElementById('balanceDescription').value = '';
+    document.getElementById('balanceModal').classList.add('active');
+  };
+
+  window.closeBalanceModal = function() {
+    document.getElementById('balanceModal').classList.remove('active');
+  };
+
+  window.submitBalanceAdjustment = async function() {
+    const amount = parseFloat(document.getElementById('balanceAmount').value);
+    const description = document.getElementById('balanceDescription').value.trim() || 'Admin adjustment';
+    
+    if (!Number.isFinite(amount) || amount === 0) {
+      alert('Please enter a valid non-zero amount');
+      return;
+    }
+    
+    try {
+      const res = await fetch(`/api/admin/users/${selectedUserId}/adjust-balance`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, description })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message);
+      alert(data.message);
+      closeBalanceModal();
+      viewUser(selectedUserId);
+    } catch (e) {
+      alert('Error: ' + e.message);
+    }
+  };
+
+  // Load integrations
+  async function loadIntegrations() {
+    try {
+      const res = await fetch('/api/admin/integrations');
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message);
+      renderIntegrations(data.data);
+    } catch (e) {
+      document.getElementById('integrationStatus').innerHTML = '<div class="empty-state">Failed to load integrations: ' + e.message + '</div>';
+    }
+  }
+
+  function renderIntegrations(integrations) {
+    const icons = {
+      magnusBilling: '📞',
+      didww: '🌐',
+      daily: '📹',
+      stripe: '💳',
+      smtp: '📧',
+      click2mail: '📬',
+      database: '🗄️'
+    };
+    const names = {
+      magnusBilling: 'MagnusBilling',
+      didww: 'DIDWW',
+      daily: 'Daily (Pipecat)',
+      stripe: 'Stripe',
+      smtp: 'SMTP2GO',
+      click2mail: 'Click2Mail',
+      database: 'Database'
+    };
+    
+    let html = '<div class="integration-grid">';
+    for (const [key, val] of Object.entries(integrations)) {
+      html += `
+        <div class="integration-card">
+          <div class="integration-icon">${icons[key] || '🔌'}</div>
+          <div class="integration-info">
+            <div class="integration-name">${names[key] || key}</div>
+            <div class="integration-status ${val.status}">${val.message}</div>
+          </div>
+          <span class="badge badge--${val.status}">${val.status}</span>
+        </div>
+      `;
+    }
+    html += '</div>';
+    document.getElementById('integrationStatus').innerHTML = html;
+  }
+
+  function escapeHtml(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  // Click outside modal to close
+  document.getElementById('userModal').addEventListener('click', (e) => {
+    if (e.target.id === 'userModal') closeUserModal();
+  });
+  document.getElementById('balanceModal').addEventListener('click', (e) => {
+    if (e.target.id === 'balanceModal') closeBalanceModal();
+  });
+})();
+</script>
+</body>
+</html>

@@ -702,6 +702,30 @@ function requireAuth(req, res, next) {
   if (DEBUG) console.warn('[auth.fail]', { sid: req.sessionID, hasSession: !!req.session, userId: req.session?.userId });
   return res.redirect('/login');
 }
+async function requireAdmin(req, res, next) {
+  // First ensure user is authenticated
+  if (!req.session || !req.session.userId) {
+    if (DEBUG) console.warn('[admin.auth.fail]', { sid: req.sessionID, hasSession: !!req.session, userId: req.session?.userId });
+    return res.redirect('/login');
+  }
+  // Check if user is admin
+  try {
+    if (!pool) {
+      if (DEBUG) console.warn('[admin.auth.fail] No database pool');
+      return res.redirect('/dashboard');
+    }
+    const [rows] = await pool.execute('SELECT is_admin FROM signup_users WHERE id=? LIMIT 1', [req.session.userId]);
+    const row = rows && rows[0];
+    if (!row || !row.is_admin) {
+      if (DEBUG) console.warn('[admin.auth.fail]', { userId: req.session.userId, isAdmin: row?.is_admin });
+      return res.redirect('/dashboard');
+    }
+    return next();
+  } catch (e) {
+    if (DEBUG) console.warn('[admin.auth.error]', e.message || e);
+    return res.redirect('/dashboard');
+  }
+}
 const PREFETCH_DAYS = parseInt(process.env.CDR_PREFETCH_DAYS || '7', 10);
 function ymd(d){ return new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,10); }
 function defaultRange(){ const now=new Date(); const from=new Date(now.getTime()-(PREFETCH_DAYS-1)*86400000); return { from: ymd(from), to: ymd(now) }; }
@@ -2767,6 +2791,34 @@ async function initDb() {
     } catch (e) {
       if (DEBUG) console.warn('[schema] Billing_history.amount precision check failed:', e.message || e);
     }
+
+    // Ensure signup_users.is_admin column exists for admin dashboard access
+    try {
+      const [hasIsAdmin] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='signup_users' AND column_name='is_admin' LIMIT 1",
+        [dbName]
+      );
+      if (!hasIsAdmin || !hasIsAdmin.length) {
+        await pool.query('ALTER TABLE signup_users ADD COLUMN is_admin TINYINT(1) NOT NULL DEFAULT 0 AFTER password_hash');
+        if (DEBUG) console.log('[schema] Added signup_users.is_admin column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] signup_users.is_admin check failed', e.message || e);
+    }
+
+    // Ensure signup_users.suspended column exists for account suspension
+    try {
+      const [hasSuspended] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='signup_users' AND column_name='suspended' LIMIT 1",
+        [dbName]
+      );
+      if (!hasSuspended || !hasSuspended.length) {
+        await pool.query('ALTER TABLE signup_users ADD COLUMN suspended TINYINT(1) NOT NULL DEFAULT 0 AFTER is_admin');
+        if (DEBUG) console.log('[schema] Added signup_users.suspended column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] signup_users.suspended check failed', e.message || e);
+    }
   } catch (e) { if (DEBUG) console.warn('Schema check failed', e.message || e); }
 }
 async function storeVerification({ token, codeHash, email, expiresAt, fields }) {
@@ -3699,6 +3751,570 @@ app.get('/dashboard', requireAuth, (req, res) => {
     checkoutMaxAmount: checkoutMax,
     sipDomain,
   });
+});
+
+// ========== Admin Dashboard ==========
+app.get('/admin', requireAdmin, (req, res) => {
+  res.render('admin', {
+    username: req.session.username || '',
+  });
+});
+
+// Admin API: Get platform-wide statistics
+app.get('/api/admin/stats', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    // User stats
+    const [[userStats]] = await pool.execute(`
+      SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) as newThisMonth,
+        SUM(CASE WHEN suspended = 1 THEN 1 ELSE 0 END) as suspended
+      FROM signup_users
+    `);
+
+    // Active users (had activity in last 30 days via billing_history or ai_call_logs)
+    const [[activeUsers]] = await pool.execute(`
+      SELECT COUNT(DISTINCT user_id) as count FROM (
+        SELECT user_id FROM billing_history WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+        UNION
+        SELECT user_id FROM ai_call_logs WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+      ) active
+    `);
+
+    // Financial stats
+    const [[stripeStats]] = await pool.execute(`
+      SELECT COALESCE(SUM(amount), 0) as total, COUNT(*) as count 
+      FROM stripe_payments WHERE status='completed' AND credited=1
+    `);
+    const [[dodoStats]] = await pool.execute(`
+      SELECT COALESCE(SUM(amount), 0) as total, COUNT(*) as count 
+      FROM dodo_payments WHERE status='completed' AND credited=1
+    `);
+    const [[cryptoStats]] = await pool.execute(`
+      SELECT COALESCE(SUM(price_amount), 0) as total, COUNT(*) as count 
+      FROM nowpayments_payments WHERE payment_status IN ('finished','confirmed') AND credited=1
+    `);
+    const [[squareStats]] = await pool.execute(`
+      SELECT COALESCE(SUM(amount), 0) as total, COUNT(*) as count 
+      FROM square_payments WHERE status='completed' AND credited=1
+    `);
+    const [[billcomStats]] = await pool.execute(`
+      SELECT COUNT(*) as count FROM billcom_payments WHERE status='paid' AND credited=1
+    `);
+    const [[pendingPayments]] = await pool.execute(`
+      SELECT 
+        (SELECT COUNT(*) FROM stripe_payments WHERE status='pending') +
+        (SELECT COUNT(*) FROM dodo_payments WHERE status='pending') +
+        (SELECT COUNT(*) FROM nowpayments_payments WHERE payment_status='waiting') +
+        (SELECT COUNT(*) FROM square_payments WHERE status='pending') as count
+    `);
+
+    // Telephony stats
+    const [[didStats]] = await pool.execute(`
+      SELECT COUNT(*) as total, SUM(CASE WHEN cancel_pending=0 THEN 1 ELSE 0 END) as active
+      FROM user_dids
+    `);
+    const [[aiNumberStats]] = await pool.execute(`
+      SELECT COUNT(*) as total, SUM(CASE WHEN cancel_pending=0 THEN 1 ELSE 0 END) as active
+      FROM ai_numbers
+    `);
+    const [[trunkStats]] = await pool.execute(`SELECT COUNT(*) as total FROM user_trunks`);
+    
+    // Call stats (AI calls)
+    const [[aiCallStats]] = await pool.execute(`
+      SELECT 
+        COUNT(*) as totalCalls,
+        COALESCE(SUM(CASE WHEN direction='inbound' THEN 1 ELSE 0 END), 0) as inboundCalls,
+        COALESCE(SUM(CASE WHEN direction='outbound' THEN 1 ELSE 0 END), 0) as outboundCalls,
+        COALESCE(SUM(duration), 0) as totalSeconds,
+        COALESCE(SUM(price), 0) as totalRevenue
+      FROM ai_call_logs
+    `);
+
+    // AI Platform stats
+    const [[agentStats]] = await pool.execute(`SELECT COUNT(*) as total FROM ai_agents`);
+    const [[conversationStats]] = await pool.execute(`
+      SELECT COUNT(DISTINCT call_id) as total FROM ai_call_messages
+    `);
+    
+    // Email stats
+    const [[emailStats]] = await pool.execute(`
+      SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed,
+        SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending
+      FROM ai_email_sends
+    `);
+    
+    // SMS stats
+    const [[smsStats]] = await pool.execute(`
+      SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed,
+        SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending
+      FROM ai_sms_sends
+    `);
+    
+    // Physical mail stats
+    const [[mailStats]] = await pool.execute(`
+      SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN status='submitted' THEN 1 ELSE 0 END) as submitted,
+        SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed,
+        SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending
+      FROM ai_mail_sends
+    `);
+
+    // Meeting links (emails with meeting_room_url)
+    const [[meetingStats]] = await pool.execute(`
+      SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed
+      FROM ai_email_sends WHERE meeting_room_url IS NOT NULL
+    `);
+
+    // Dialer stats
+    const [[dialerStats]] = await pool.execute(`
+      SELECT 
+        COUNT(*) as campaigns,
+        SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) as running,
+        SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed
+      FROM dialer_campaigns WHERE status != 'deleted'
+    `);
+    const [[dialerLeadStats]] = await pool.execute(`
+      SELECT COUNT(*) as total FROM dialer_leads
+    `);
+
+    // Recent activity (last 7 days revenue)
+    const [recentRevenue] = await pool.execute(`
+      SELECT DATE(created_at) as date, SUM(amount) as amount
+      FROM billing_history
+      WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) AND amount > 0
+      GROUP BY DATE(created_at)
+      ORDER BY date ASC
+    `);
+
+    const totalRevenue = Number(stripeStats.total) + Number(dodoStats.total) + Number(cryptoStats.total) + Number(squareStats.total);
+
+    return res.json({
+      success: true,
+      data: {
+        users: {
+          total: Number(userStats.total) || 0,
+          active30d: Number(activeUsers.count) || 0,
+          newThisMonth: Number(userStats.newThisMonth) || 0,
+          suspended: Number(userStats.suspended) || 0
+        },
+        financial: {
+          totalRevenue,
+          revenueByMethod: {
+            stripe: { total: Number(stripeStats.total) || 0, count: Number(stripeStats.count) || 0 },
+            crypto: { total: Number(cryptoStats.total) || 0, count: Number(cryptoStats.count) || 0 },
+            dodo: { total: Number(dodoStats.total) || 0, count: Number(dodoStats.count) || 0 },
+            square: { total: Number(squareStats.total) || 0, count: Number(squareStats.count) || 0 },
+            billcom: { count: Number(billcomStats.count) || 0 }
+          },
+          pendingPayments: Number(pendingPayments.count) || 0
+        },
+        telephony: {
+          dids: { total: Number(didStats.total) || 0, active: Number(didStats.active) || 0 },
+          aiNumbers: { total: Number(aiNumberStats.total) || 0, active: Number(aiNumberStats.active) || 0 },
+          trunks: Number(trunkStats.total) || 0,
+          calls: {
+            total: Number(aiCallStats.totalCalls) || 0,
+            inbound: Number(aiCallStats.inboundCalls) || 0,
+            outbound: Number(aiCallStats.outboundCalls) || 0,
+            minutes: Math.round((Number(aiCallStats.totalSeconds) || 0) / 60),
+            revenue: Number(aiCallStats.totalRevenue) || 0
+          }
+        },
+        ai: {
+          agents: Number(agentStats.total) || 0,
+          conversations: Number(conversationStats.total) || 0,
+          emails: { total: Number(emailStats.total) || 0, completed: Number(emailStats.completed) || 0, failed: Number(emailStats.failed) || 0, pending: Number(emailStats.pending) || 0 },
+          sms: { total: Number(smsStats.total) || 0, completed: Number(smsStats.completed) || 0, failed: Number(smsStats.failed) || 0, pending: Number(smsStats.pending) || 0 },
+          mail: { total: Number(mailStats.total) || 0, completed: Number(mailStats.completed) || 0, submitted: Number(mailStats.submitted) || 0, failed: Number(mailStats.failed) || 0, pending: Number(mailStats.pending) || 0 },
+          meetings: { total: Number(meetingStats.total) || 0, completed: Number(meetingStats.completed) || 0, failed: Number(meetingStats.failed) || 0 },
+          dialer: { campaigns: Number(dialerStats.campaigns) || 0, running: Number(dialerStats.running) || 0, completed: Number(dialerStats.completed) || 0, leads: Number(dialerLeadStats.total) || 0 }
+        },
+        recentRevenue
+      }
+    });
+  } catch (e) {
+    console.error('[admin.stats] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to fetch stats' });
+  }
+});
+
+// Admin API: List all users with pagination and search
+app.get('/api/admin/users', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    
+    const page = Math.max(0, parseInt(req.query.page || '0', 10));
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '25', 10)));
+    const offset = page * limit;
+    const search = (req.query.search || req.query.q || '').toString().trim();
+    const sortBy = (req.query.sort || 'created_at').toString();
+    const sortDir = (req.query.dir || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+    
+    const allowedSorts = ['id', 'username', 'email', 'created_at', 'is_admin', 'suspended'];
+    const sortCol = allowedSorts.includes(sortBy) ? sortBy : 'created_at';
+    
+    let whereClause = '';
+    const params = [];
+    if (search) {
+      whereClause = 'WHERE username LIKE ? OR email LIKE ? OR firstname LIKE ? OR lastname LIKE ?';
+      const searchPattern = `%${search}%`;
+      params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+    }
+    
+    const [[countResult]] = await pool.execute(
+      `SELECT COUNT(*) as total FROM signup_users ${whereClause}`,
+      params
+    );
+    
+    const [users] = await pool.execute(
+      `SELECT id, magnus_user_id, username, email, firstname, lastname, phone, is_admin, suspended, created_at
+       FROM signup_users ${whereClause}
+       ORDER BY ${sortCol} ${sortDir}
+       LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    );
+    
+    // Fetch additional data for each user
+    const userIds = users.map(u => u.id);
+    if (userIds.length > 0) {
+      const placeholders = userIds.map(() => '?').join(',');
+      
+      // Get DID counts
+      const [didCounts] = await pool.execute(
+        `SELECT user_id, COUNT(*) as count FROM user_dids WHERE user_id IN (${placeholders}) GROUP BY user_id`,
+        userIds
+      );
+      const didMap = Object.fromEntries(didCounts.map(r => [r.user_id, r.count]));
+      
+      // Get AI number counts
+      const [aiNumCounts] = await pool.execute(
+        `SELECT user_id, COUNT(*) as count FROM ai_numbers WHERE user_id IN (${placeholders}) GROUP BY user_id`,
+        userIds
+      );
+      const aiNumMap = Object.fromEntries(aiNumCounts.map(r => [r.user_id, r.count]));
+      
+      // Get agent counts
+      const [agentCounts] = await pool.execute(
+        `SELECT user_id, COUNT(*) as count FROM ai_agents WHERE user_id IN (${placeholders}) GROUP BY user_id`,
+        userIds
+      );
+      const agentMap = Object.fromEntries(agentCounts.map(r => [r.user_id, r.count]));
+      
+      // Attach counts to users
+      for (const u of users) {
+        u.dids = didMap[u.id] || 0;
+        u.aiNumbers = aiNumMap[u.id] || 0;
+        u.agents = agentMap[u.id] || 0;
+      }
+    }
+    
+    return res.json({
+      success: true,
+      data: {
+        users,
+        pagination: {
+          page,
+          limit,
+          total: Number(countResult.total) || 0,
+          totalPages: Math.ceil((Number(countResult.total) || 0) / limit)
+        }
+      }
+    });
+  } catch (e) {
+    console.error('[admin.users] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to fetch users' });
+  }
+});
+
+// Admin API: Get user detail
+app.get('/api/admin/users/:id', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    
+    const userId = req.params.id;
+    const [[user]] = await pool.execute(
+      `SELECT id, magnus_user_id, username, email, firstname, lastname, phone, address1, city, state, postal_code, country, is_admin, suspended, signup_ip, created_at
+       FROM signup_users WHERE id = ? LIMIT 1`,
+      [userId]
+    );
+    
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    
+    // Fetch related data
+    const [dids] = await pool.execute(
+      `SELECT id, did_number, country, did_type, monthly_price, cancel_pending, created_at FROM user_dids WHERE user_id = ?`,
+      [userId]
+    );
+    const [aiNumbers] = await pool.execute(
+      `SELECT id, phone_number, agent_id, cancel_pending, created_at FROM ai_numbers WHERE user_id = ?`,
+      [userId]
+    );
+    const [agents] = await pool.execute(
+      `SELECT id, display_name, created_at FROM ai_agents WHERE user_id = ?`,
+      [userId]
+    );
+    const [recentBilling] = await pool.execute(
+      `SELECT id, amount, description, status, created_at FROM billing_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 20`,
+      [userId]
+    );
+    const [recentCalls] = await pool.execute(
+      `SELECT id, direction, from_number, to_number, duration, price, status, time_start FROM ai_call_logs WHERE user_id = ? ORDER BY time_start DESC LIMIT 20`,
+      [userId]
+    );
+    
+    // Get MagnusBilling balance if we have magnus_user_id
+    let balance = null;
+    if (user.magnus_user_id) {
+      try {
+        const httpsAgent = magnusBillingAgent;
+        const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+        const info = await fetchMagnusUserCredit({ magnusUserId: user.magnus_user_id, httpsAgent, hostHeader });
+        if (info && info.credit != null) balance = Number(info.credit);
+      } catch (e) {
+        if (DEBUG) console.warn('[admin.user.balance]', e.message || e);
+      }
+    }
+    
+    return res.json({
+      success: true,
+      data: {
+        user: { ...user, balance },
+        dids,
+        aiNumbers,
+        agents,
+        recentBilling,
+        recentCalls
+      }
+    });
+  } catch (e) {
+    console.error('[admin.user.detail] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to fetch user details' });
+  }
+});
+
+// Admin API: Suspend user
+app.post('/api/admin/users/:id/suspend', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    
+    const userId = req.params.id;
+    const adminUserId = req.session.userId;
+    
+    // Prevent self-suspension
+    if (String(userId) === String(adminUserId)) {
+      return res.status(400).json({ success: false, message: 'Cannot suspend your own account' });
+    }
+    
+    await pool.execute('UPDATE signup_users SET suspended = 1 WHERE id = ?', [userId]);
+    if (DEBUG) console.log('[admin.suspend]', { userId, by: adminUserId });
+    
+    return res.json({ success: true, message: 'User suspended' });
+  } catch (e) {
+    console.error('[admin.suspend] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to suspend user' });
+  }
+});
+
+// Admin API: Unsuspend user
+app.post('/api/admin/users/:id/unsuspend', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    
+    const userId = req.params.id;
+    await pool.execute('UPDATE signup_users SET suspended = 0 WHERE id = ?', [userId]);
+    if (DEBUG) console.log('[admin.unsuspend]', { userId, by: req.session.userId });
+    
+    return res.json({ success: true, message: 'User unsuspended' });
+  } catch (e) {
+    console.error('[admin.unsuspend] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to unsuspend user' });
+  }
+});
+
+// Admin API: Toggle admin status
+app.post('/api/admin/users/:id/toggle-admin', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    
+    const userId = req.params.id;
+    const adminUserId = req.session.userId;
+    
+    // Prevent self-demotion
+    if (String(userId) === String(adminUserId)) {
+      return res.status(400).json({ success: false, message: 'Cannot change your own admin status' });
+    }
+    
+    const [[user]] = await pool.execute('SELECT is_admin FROM signup_users WHERE id = ? LIMIT 1', [userId]);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    
+    const newStatus = user.is_admin ? 0 : 1;
+    await pool.execute('UPDATE signup_users SET is_admin = ? WHERE id = ?', [newStatus, userId]);
+    if (DEBUG) console.log('[admin.toggle-admin]', { userId, newStatus, by: adminUserId });
+    
+    return res.json({ success: true, message: newStatus ? 'User is now an admin' : 'Admin privileges removed', isAdmin: !!newStatus });
+  } catch (e) {
+    console.error('[admin.toggle-admin] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to update admin status' });
+  }
+});
+
+// Admin API: Adjust user balance (via MagnusBilling)
+app.post('/api/admin/users/:id/adjust-balance', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    
+    const userId = req.params.id;
+    const amount = parseFloat(req.body.amount);
+    const description = (req.body.description || 'Admin balance adjustment').toString().slice(0, 255);
+    
+    if (!Number.isFinite(amount) || amount === 0) {
+      return res.status(400).json({ success: false, message: 'Invalid amount' });
+    }
+    
+    // Get user's magnus_user_id
+    const [[user]] = await pool.execute('SELECT magnus_user_id FROM signup_users WHERE id = ? LIMIT 1', [userId]);
+    if (!user || !user.magnus_user_id) {
+      return res.status(400).json({ success: false, message: 'User does not have a linked MagnusBilling account' });
+    }
+    
+    // Adjust balance in MagnusBilling
+    const httpsAgent = magnusBillingAgent;
+    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+    
+    const params = new URLSearchParams();
+    params.append('module', 'user');
+    params.append('action', 'addcredit');
+    params.append('id', String(user.magnus_user_id));
+    params.append('credit', String(amount));
+    params.append('description', description);
+    
+    const resp = await mbSignedCall({ relPath: '/index.php/user/addcredit', params, httpsAgent, hostHeader });
+    const success = resp?.data?.success !== false;
+    
+    // Record in billing history
+    await pool.execute(
+      `INSERT INTO billing_history (user_id, amount, description, status, magnus_response) VALUES (?, ?, ?, ?, ?)`,
+      [userId, amount, `[Admin] ${description}`, success ? 'completed' : 'failed', JSON.stringify(resp?.data || {})]
+    );
+    
+    if (DEBUG) console.log('[admin.adjust-balance]', { userId, amount, description, success, by: req.session.userId });
+    
+    if (!success) {
+      return res.status(500).json({ success: false, message: 'MagnusBilling credit adjustment failed' });
+    }
+    
+    return res.json({ success: true, message: `Balance adjusted by $${amount.toFixed(2)}` });
+  } catch (e) {
+    console.error('[admin.adjust-balance] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to adjust balance' });
+  }
+});
+
+// Admin API: Integration health check
+app.get('/api/admin/integrations', requireAdmin, async (req, res) => {
+  const integrations = {};
+  
+  // Check MagnusBilling
+  try {
+    const httpsAgent = magnusBillingAgent;
+    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+    const params = new URLSearchParams();
+    params.append('module', 'user');
+    params.append('action', 'read');
+    params.append('start', '0');
+    params.append('limit', '1');
+    const resp = await mbSignedCall({ relPath: '/index.php/user/read', params, httpsAgent, hostHeader });
+    integrations.magnusBilling = { status: 'ok', message: 'Connected' };
+  } catch (e) {
+    integrations.magnusBilling = { status: 'error', message: e.message || 'Connection failed' };
+  }
+  
+  // Check DIDWW
+  try {
+    if (process.env.DIDWW_API_KEY) {
+      integrations.didww = { status: 'ok', message: 'API key configured' };
+    } else {
+      integrations.didww = { status: 'warning', message: 'API key not configured' };
+    }
+  } catch (e) {
+    integrations.didww = { status: 'error', message: e.message };
+  }
+  
+  // Check Daily (Pipecat)
+  try {
+    if (process.env.DAILY_API_KEY) {
+      integrations.daily = { status: 'ok', message: 'API key configured' };
+    } else {
+      integrations.daily = { status: 'warning', message: 'API key not configured' };
+    }
+  } catch (e) {
+    integrations.daily = { status: 'error', message: e.message };
+  }
+  
+  // Check Stripe
+  try {
+    if (process.env.STRIPE_SECRET_KEY) {
+      integrations.stripe = { status: 'ok', message: 'Secret key configured' };
+    } else {
+      integrations.stripe = { status: 'warning', message: 'Secret key not configured' };
+    }
+  } catch (e) {
+    integrations.stripe = { status: 'error', message: e.message };
+  }
+  
+  // Check SMTP
+  try {
+    if (process.env.SMTP2GO_API_KEY) {
+      integrations.smtp = { status: 'ok', message: 'SMTP2GO configured' };
+    } else {
+      integrations.smtp = { status: 'warning', message: 'SMTP not configured' };
+    }
+  } catch (e) {
+    integrations.smtp = { status: 'error', message: e.message };
+  }
+  
+  // Check Click2Mail
+  try {
+    if (CLICK2MAIL_USERNAME && CLICK2MAIL_PASSWORD) {
+      integrations.click2mail = { status: 'ok', message: 'Credentials configured' };
+    } else {
+      integrations.click2mail = { status: 'warning', message: 'Credentials not configured' };
+    }
+  } catch (e) {
+    integrations.click2mail = { status: 'error', message: e.message };
+  }
+  
+  // Database check
+  try {
+    if (pool) {
+      await pool.execute('SELECT 1');
+      integrations.database = { status: 'ok', message: 'Connected' };
+    } else {
+      integrations.database = { status: 'error', message: 'Pool not initialized' };
+    }
+  } catch (e) {
+    integrations.database = { status: 'error', message: e.message };
+  }
+  
+  return res.json({ success: true, data: integrations });
 });
 // Guard: deleting the primary signup user is disabled via API as well
 app.delete('/api/me', requireAuth, (req, res)=>{
