@@ -2819,6 +2819,33 @@ async function initDb() {
     } catch (e) {
       if (DEBUG) console.warn('[schema] signup_users.suspended check failed', e.message || e);
     }
+
+    // Add indexes for admin dashboard queries
+    try {
+      const [hasCreatedIdx] = await pool.query(
+        "SELECT 1 FROM information_schema.statistics WHERE table_schema=? AND table_name='signup_users' AND index_name='idx_created_at' LIMIT 1",
+        [dbName]
+      );
+      if (!hasCreatedIdx || !hasCreatedIdx.length) {
+        await pool.query('ALTER TABLE signup_users ADD INDEX idx_created_at (created_at)');
+        if (DEBUG) console.log('[schema] Added signup_users.idx_created_at index');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] signup_users idx_created_at check failed', e.message || e);
+    }
+
+    try {
+      const [hasBillingIdx] = await pool.query(
+        "SELECT 1 FROM information_schema.statistics WHERE table_schema=? AND table_name='billing_history' AND index_name='idx_user_created' LIMIT 1",
+        [dbName]
+      );
+      if (!hasBillingIdx || !hasBillingIdx.length) {
+        await pool.query('ALTER TABLE billing_history ADD INDEX idx_user_created (user_id, created_at)');
+        if (DEBUG) console.log('[schema] Added billing_history.idx_user_created index');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] billing_history idx_user_created check failed', e.message || e);
+    }
   } catch (e) { if (DEBUG) console.warn('Schema check failed', e.message || e); }
 }
 async function storeVerification({ token, codeHash, email, expiresAt, fields }) {
@@ -4232,17 +4259,28 @@ app.post('/api/admin/users/:id/adjust-balance', requireAdmin, async (req, res) =
 app.get('/api/admin/integrations', requireAdmin, async (req, res) => {
   const integrations = {};
   
-  // Check MagnusBilling
+  // Helper for timeout
+  const withTimeout = (promise, ms, fallback) => {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms))
+    ]).catch(() => fallback);
+  };
+  
+  // Check MagnusBilling (with 5s timeout)
   try {
-    const httpsAgent = magnusBillingAgent;
-    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
-    const params = new URLSearchParams();
-    params.append('module', 'user');
-    params.append('action', 'read');
-    params.append('start', '0');
-    params.append('limit', '1');
-    const resp = await mbSignedCall({ relPath: '/index.php/user/read', params, httpsAgent, hostHeader });
-    integrations.magnusBilling = { status: 'ok', message: 'Connected' };
+    const mbCheck = async () => {
+      const httpsAgent = magnusBillingAgent;
+      const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
+      const params = new URLSearchParams();
+      params.append('module', 'user');
+      params.append('action', 'read');
+      params.append('start', '0');
+      params.append('limit', '1');
+      await mbSignedCall({ relPath: '/index.php/user/read', params, httpsAgent, hostHeader });
+      return { status: 'ok', message: 'Connected' };
+    };
+    integrations.magnusBilling = await withTimeout(mbCheck(), 5000, { status: 'warning', message: 'Timeout - check connection' });
   } catch (e) {
     integrations.magnusBilling = { status: 'error', message: e.message || 'Connection failed' };
   }
