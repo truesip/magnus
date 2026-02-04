@@ -351,24 +351,170 @@
       border-color: rgba(79,70,229,.45) !important;
     }
 
+    /* AI Tools grid - app connections style */
+    .ai-tools-grid{
+      display:grid;
+      grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
+      gap:16px;
+    }
+    .ai-tool-card{
+      background:rgba(255,255,255,.06);
+      border:1px solid rgba(255,255,255,.12);
+      border-radius:16px;
+      padding:18px;
+      cursor:pointer;
+      transition:all .2s ease;
+      display:flex;
+      flex-direction:column;
+      gap:12px;
+    }
+    .ai-tool-card:hover{
+      background:rgba(255,255,255,.10);
+      border-color:rgba(255,255,255,.20);
+      transform:translateY(-2px);
+      box-shadow:0 12px 32px rgba(0,0,0,.30);
+    }
+    .ai-tool-card-icon{
+      font-size:32px;
+      line-height:1;
+    }
+    .ai-tool-card-content{
+      flex:1;
+    }
+    .ai-tool-card-title{
+      font-size:15px;
+      font-weight:800;
+      color:rgba(255,255,255,.95);
+      margin-bottom:6px;
+    }
+    .ai-tool-card-desc{
+      font-size:12px;
+      color:rgba(255,255,255,.60);
+      line-height:1.5;
+    }
+    .ai-tool-card-status{
+      margin-top:auto;
+    }
+    .ai-tool-status-badge{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:5px 12px;
+      border-radius:999px;
+      font-size:11px;
+      font-weight:700;
+    }
+    .ai-tool-status-configured{
+      background:rgba(16,185,129,.15);
+      border:1px solid rgba(16,185,129,.40);
+      color:#6ee7b7;
+    }
+    .ai-tool-status-unconfigured{
+      background:rgba(255,255,255,.05);
+      border:1px solid rgba(255,255,255,.14);
+      color:rgba(255,255,255,.55);
+    }
+
+    /* AI Tool Config Modal */
+    .ai-tool-modal{
+      display:none;
+      position:fixed;
+      top:0;left:0;right:0;bottom:0;
+      background:rgba(0,0,0,.55);
+      z-index:9998;
+      align-items:center;
+      justify-content:center;
+    }
+    .ai-tool-modal-card{
+      background:#0b1024;
+      border:1px solid rgba(255,255,255,.14);
+      border-radius:14px;
+      padding:20px;
+      width:440px;
+      max-width:94%;
+      max-height:92vh;
+      overflow:auto;
+      box-shadow:0 24px 90px rgba(0,0,0,.70);
+      color:rgba(255,255,255,.92);
+    }
+    .ai-tool-modal-header{
+      display:flex;
+      align-items:center;
+      gap:12px;
+      margin-bottom:16px;
+    }
+    .ai-tool-modal-icon{
+      font-size:28px;
+    }
+    .ai-tool-modal-title{
+      font-size:18px;
+      font-weight:800;
+      flex:1;
+    }
+    .ai-tool-modal-close{
+      background:transparent;
+      border:none;
+      color:rgba(255,255,255,.60);
+      font-size:20px;
+      cursor:pointer;
+      padding:4px 8px;
+      border-radius:8px;
+      transition:all .15s ease;
+    }
+    .ai-tool-modal-close:hover{
+      background:rgba(255,255,255,.10);
+      color:#fff;
+    }
+    .ai-tool-modal-body{
+      display:flex;
+      flex-direction:column;
+      gap:12px;
+    }
+    .ai-tool-modal-body label{
+      display:block;
+      font-size:12px;
+      font-weight:600;
+      color:rgba(255,255,255,.70);
+      margin-bottom:4px;
+    }
+    .ai-tool-modal-body input,
+    .ai-tool-modal-body select,
+    .ai-tool-modal-body textarea{
+      width:100%;
+      box-sizing:border-box;
+    }
+    .ai-tool-modal-row{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:12px;
+    }
+    .ai-tool-modal-footer{
+      display:flex;
+      gap:8px;
+      justify-content:flex-end;
+      margin-top:16px;
+      padding-top:16px;
+      border-top:1px solid rgba(255,255,255,.10);
+    }
+
     /* AI Tools pane: avoid toolbar content overflowing into adjacent cards */
     #ai-pane-tools .toolbar{flex-wrap:wrap}
     #ai-pane-tools .toolbar > *{min-width:0;max-width:100%}
 
     /* Allow inputs inside CSS grid/flex to shrink instead of overflowing (prevents overlap) */
-    #ai-pane-tools input[type="text"],
-    #ai-pane-tools input[type="number"],
-    #ai-pane-tools input[type="password"],
-    #ai-pane-tools input[type="email"],
-    #ai-pane-tools input[type="url"],
-    #ai-pane-tools input[type="file"],
-    #ai-pane-tools select,
-    #ai-pane-tools textarea{
+    .ai-tool-modal input[type="text"],
+    .ai-tool-modal input[type="number"],
+    .ai-tool-modal input[type="password"],
+    .ai-tool-modal input[type="email"],
+    .ai-tool-modal input[type="url"],
+    .ai-tool-modal input[type="file"],
+    .ai-tool-modal select,
+    .ai-tool-modal textarea{
       min-width:0;
       max-width:100%;
       box-sizing:border-box;
     }
-    #ai-pane-tools input[type="file"]{width:100%}
+    .ai-tool-modal input[type="file"]{width:100%}
 
     /* Document templates table: prevent content from overflowing the card */
     #ai-doc-templates-table{table-layout:fixed}
@@ -485,7 +631,8 @@
     #dialerUploadModal,
     #aiEmailPreviewModal,
     #aiAgentModal,
-    #aiTemplateModal{
+    #aiTemplateModal,
+    .ai-tool-modal{
       /* Keep the dimmed overlay so the page behind is still visible. */
       background: rgba(0,0,0,.55) !important;
     }
@@ -497,7 +644,8 @@
     #dialerUploadModal > div,
     #aiEmailPreviewModal > div,
     #aiAgentModal .ai-agent-modal-card,
-    #aiTemplateModal .ai-agent-modal-card{
+    #aiTemplateModal .ai-agent-modal-card,
+    .ai-tool-modal-card{
       /* Solid modal cards (no transparency / no see-through). */
       background: #0b1024 !important;
       border:1px solid rgba(255,255,255,.14) !important;
@@ -519,7 +667,9 @@
     #aiAgentModal [style*="color:#4b5563"],
     #aiAgentModal [style*="color:#6b7280"],
     #aiTemplateModal [style*="color:#4b5563"],
-    #aiTemplateModal [style*="color:#6b7280"]{
+    #aiTemplateModal [style*="color:#6b7280"],
+    .ai-tool-modal [style*="color:#4b5563"],
+    .ai-tool-modal [style*="color:#6b7280"]{
       color: rgba(255,255,255,.65) !important;
     }
 
@@ -911,95 +1061,56 @@
         </div>
 
         <div id="ai-pane-tools" style="display:none">
-          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;align-items:start">
-            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-              <h3 style="margin:0 0 10px 0">Email (SMTP)</h3>
-              <div class="muted" style="margin-bottom:10px">Used when your AI agent emails documents to callers.</div>
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-                <input id="smtpHost" type="text" placeholder="SMTP host (e.g. smtp.gmail.com)">
-                <input id="smtpPort" type="number" placeholder="Port (e.g. 587)">
-                <label style="display:flex;align-items:center;gap:6px;font-size:13px">
-                  <input id="smtpSecure" type="checkbox"> Use SSL (secure)
-                </label>
-                <div></div>
-                <input id="smtpUsername" type="text" placeholder="Username">
-                <input id="smtpPassword" type="password" placeholder="Password (leave blank to keep current)">
-                <input id="smtpFromEmail" type="email" placeholder="From email (e.g. you@domain.com)">
-                <input id="smtpFromName" type="text" placeholder="From name (optional)">
-                <input id="smtpReplyTo" type="email" placeholder="Reply-to (optional)">
-                <input id="smtpTestToEmail" type="email" placeholder="Test recipient (optional)">
+          <div class="muted" style="margin-bottom:14px">Configure integrations and tools for your AI agents.</div>
+          <div class="ai-tools-grid">
+            <!-- Email (SMTP) -->
+            <div class="ai-tool-card" data-tool="smtp">
+              <div class="ai-tool-card-icon">✉️</div>
+              <div class="ai-tool-card-content">
+                <div class="ai-tool-card-title">Email (SMTP)</div>
+                <div class="ai-tool-card-desc">Send emails and documents to callers via your SMTP server.</div>
               </div>
-              <div class="toolbar" style="margin-top:10px">
-                <button id="saveSmtpBtn">Save SMTP</button>
-                <button id="testSmtpBtn" class="btn--muted">Send Test Email</button>
-                <span id="smtpStatus" class="muted" style="margin-left:auto"></span>
-              </div>
+              <div class="ai-tool-card-status" id="smtpCardStatus"><span class="ai-tool-status-badge ai-tool-status-unconfigured">Not configured</span></div>
             </div>
 
-            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-              <h3 style="margin:0 0 10px 0">Call Transfer</h3>
-              <div class="muted" style="margin-bottom:10px">Default transfer destination used by agents without an override. You can set a different transfer destination per agent in the agent editor.</div>
-              <div style="display:grid;grid-template-columns:1fr;gap:8px">
-                <input id="aiTransferNumber" type="text" placeholder="Transfer destination (E.164 like +18005551234 or sip:agent@domain)">
+            <!-- Call Transfer -->
+            <div class="ai-tool-card" data-tool="transfer">
+              <div class="ai-tool-card-icon">📞</div>
+              <div class="ai-tool-card-content">
+                <div class="ai-tool-card-title">Call Transfer</div>
+                <div class="ai-tool-card-desc">Set the default destination for transferring calls from AI agents.</div>
               </div>
-              <div class="toolbar" style="margin-top:10px">
-                <button id="saveAiTransferBtn">Save Transfer</button>
-                <span id="aiTransferStatus" class="muted" style="margin-left:auto"></span>
-              </div>
+              <div class="ai-tool-card-status" id="transferCardStatus"><span class="ai-tool-status-badge ai-tool-status-unconfigured">Not configured</span></div>
             </div>
 
-            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-              <h3 style="margin:0 0 10px 0">SMS</h3>
-              <div class="muted" style="margin-bottom:10px">Outbound SMS sender numbers used by your AI agent.</div>
-              <div style="display:grid;grid-template-columns:1fr;gap:8px">
-                <div class="muted" style="font-size:12px">Allowed outbound SMS DIDs</div>
-                <select id="aiSmsAllowedDidIds" multiple size="5" style="width:100%;box-sizing:border-box"></select>
-                <div class="muted" style="font-size:12px">Default outbound DID</div>
-                <select id="aiSmsDefaultDidId" style="width:100%;box-sizing:border-box">
-                  <option value="">Auto (first allowed)</option>
-                </select>
-                <div class="muted" style="font-size:12px">Tip: hold Ctrl (Windows) / ⌘ (Mac) to select multiple.</div>
+            <!-- SMS -->
+            <div class="ai-tool-card" data-tool="sms">
+              <div class="ai-tool-card-icon">💬</div>
+              <div class="ai-tool-card-content">
+                <div class="ai-tool-card-title">SMS</div>
+                <div class="ai-tool-card-desc">Configure outbound SMS sender numbers for your AI agents.</div>
               </div>
-              <div class="toolbar" style="margin-top:10px">
-                <button id="saveAiSmsSettingsBtn">Save SMS</button>
-                <span id="aiSmsSettingsStatus" class="muted" style="margin-left:auto"></span>
-              </div>
+              <div class="ai-tool-card-status" id="smsCardStatus"><span class="ai-tool-status-badge ai-tool-status-unconfigured">Not configured</span></div>
             </div>
 
-            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-              <h3 style="margin:0 0 10px 0">Mail (Return Address)</h3>
-              <div class="muted" style="margin-bottom:10px">Used when your AI agent sends physical mail via USPS.</div>
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-                <input id="mailFromName" type="text" placeholder="Name (optional)">
-                <input id="mailFromOrg" type="text" placeholder="Organization (optional)">
-                <input id="mailFromAddress1" type="text" placeholder="Address line 1 *" style="grid-column:1 / span 2">
-                <input id="mailFromAddress2" type="text" placeholder="Address line 2 (optional)" style="grid-column:1 / span 2">
-                <input id="mailFromCity" type="text" placeholder="City *">
-                <input id="mailFromState" type="text" placeholder="State *">
-                <input id="mailFromPostal" type="text" placeholder="ZIP *">
-                <select id="mailFromCountry">
-                  <option value="US">US</option>
-                </select>
+            <!-- Mail (Return Address) -->
+            <div class="ai-tool-card" data-tool="mail">
+              <div class="ai-tool-card-icon">📬</div>
+              <div class="ai-tool-card-content">
+                <div class="ai-tool-card-title">Mail</div>
+                <div class="ai-tool-card-desc">Set the return address for physical mail sent via USPS.</div>
               </div>
-              <div class="toolbar" style="margin-top:10px">
-                <button id="saveMailSettingsBtn">Save Mail</button>
-                <span id="mailSettingsStatus" class="muted" style="margin-left:auto"></span>
-              </div>
+              <div class="ai-tool-card-status" id="mailCardStatus"><span class="ai-tool-status-badge ai-tool-status-unconfigured">Not configured</span></div>
             </div>
 
-            <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-              <h3 style="margin:0 0 10px 0">Document Templates</h3>
-              <div class="muted" style="margin-bottom:10px">Upload a .docx with placeholders like <code>[[Name]]</code> and <code>[[Address]]</code>.</div>
-              <div class="toolbar" style="flex-wrap:wrap">
-                <input id="docTemplateName" type="text" placeholder="Template name" style="flex:1;min-width:160px">
-                <input id="docTemplateFile" type="file" accept=".docx">
-                <button id="uploadDocTemplateBtn" class="btn--primary">Upload</button>
+            <!-- Document Templates -->
+            <div class="ai-tool-card" data-tool="doctemplates">
+              <div class="ai-tool-card-icon">📄</div>
+              <div class="ai-tool-card-content">
+                <div class="ai-tool-card-title">Document Templates</div>
+                <div class="ai-tool-card-desc">Upload .docx templates with placeholders for personalized documents.</div>
               </div>
-              <table id="ai-doc-templates-table" style="display:none">
-                <thead><tr><th>Name</th><th>File</th><th>Updated</th><th>Actions</th></tr></thead>
-                <tbody></tbody>
-              </table>
-              <div id="ai-doc-templates-empty" class="muted">Loading…</div>
+              <div class="ai-tool-card-status" id="docTemplatesCardStatus"><span class="ai-tool-status-badge ai-tool-status-unconfigured">Not configured</span></div>
             </div>
           </div>
         </div>
@@ -1495,6 +1606,214 @@
         <div id="aiEmailPreviewEmpty" class="muted" style="display:none">No preview content captured for this email.</div>
       </div>
     </div>
+
+    <!-- AI Tool: SMTP Modal -->
+    <div id="aiToolSmtpModal" class="ai-tool-modal">
+      <div class="ai-tool-modal-card">
+        <div class="ai-tool-modal-header">
+          <span class="ai-tool-modal-icon">✉️</span>
+          <span class="ai-tool-modal-title">Email (SMTP)</span>
+          <button type="button" class="ai-tool-modal-close" onclick="closeToolModal('smtp')">&times;</button>
+        </div>
+        <div class="muted" style="margin-bottom:14px">Configure your SMTP server to send emails and documents to callers.</div>
+        <div class="ai-tool-modal-body">
+          <div class="ai-tool-modal-row">
+            <div>
+              <label>SMTP Host</label>
+              <input id="smtpHost" type="text" placeholder="e.g. smtp.gmail.com">
+            </div>
+            <div>
+              <label>Port</label>
+              <input id="smtpPort" type="number" placeholder="e.g. 587">
+            </div>
+          </div>
+          <div>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+              <input id="smtpSecure" type="checkbox"> <span>Use SSL (secure)</span>
+            </label>
+          </div>
+          <div class="ai-tool-modal-row">
+            <div>
+              <label>Username</label>
+              <input id="smtpUsername" type="text" placeholder="Username">
+            </div>
+            <div>
+              <label>Password</label>
+              <input id="smtpPassword" type="password" placeholder="Leave blank to keep current">
+            </div>
+          </div>
+          <div class="ai-tool-modal-row">
+            <div>
+              <label>From Email</label>
+              <input id="smtpFromEmail" type="email" placeholder="you@domain.com">
+            </div>
+            <div>
+              <label>From Name</label>
+              <input id="smtpFromName" type="text" placeholder="Optional">
+            </div>
+          </div>
+          <div class="ai-tool-modal-row">
+            <div>
+              <label>Reply-To</label>
+              <input id="smtpReplyTo" type="email" placeholder="Optional">
+            </div>
+            <div>
+              <label>Test Recipient</label>
+              <input id="smtpTestToEmail" type="email" placeholder="Optional">
+            </div>
+          </div>
+        </div>
+        <div class="ai-tool-modal-footer">
+          <span id="smtpStatus" class="muted" style="margin-right:auto"></span>
+          <button id="testSmtpBtn" class="btn--muted">Send Test</button>
+          <button id="saveSmtpBtn" class="btn--primary">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI Tool: Call Transfer Modal -->
+    <div id="aiToolTransferModal" class="ai-tool-modal">
+      <div class="ai-tool-modal-card">
+        <div class="ai-tool-modal-header">
+          <span class="ai-tool-modal-icon">📞</span>
+          <span class="ai-tool-modal-title">Call Transfer</span>
+          <button type="button" class="ai-tool-modal-close" onclick="closeToolModal('transfer')">&times;</button>
+        </div>
+        <div class="muted" style="margin-bottom:14px">Set the default transfer destination for AI agents. You can override this per agent in the agent editor.</div>
+        <div class="ai-tool-modal-body">
+          <div>
+            <label>Transfer Destination</label>
+            <input id="aiTransferNumber" type="text" placeholder="E.164 format like +18005551234 or sip:agent@domain">
+          </div>
+        </div>
+        <div class="ai-tool-modal-footer">
+          <span id="aiTransferStatus" class="muted" style="margin-right:auto"></span>
+          <button id="saveAiTransferBtn" class="btn--primary">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI Tool: SMS Modal -->
+    <div id="aiToolSmsModal" class="ai-tool-modal">
+      <div class="ai-tool-modal-card">
+        <div class="ai-tool-modal-header">
+          <span class="ai-tool-modal-icon">💬</span>
+          <span class="ai-tool-modal-title">SMS</span>
+          <button type="button" class="ai-tool-modal-close" onclick="closeToolModal('sms')">&times;</button>
+        </div>
+        <div class="muted" style="margin-bottom:14px">Configure which phone numbers your AI agents can use to send SMS messages.</div>
+        <div class="ai-tool-modal-body">
+          <div>
+            <label>Allowed Outbound SMS DIDs</label>
+            <select id="aiSmsAllowedDidIds" multiple size="5" style="width:100%;box-sizing:border-box"></select>
+            <div class="muted" style="margin-top:4px;font-size:11px">Hold Ctrl (Windows) / ⌘ (Mac) to select multiple.</div>
+          </div>
+          <div>
+            <label>Default Outbound DID</label>
+            <select id="aiSmsDefaultDidId" style="width:100%;box-sizing:border-box">
+              <option value="">Auto (first allowed)</option>
+            </select>
+          </div>
+        </div>
+        <div class="ai-tool-modal-footer">
+          <span id="aiSmsSettingsStatus" class="muted" style="margin-right:auto"></span>
+          <button id="saveAiSmsSettingsBtn" class="btn--primary">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI Tool: Mail Modal -->
+    <div id="aiToolMailModal" class="ai-tool-modal">
+      <div class="ai-tool-modal-card">
+        <div class="ai-tool-modal-header">
+          <span class="ai-tool-modal-icon">📬</span>
+          <span class="ai-tool-modal-title">Mail (Return Address)</span>
+          <button type="button" class="ai-tool-modal-close" onclick="closeToolModal('mail')">&times;</button>
+        </div>
+        <div class="muted" style="margin-bottom:14px">Set the return address for physical mail sent via USPS.</div>
+        <div class="ai-tool-modal-body">
+          <div class="ai-tool-modal-row">
+            <div>
+              <label>Name</label>
+              <input id="mailFromName" type="text" placeholder="Optional">
+            </div>
+            <div>
+              <label>Organization</label>
+              <input id="mailFromOrg" type="text" placeholder="Optional">
+            </div>
+          </div>
+          <div>
+            <label>Address Line 1 *</label>
+            <input id="mailFromAddress1" type="text" placeholder="Street address">
+          </div>
+          <div>
+            <label>Address Line 2</label>
+            <input id="mailFromAddress2" type="text" placeholder="Optional">
+          </div>
+          <div class="ai-tool-modal-row">
+            <div>
+              <label>City *</label>
+              <input id="mailFromCity" type="text" placeholder="City">
+            </div>
+            <div>
+              <label>State *</label>
+              <input id="mailFromState" type="text" placeholder="State">
+            </div>
+          </div>
+          <div class="ai-tool-modal-row">
+            <div>
+              <label>ZIP *</label>
+              <input id="mailFromPostal" type="text" placeholder="ZIP code">
+            </div>
+            <div>
+              <label>Country</label>
+              <select id="mailFromCountry">
+                <option value="US">US</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="ai-tool-modal-footer">
+          <span id="mailSettingsStatus" class="muted" style="margin-right:auto"></span>
+          <button id="saveMailSettingsBtn" class="btn--primary">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI Tool: Document Templates Modal -->
+    <div id="aiToolDocTemplatesModal" class="ai-tool-modal">
+      <div class="ai-tool-modal-card" style="width:520px">
+        <div class="ai-tool-modal-header">
+          <span class="ai-tool-modal-icon">📄</span>
+          <span class="ai-tool-modal-title">Document Templates</span>
+          <button type="button" class="ai-tool-modal-close" onclick="closeToolModal('doctemplates')">&times;</button>
+        </div>
+        <div class="muted" style="margin-bottom:14px">Upload .docx files with placeholders like <code>[[Name]]</code> and <code>[[Address]]</code>.</div>
+        <div class="ai-tool-modal-body">
+          <div class="ai-tool-modal-row">
+            <div>
+              <label>Template Name</label>
+              <input id="docTemplateName" type="text" placeholder="e.g. Welcome Letter">
+            </div>
+            <div>
+              <label>File (.docx)</label>
+              <input id="docTemplateFile" type="file" accept=".docx">
+            </div>
+          </div>
+          <div style="text-align:right">
+            <button id="uploadDocTemplateBtn" class="btn--primary">Upload Template</button>
+          </div>
+          <div style="border-top:1px solid rgba(255,255,255,.10);padding-top:14px;margin-top:6px">
+            <label style="margin-bottom:8px;display:block">Uploaded Templates</label>
+            <table id="ai-doc-templates-table" style="display:none">
+              <thead><tr><th>Name</th><th>File</th><th>Updated</th><th>Actions</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div id="ai-doc-templates-empty" class="muted">No templates uploaded yet.</div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
@@ -1562,12 +1881,7 @@
       aiSubtabs.tools.addEventListener('click', (e) => {
         e.preventDefault();
         activateAiSubtab('tools');
-        loadSmtpSettings();
-        loadAiTransferSettings();
-        loadAiSmsDidOptions();
-        loadAiSmsSettings();
-        loadMailSettings();
-        loadDocTemplates();
+        refreshToolCardStatuses();
       });
     }
     if (aiSubtabs.conversations) {
@@ -4286,6 +4600,114 @@
       const still = Array.from(sel.options || []).some(o => String(o.value) === current);
       sel.value = still ? current : '';
     }
+
+    // ========== AI Tool Modal Functions ==========
+    const toolModalIds = {
+      smtp: 'aiToolSmtpModal',
+      transfer: 'aiToolTransferModal',
+      sms: 'aiToolSmsModal',
+      mail: 'aiToolMailModal',
+      doctemplates: 'aiToolDocTemplatesModal'
+    };
+
+    function openToolModal(toolName) {
+      const modalId = toolModalIds[toolName];
+      if (!modalId) return;
+      const modal = document.getElementById(modalId);
+      if (modal) {
+        modal.style.display = 'flex';
+        // Load data for this tool
+        if (toolName === 'smtp') loadSmtpSettings();
+        if (toolName === 'transfer') loadAiTransferSettings();
+        if (toolName === 'sms') { loadAiSmsDidOptions(); loadAiSmsSettings(); }
+        if (toolName === 'mail') loadMailSettings();
+        if (toolName === 'doctemplates') loadDocTemplates();
+      }
+    }
+
+    function closeToolModal(toolName) {
+      const modalId = toolModalIds[toolName];
+      if (!modalId) return;
+      const modal = document.getElementById(modalId);
+      if (modal) modal.style.display = 'none';
+      // Refresh tool cards status after closing
+      refreshToolCardStatuses();
+    }
+
+    function updateToolCardStatus(cardId, isConfigured, label) {
+      const statusEl = document.getElementById(cardId);
+      if (!statusEl) return;
+      const badge = statusEl.querySelector('.ai-tool-status-badge');
+      if (!badge) return;
+      badge.className = 'ai-tool-status-badge ' + (isConfigured ? 'ai-tool-status-configured' : 'ai-tool-status-unconfigured');
+      badge.textContent = label || (isConfigured ? 'Configured' : 'Not configured');
+    }
+
+    async function refreshToolCardStatuses() {
+      // SMTP status
+      try {
+        const r = await fetch('/api/me/smtp-settings');
+        const j = await r.json();
+        const d = j && j.data;
+        const configured = !!(d && d.has_password && d.host && d.from_email);
+        updateToolCardStatus('smtpCardStatus', configured);
+      } catch (e) {}
+
+      // Transfer status
+      try {
+        const r = await fetch('/api/me/ai/transfer-settings');
+        const j = await r.json();
+        const d = j && j.data;
+        const configured = !!(d && d.transfer_to_number);
+        updateToolCardStatus('transferCardStatus', configured);
+      } catch (e) {}
+
+      // SMS status
+      try {
+        const r = await fetch('/api/me/ai/sms-settings');
+        const j = await r.json();
+        const d = j && j.data;
+        const allowed = Array.isArray(d?.allowed_didww_did_ids) ? d.allowed_didww_did_ids : [];
+        const configured = allowed.length > 0;
+        updateToolCardStatus('smsCardStatus', configured);
+      } catch (e) {}
+
+      // Mail status
+      try {
+        const r = await fetch('/api/me/ai/mail-settings');
+        const j = await r.json();
+        const d = j && j.data;
+        const configured = !!(d && d.address1 && d.city && d.state && d.postal_code);
+        updateToolCardStatus('mailCardStatus', configured);
+      } catch (e) {}
+
+      // Doc templates status
+      try {
+        const r = await fetch('/api/me/ai/doc-templates');
+        const j = await r.json();
+        const templates = Array.isArray(j?.data) ? j.data : [];
+        const count = templates.length;
+        updateToolCardStatus('docTemplatesCardStatus', count > 0, count > 0 ? `${count} template${count > 1 ? 's' : ''}` : 'Not configured');
+      } catch (e) {}
+    }
+
+    // Tool card click handlers
+    document.addEventListener('click', function(e) {
+      const card = e.target.closest('.ai-tool-card');
+      if (card && card.dataset.tool) {
+        openToolModal(card.dataset.tool);
+      }
+    });
+
+    // Close modal when clicking outside
+    document.querySelectorAll('.ai-tool-modal').forEach(modal => {
+      modal.addEventListener('click', function(e) {
+        if (e.target === modal) {
+          const toolName = Object.keys(toolModalIds).find(k => toolModalIds[k] === modal.id);
+          if (toolName) closeToolModal(toolName);
+        }
+      });
+    });
 
     async function loadSmtpSettings(){
       const status = $('#smtpStatus');
