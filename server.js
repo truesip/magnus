@@ -4261,30 +4261,27 @@ app.post('/api/admin/users/:id/adjust-balance', requireAdmin, async (req, res) =
       return res.status(400).json({ success: false, message: 'User does not have a linked MagnusBilling account' });
     }
     
-    // Adjust balance in MagnusBilling
+    // Use the proper applyMagnusCreditDelta function which handles MagnusBilling refills correctly
     const httpsAgent = magnusBillingAgent;
     const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
     
-    const params = new URLSearchParams();
-    params.append('module', 'user');
-    params.append('action', 'addcredit');
-    params.append('id', String(user.magnus_user_id));
-    params.append('credit', String(amount));
-    params.append('description', description);
+    const result = await applyMagnusCreditDelta({
+      localUserId: userId,
+      magnusUserId: user.magnus_user_id,
+      amountDelta: amount,
+      description: `[Admin] ${description}`,
+      httpsAgent,
+      hostHeader,
+      label: 'admin.adjust-balance'
+    });
     
-    const resp = await mbSignedCall({ relPath: '/index.php/user/addcredit', params, httpsAgent, hostHeader });
-    const success = resp?.data?.success !== false;
+    if (DEBUG) console.log('[admin.adjust-balance]', { userId, amount, description, result, by: req.session.userId });
     
-    // Record in billing history
-    await pool.execute(
-      `INSERT INTO billing_history (user_id, amount, description, status, magnus_response) VALUES (?, ?, ?, ?, ?)`,
-      [userId, amount, `[Admin] ${description}`, success ? 'completed' : 'failed', JSON.stringify(resp?.data || {})]
-    );
-    
-    if (DEBUG) console.log('[admin.adjust-balance]', { userId, amount, description, success, by: req.session.userId });
-    
-    if (!success) {
-      return res.status(500).json({ success: false, message: 'MagnusBilling credit adjustment failed' });
+    if (!result.ok) {
+      const reason = result.reason === 'insufficient_funds' 
+        ? 'Insufficient balance for deduction' 
+        : 'MagnusBilling credit adjustment failed';
+      return res.status(500).json({ success: false, message: reason });
     }
     
     return res.json({ success: true, message: `Balance adjusted by $${amount.toFixed(2)}` });
