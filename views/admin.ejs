@@ -400,6 +400,16 @@
 </div>
 
 <script>
+// Section navigation - defined globally so onclick handlers work
+function showSection(id) {
+  document.querySelectorAll('main > section').forEach(function(s) { s.style.display = 'none'; });
+  var section = document.getElementById(id);
+  if (section) section.style.display = 'block';
+  document.querySelectorAll('aside a[data-section]').forEach(function(a) { a.classList.remove('active'); });
+  var link = document.querySelector('aside a[data-section="' + id + '"]');
+  if (link) link.classList.add('active');
+}
+
 (function(){
   let stats = null;
   let users = [];
@@ -410,16 +420,6 @@
   loadStats();
   loadUsers(0);
   loadIntegrations();
-
-  // Section navigation
-  window.showSection = function(id) {
-    document.querySelectorAll('main > section').forEach(s => s.style.display = 'none');
-    const section = document.getElementById(id);
-    if (section) section.style.display = 'block';
-    document.querySelectorAll('aside a[data-section]').forEach(a => a.classList.remove('active'));
-    const link = document.querySelector(`aside a[data-section="${id}"]`);
-    if (link) link.classList.add('active');
-  };
 
   // Format currency
   function fmt(n, decimals = 2) {
