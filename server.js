@@ -8539,6 +8539,125 @@ app.get('/api/me/dialer/campaigns/:campaignId/stats', requireAuth, async (req, r
   }
 });
 
+// Get leads filtered by status (for viewing Done, Failed, Voicemail, Transferred numbers)
+app.get('/api/me/dialer/campaigns/:campaignId/leads-by-status', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const campaignId = Number(req.params.campaignId || 0);
+    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
+    
+    const campaign = await fetchDialerCampaignById({ userId, campaignId });
+    if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
+    
+    const status = String(req.query.status || '').trim().toLowerCase();
+    const page = Math.max(0, parseInt(req.query.page || '0', 10));
+    const pageSize = Math.max(1, Math.min(100, parseInt(req.query.pageSize || '50', 10)));
+    const offset = page * pageSize;
+    
+    // Map UI status names to database status values
+    // Lead statuses: pending, queued, dialing, completed, failed
+    // Call results: answered, voicemail, transferred, no-answer, busy, failed
+    let whereStatus = [];
+    let joinCallLogs = false;
+    
+    if (status === 'completed' || status === 'done') {
+      whereStatus = ['completed'];
+    } else if (status === 'failed') {
+      whereStatus = ['failed'];
+    } else if (status === 'pending') {
+      whereStatus = ['pending', 'queued'];
+    } else if (status === 'inprogress' || status === 'live') {
+      whereStatus = ['dialing'];
+    } else if (status === 'voicemail') {
+      // Voicemail comes from call_logs result, not lead status
+      joinCallLogs = true;
+    } else if (status === 'transferred') {
+      // Transferred comes from call_logs result
+      joinCallLogs = true;
+    } else {
+      // Return all if no valid status filter
+      whereStatus = [];
+    }
+    
+    let rows = [];
+    let total = 0;
+    
+    if (joinCallLogs && (status === 'voicemail' || status === 'transferred')) {
+      // Query by call log result
+      const [[countRow]] = await pool.execute(
+        `SELECT COUNT(DISTINCT l.id) AS cnt 
+         FROM dialer_leads l
+         INNER JOIN dialer_call_logs c ON c.lead_id = l.id
+         WHERE l.campaign_id = ? AND l.user_id = ? AND c.result = ?`,
+        [campaignId, userId, status]
+      );
+      total = countRow?.cnt ? Number(countRow.cnt) : 0;
+      
+      [rows] = await pool.query(
+        `SELECT DISTINCT l.id, l.phone_number, l.lead_name, l.status, l.attempt_count, l.last_call_at, l.created_at,
+                c.result as call_result, c.duration_sec
+         FROM dialer_leads l
+         INNER JOIN dialer_call_logs c ON c.lead_id = l.id
+         WHERE l.campaign_id = ? AND l.user_id = ? AND c.result = ?
+         ORDER BY l.last_call_at DESC
+         LIMIT ${Number(pageSize)} OFFSET ${Number(offset)}`,
+        [campaignId, userId, status]
+      );
+    } else if (whereStatus.length > 0) {
+      // Query by lead status
+      const placeholders = whereStatus.map(() => '?').join(',');
+      const [[countRow]] = await pool.execute(
+        `SELECT COUNT(*) AS cnt FROM dialer_leads WHERE campaign_id = ? AND user_id = ? AND status IN (${placeholders})`,
+        [campaignId, userId, ...whereStatus]
+      );
+      total = countRow?.cnt ? Number(countRow.cnt) : 0;
+      
+      [rows] = await pool.query(
+        `SELECT id, phone_number, lead_name, status, attempt_count, last_call_at, created_at
+         FROM dialer_leads
+         WHERE campaign_id = ? AND user_id = ? AND status IN (${placeholders})
+         ORDER BY last_call_at DESC, created_at DESC
+         LIMIT ${Number(pageSize)} OFFSET ${Number(offset)}`,
+        [campaignId, userId, ...whereStatus]
+      );
+    } else {
+      // Return all leads
+      const [[countRow]] = await pool.execute(
+        'SELECT COUNT(*) AS cnt FROM dialer_leads WHERE campaign_id = ? AND user_id = ?',
+        [campaignId, userId]
+      );
+      total = countRow?.cnt ? Number(countRow.cnt) : 0;
+      
+      [rows] = await pool.query(
+        `SELECT id, phone_number, lead_name, status, attempt_count, last_call_at, created_at
+         FROM dialer_leads
+         WHERE campaign_id = ? AND user_id = ?
+         ORDER BY last_call_at DESC, created_at DESC
+         LIMIT ${Number(pageSize)} OFFSET ${Number(offset)}`,
+        [campaignId, userId]
+      );
+    }
+    
+    const data = (rows || []).map(r => ({
+      id: Number(r.id),
+      phone_number: r.phone_number,
+      lead_name: r.lead_name || '',
+      status: r.status,
+      call_result: r.call_result || null,
+      duration_sec: r.duration_sec != null ? Number(r.duration_sec) : null,
+      attempt_count: Number(r.attempt_count || 0),
+      last_call_at: r.last_call_at ? new Date(r.last_call_at).toISOString() : null,
+      created_at: r.created_at ? new Date(r.created_at).toISOString() : null
+    }));
+    
+    return res.json({ success: true, data, page, pageSize, total, status: status || 'all' });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.leads.by-status] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load leads' });
+  }
+});
+
 // Debug endpoint: manually update call status for testing
 app.post('/api/me/dialer/debug/update-call-status', requireAuth, async (req, res) => {
   try {

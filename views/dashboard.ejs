@@ -1499,6 +1499,40 @@
       </div>
     </div>
 
+    <!-- Dialer Leads by Status Modal -->
+    <div id="dialerLeadsModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
+      <div style="background:linear-gradient(180deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.05) 100%);border:1px solid rgba(255,255,255,.12);box-shadow:var(--shadow-sm);padding:16px;border-radius:14px;width:680px;max-width:94%;max-height:92vh;overflow:auto;color:var(--text)">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+          <h3 style="margin:0" id="dialerLeadsModalTitle">📞 Leads</h3>
+          <span class="muted" style="font-size:12px" id="dialerLeadsModalSubtitle"></span>
+          <div style="margin-left:auto"></div>
+          <button id="dialerLeadsCloseBtn" class="btn--muted" type="button">Close</button>
+        </div>
+        <div id="dialerLeadsStatus" class="muted" style="font-size:12px;margin-bottom:10px;color:rgba(255,255,255,.60)"></div>
+        <div id="dialerLeadsTableWrap" style="max-height:400px;overflow:auto">
+          <table id="dialerLeadsTable" class="table table-sm" style="width:100%;font-size:12px">
+            <thead>
+              <tr>
+                <th>Phone</th>
+                <th>Name</th>
+                <th>Result</th>
+                <th>Duration</th>
+                <th>Attempts</th>
+                <th>Last Call</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div id="dialerLeadsEmpty" class="muted" style="display:none;text-align:center;padding:20px 0;color:rgba(255,255,255,.60)">No leads found for this status.</div>
+        <div id="dialerLeadsPager" style="display:none;margin-top:12px;justify-content:space-between;align-items:center">
+          <button id="dialerLeadsPrev" class="btn--muted">← Prev</button>
+          <span id="dialerLeadsPageInfo" class="muted" style="font-size:12px"></span>
+          <button id="dialerLeadsNext" class="btn--muted">Next →</button>
+        </div>
+      </div>
+    </div>
+
     <!-- AI Agent Template Selection Modal -->
     <div id="aiTemplateModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9997;align-items:center;justify-content:center">
       <div class="ai-agent-modal-card" style="background:#fff;padding:18px;border-radius:14px;width:520px;max-width:94%;max-height:92vh;overflow:auto">
@@ -2022,16 +2056,21 @@
       return num.toLocaleString();
     }
 
-    function dialerStatsChips(stats){
+    function dialerStatsChips(stats, campaignId){
       const s = stats || {};
+      const cid = campaignId ? escapeHtml(String(campaignId)) : '';
       return [
-        { label: 'Pending', value: s.pending },
-        { label: 'Live', value: s.inProgress },
-        { label: 'Done', value: s.completed },
-        { label: 'Failed', value: s.failed },
-        { label: 'Voicemail', value: s.voicemail },
-        { label: 'Transferred', value: s.transferred }
-      ].map(item => `<span class="dialer-chip"><strong>${dialerNumber(item.value)}</strong> ${escapeHtml(item.label)}</span>`).join('');
+        { label: 'Pending', value: s.pending, status: 'pending', clickable: true },
+        { label: 'Live', value: s.inProgress, status: 'inprogress', clickable: true },
+        { label: 'Done', value: s.completed, status: 'done', clickable: true },
+        { label: 'Failed', value: s.failed, status: 'failed', clickable: true },
+        { label: 'Voicemail', value: s.voicemail, status: 'voicemail', clickable: true },
+        { label: 'Transferred', value: s.transferred, status: 'transferred', clickable: true }
+      ].map(item => {
+        const dataAttrs = item.clickable && cid ? `data-leads-status="${item.status}" data-leads-campaign="${cid}"` : '';
+        const cursorStyle = item.clickable && cid ? 'cursor:pointer;' : '';
+        return `<span class="dialer-chip" ${dataAttrs} style="${cursorStyle}"><strong>${dialerNumber(item.value)}</strong> ${escapeHtml(item.label)}</span>`;
+      }).join('');
     }
 
     function findDialerCampaign(id){
@@ -2090,7 +2129,7 @@
           <td>
             <div style="font-weight:700">${escapeHtml(c.name || '')}</div>
             <div class="muted" style="font-size:11px">Updated ${escapeHtml(updatedAt)}</div>
-            <div class="dialer-chip-grid">${dialerStatsChips(stats)}</div>
+            <div class="dialer-chip-grid">${dialerStatsChips(stats, c.id)}</div>
           </td>
           <td>${escapeHtml(aiName)}</td>
           <td>${escapeHtml(leadsSummary)}</td>
@@ -2340,6 +2379,133 @@
       }
     }
 
+    // ========== Dialer Leads by Status ==========
+    let dialerLeadsCampaignId = null;
+    let dialerLeadsStatus = null;
+    let dialerLeadsPage = 0;
+    const dialerLeadsPageSize = 50;
+    let dialerLeadsTotal = 0;
+    let dialerLeadsData = [];
+
+    function openDialerLeadsModal(campaignId, status){
+      dialerLeadsCampaignId = campaignId;
+      dialerLeadsStatus = status;
+      dialerLeadsPage = 0;
+      dialerLeadsData = [];
+      dialerLeadsTotal = 0;
+      const modal = $('#dialerLeadsModal');
+      if (!modal) return;
+      const campaign = findDialerCampaign(campaignId);
+      const campaignName = campaign ? (campaign.name || `Campaign ${campaignId}`) : `Campaign ${campaignId}`;
+      const statusLabel = { pending: 'Pending', inprogress: 'Live', done: 'Done', failed: 'Failed', voicemail: 'Voicemail', transferred: 'Transferred' }[status] || status;
+      $('#dialerLeadsModalTitle').textContent = `📞 ${statusLabel} Leads`;
+      $('#dialerLeadsModalSubtitle').textContent = campaignName;
+      $('#dialerLeadsStatus').textContent = 'Loading…';
+      $('#dialerLeadsTable').querySelector('tbody').innerHTML = '';
+      $('#dialerLeadsEmpty').style.display = 'none';
+      $('#dialerLeadsPager').style.display = 'none';
+      modal.style.display = 'flex';
+      loadDialerLeadsByStatus();
+    }
+
+    function closeDialerLeadsModal(){
+      const modal = $('#dialerLeadsModal');
+      if (modal) modal.style.display = 'none';
+      dialerLeadsCampaignId = null;
+      dialerLeadsStatus = null;
+    }
+
+    async function loadDialerLeadsByStatus(){
+      const statusEl = $('#dialerLeadsStatus');
+      if (statusEl) statusEl.textContent = 'Loading…';
+      try {
+        const url = `/api/me/dialer/campaigns/${encodeURIComponent(dialerLeadsCampaignId)}/leads-by-status?status=${encodeURIComponent(dialerLeadsStatus)}&page=${dialerLeadsPage}&pageSize=${dialerLeadsPageSize}`;
+        const r = await fetch(url);
+        const j = await r.json();
+        if (!r.ok || !j || j.success === false){
+          throw new Error(j?.message || 'Failed to load leads');
+        }
+        dialerLeadsData = Array.isArray(j.data) ? j.data : [];
+        dialerLeadsTotal = typeof j.total === 'number' ? j.total : dialerLeadsData.length;
+        renderDialerLeadsTable();
+        if (statusEl) statusEl.textContent = dialerLeadsTotal ? `${dialerLeadsTotal} lead${dialerLeadsTotal === 1 ? '' : 's'} found.` : '';
+      } catch (err) {
+        console.error('[dialer.leads]', err);
+        dialerLeadsData = [];
+        renderDialerLeadsTable();
+        if (statusEl) { statusEl.textContent = err?.message || 'Failed to load leads'; statusEl.style.color = '#f87171'; }
+      }
+    }
+
+    function renderDialerLeadsTable(){
+      const table = $('#dialerLeadsTable');
+      const empty = $('#dialerLeadsEmpty');
+      const pager = $('#dialerLeadsPager');
+      const pageInfo = $('#dialerLeadsPageInfo');
+      if (!table) return;
+      const tbody = table.querySelector('tbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+
+      if (!dialerLeadsData.length){
+        table.style.display = 'none';
+        if (empty) empty.style.display = 'block';
+        if (pager) pager.style.display = 'none';
+        return;
+      }
+
+      table.style.display = 'table';
+      if (empty) empty.style.display = 'none';
+
+      const totalPages = Math.max(1, Math.ceil(dialerLeadsTotal / dialerLeadsPageSize));
+      if (pager) pager.style.display = totalPages > 1 ? 'flex' : 'none';
+      if (pageInfo) pageInfo.textContent = totalPages > 1 ? `Page ${dialerLeadsPage + 1} of ${totalPages}` : '';
+
+      for (const lead of dialerLeadsData){
+        const phone = lead.phone_number || '—';
+        const name = lead.lead_name || '—';
+        const result = lead.call_result || lead.status || '—';
+        const duration = lead.duration_sec != null ? `${lead.duration_sec}s` : '—';
+        const attempts = lead.attempt_count != null ? lead.attempt_count : '—';
+        const lastCall = lead.last_call_at ? new Date(lead.last_call_at).toLocaleString() : '—';
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td style="font-family:monospace">${escapeHtml(phone)}</td>
+          <td>${escapeHtml(name)}</td>
+          <td>${escapeHtml(result)}</td>
+          <td>${escapeHtml(duration)}</td>
+          <td>${escapeHtml(String(attempts))}</td>
+          <td>${escapeHtml(lastCall)}</td>`;
+        tbody.appendChild(tr);
+      }
+    }
+
+    function initDialerLeadsUi(){
+      const closeBtn = $('#dialerLeadsCloseBtn');
+      if (closeBtn) closeBtn.addEventListener('click', (e) => { e.preventDefault(); closeDialerLeadsModal(); });
+
+      const modal = $('#dialerLeadsModal');
+      if (modal) modal.addEventListener('click', (e) => { if (e.target === modal) closeDialerLeadsModal(); });
+
+      const prevBtn = $('#dialerLeadsPrev');
+      if (prevBtn) prevBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (dialerLeadsPage > 0){
+          dialerLeadsPage -= 1;
+          loadDialerLeadsByStatus();
+        }
+      });
+
+      const nextBtn = $('#dialerLeadsNext');
+      if (nextBtn) nextBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        if ((dialerLeadsPage + 1) * dialerLeadsPageSize < dialerLeadsTotal){
+          dialerLeadsPage += 1;
+          loadDialerLeadsByStatus();
+        }
+      });
+    }
+
     function initDialerUi(){
       if (dialerUiInit) return;
       dialerUiInit = true;
@@ -2379,6 +2545,17 @@
       const table = $('#dialer-campaigns-table');
       if (table){
         table.addEventListener('click', (e) => {
+          // Handle status chip clicks for viewing leads
+          const chip = e.target.closest?.('[data-leads-status]');
+          if (chip){
+            const campaignId = chip.getAttribute('data-leads-campaign');
+            const status = chip.getAttribute('data-leads-status');
+            if (campaignId && status){
+              openDialerLeadsModal(campaignId, status);
+              return;
+            }
+          }
+          // Handle action button clicks
           const btn = e.target.closest?.('[data-dialer-action]');
           if (!btn) return;
           const id = btn.getAttribute('data-id');
@@ -2393,6 +2570,8 @@
           }
         });
       }
+
+      initDialerLeadsUi();
 
       const prevBtn = $('#dialerPrev');
       if (prevBtn) prevBtn.addEventListener('click', (e) => {
