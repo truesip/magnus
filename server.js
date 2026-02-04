@@ -4045,12 +4045,13 @@ app.get('/api/admin/users', requireAdmin, async (req, res) => {
       params
     );
     
-    const [users] = await pool.execute(
+    // Use query() instead of execute() for LIMIT/OFFSET - they need to be interpolated as integers
+    const [users] = await pool.query(
       `SELECT id, magnus_user_id, username, email, firstname, lastname, phone, is_admin, suspended, created_at
        FROM signup_users ${whereClause}
        ORDER BY ${sortCol} ${sortDir}
-       LIMIT ? OFFSET ?`,
-      [...params, limit, offset]
+       LIMIT ${Number(limit)} OFFSET ${Number(offset)}`,
+      params
     );
     
     // Fetch additional data for each user
