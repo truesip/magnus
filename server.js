@@ -13256,6 +13256,57 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
       if (DEBUG) console.warn('[me.stats.ai.mail] failed:', e.message || e);
     }
 
+    // Status breakdowns for pie charts
+    let emailStatusBreakdown = [];
+    try {
+      const [rows] = await pool.execute(
+        `SELECT status, COUNT(*) AS count FROM ai_email_sends WHERE user_id = ? GROUP BY status`,
+        [userId]
+      );
+      emailStatusBreakdown = rows.map(r => ({ status: r.status || 'unknown', count: Number(r.count || 0) }));
+    } catch (e) {
+      if (DEBUG) console.warn('[me.stats.ai.emailBreakdown] failed:', e.message || e);
+    }
+
+    let smsStatusBreakdown = [];
+    try {
+      const [rows] = await pool.execute(
+        `SELECT status, dlr_status, COUNT(*) AS count FROM ai_sms_sends WHERE user_id = ? GROUP BY status, dlr_status`,
+        [userId]
+      );
+      smsStatusBreakdown = rows.map(r => ({
+        status: r.status || 'unknown',
+        dlr_status: r.dlr_status || null,
+        count: Number(r.count || 0)
+      }));
+    } catch (e) {
+      if (DEBUG) console.warn('[me.stats.ai.smsBreakdown] failed:', e.message || e);
+    }
+
+    let mailStatusBreakdown = [];
+    try {
+      const [rows] = await pool.execute(
+        `SELECT status, COUNT(*) AS count FROM ai_mail_sends WHERE user_id = ? GROUP BY status`,
+        [userId]
+      );
+      mailStatusBreakdown = rows.map(r => ({ status: r.status || 'unknown', count: Number(r.count || 0) }));
+    } catch (e) {
+      if (DEBUG) console.warn('[me.stats.ai.mailBreakdown] failed:', e.message || e);
+    }
+
+    let meetingStatusBreakdown = [];
+    try {
+      const [rows] = await pool.execute(
+        `SELECT status, COUNT(*) AS count FROM ai_email_sends 
+         WHERE user_id = ? AND (meeting_provider IS NOT NULL OR meeting_room_url IS NOT NULL OR meeting_join_url IS NOT NULL)
+         GROUP BY status`,
+        [userId]
+      );
+      meetingStatusBreakdown = rows.map(r => ({ status: r.status || 'unknown', count: Number(r.count || 0) }));
+    } catch (e) {
+      if (DEBUG) console.warn('[me.stats.ai.meetingBreakdown] failed:', e.message || e);
+    }
+
     // Inbound calls grouped by day from user_did_cdrs (DIDWW) + ai_call_logs (Daily/Pipecat)
     let inboundCount = 0;
     const inboundByDayMap = new Map();
@@ -13400,6 +13451,12 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
       },
       series: {
         callsByDay
+      },
+      statusBreakdowns: {
+        email: emailStatusBreakdown,
+        sms: smsStatusBreakdown,
+        mail: mailStatusBreakdown,
+        meeting: meetingStatusBreakdown
       }
     });
   } catch (e) {

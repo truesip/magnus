@@ -325,6 +325,30 @@
     #callsChartContainer{margin-top:8px;margin-bottom:16px;background:rgba(255,255,255,.05);border-radius:16px;border:1px solid rgba(255,255,255,.10);padding:12px}
     #callsChart{width:100%;max-height:220px}
 
+    /* Pie charts grid */
+    .pie-charts-grid{
+      display:grid;
+      grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+      gap:16px;
+      margin-bottom:16px;
+    }
+    .pie-chart-card{
+      background:rgba(255,255,255,.05);
+      border-radius:16px;
+      border:1px solid rgba(255,255,255,.10);
+      padding:14px;
+      text-align:center;
+    }
+    .pie-chart-title{
+      font-size:13px;
+      font-weight:700;
+      color:rgba(255,255,255,.80);
+      margin-bottom:10px;
+    }
+    .pie-chart-card canvas{
+      max-height:180px;
+    }
+
     /* AI Agent modal (compact) */
     #aiAgentModal .ai-agent-modal-card{font-size:12px}
     #aiAgentModal .ai-agent-modal-card label{font-size:12px !important}
@@ -812,19 +836,47 @@
               <div class="kpi-value" id="kpiSipTotal">–</div>
             </div>
             <div class="kpi-card">
-              <div class="kpi-label">AI Agent</div>
-              <div class="kpi-sub"><span id="kpiAiEmailsSent">–</span> emails sent</div>
+              <div class="kpi-label">AI Agents</div>
+              <div class="kpi-sub" id="kpiAiAgentsSub"></div>
               <div class="kpi-value" id="kpiAiAgents">–</div>
             </div>
-            <div class="kpi-card">
-              <div class="kpi-label">Meeting + Mail</div>
-              <div class="kpi-sub"><span id="kpiAiMeetingLinksSent">–</span> meeting links • <span id="kpiAiPhysicalMailSent">–</span> mail</div>
-              <div class="kpi-value" id="kpiAiMeetingMailTotal">–</div>
-            </div>
           </div>
+
           <div id="callsChartContainer">
             <div class="muted" id="statsRangeText" style="margin-bottom:4px;"></div>
             <canvas id="callsChart"></canvas>
+          </div>
+
+          <div class="muted" style="margin:16px 0 8px 0;font-weight:700">Inbound vs Outbound Calls</div>
+          <div class="pie-charts-grid">
+            <div class="pie-chart-card">
+              <div class="pie-chart-title">Call Distribution</div>
+              <canvas id="callDistributionChart"></canvas>
+            </div>
+          </div>
+
+          <div class="muted" style="margin:16px 0 8px 0;font-weight:700">AI Communication Status</div>
+          <div class="pie-charts-grid">
+            <div class="pie-chart-card">
+              <div class="pie-chart-title">Emails</div>
+              <canvas id="emailStatusChart"></canvas>
+              <div id="emailStatusEmpty" class="muted" style="text-align:center;padding:20px;display:none">No emails sent yet</div>
+            </div>
+            <div class="pie-chart-card">
+              <div class="pie-chart-title">SMS</div>
+              <canvas id="smsStatusChart"></canvas>
+              <div id="smsStatusEmpty" class="muted" style="text-align:center;padding:20px;display:none">No SMS sent yet</div>
+            </div>
+            <div class="pie-chart-card">
+              <div class="pie-chart-title">Meeting Links</div>
+              <canvas id="meetingStatusChart"></canvas>
+              <div id="meetingStatusEmpty" class="muted" style="text-align:center;padding:20px;display:none">No meeting links sent yet</div>
+            </div>
+            <div class="pie-chart-card">
+              <div class="pie-chart-title">Physical Mail</div>
+              <canvas id="mailStatusChart"></canvas>
+              <div id="mailStatusEmpty" class="muted" style="text-align:center;padding:20px;display:none">No mail sent yet</div>
+            </div>
           </div>
         </div>
       </section>
@@ -6056,6 +6108,90 @@ Guidelines:
     });
 
     let callsChart = null;
+    let callDistributionChart = null;
+    let emailStatusChart = null;
+    let smsStatusChart = null;
+    let meetingStatusChart = null;
+    let mailStatusChart = null;
+
+    const STATUS_COLORS = {
+      completed: 'rgba(16,185,129,0.8)',
+      pending: 'rgba(245,158,11,0.8)',
+      failed: 'rgba(239,68,68,0.8)',
+      submitted: 'rgba(59,130,246,0.8)',
+      unknown: 'rgba(156,163,175,0.8)',
+      delivered: 'rgba(34,211,238,0.8)',
+      sent: 'rgba(79,70,229,0.8)',
+      queued: 'rgba(167,139,250,0.8)'
+    };
+
+    function getStatusColor(status) {
+      const s = String(status || '').toLowerCase();
+      return STATUS_COLORS[s] || STATUS_COLORS.unknown;
+    }
+
+    function formatStatusLabel(status) {
+      const s = String(status || 'unknown');
+      return s.charAt(0).toUpperCase() + s.slice(1);
+    }
+
+    function renderPieChart(canvasId, emptyId, data, chartRef) {
+      const canvas = document.getElementById(canvasId);
+      const emptyEl = document.getElementById(emptyId);
+      if (!canvas || !window.Chart) return null;
+
+      const total = data.reduce((sum, d) => sum + d.count, 0);
+      if (total === 0) {
+        canvas.style.display = 'none';
+        if (emptyEl) emptyEl.style.display = 'block';
+        if (chartRef) { chartRef.destroy(); return null; }
+        return null;
+      }
+
+      canvas.style.display = 'block';
+      if (emptyEl) emptyEl.style.display = 'none';
+
+      const labels = data.map(d => formatStatusLabel(d.status));
+      const values = data.map(d => d.count);
+      const colors = data.map(d => getStatusColor(d.status));
+
+      const ctx = canvas.getContext('2d');
+      if (chartRef) {
+        chartRef.data.labels = labels;
+        chartRef.data.datasets[0].data = values;
+        chartRef.data.datasets[0].backgroundColor = colors;
+        chartRef.update();
+        return chartRef;
+      }
+
+      return new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels,
+          datasets: [{ data: values, backgroundColor: colors, borderWidth: 0 }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: true,
+          plugins: {
+            legend: {
+              position: 'bottom',
+              labels: { color: 'rgba(255,255,255,.72)', font: { size: 10 }, boxWidth: 12 }
+            },
+            tooltip: {
+              callbacks: {
+                label: function(context) {
+                  const val = context.raw || 0;
+                  const pct = total > 0 ? ((val / total) * 100).toFixed(1) : 0;
+                  return `${context.label}: ${val} (${pct}%)`;
+                }
+              }
+            }
+          }
+        }
+      });
+    }
+
     async function loadStats(){
       try{
         const fromInput = document.getElementById('from');
@@ -6083,10 +6219,7 @@ Guidelines:
         const elSipTotal = document.getElementById('kpiSipTotal');
         const elSipOnline = document.getElementById('kpiSipOnline');
         const elAiAgents = document.getElementById('kpiAiAgents');
-        const elAiEmailsSent = document.getElementById('kpiAiEmailsSent');
-        const elAiMeetingLinksSent = document.getElementById('kpiAiMeetingLinksSent');
-        const elAiPhysicalMailSent = document.getElementById('kpiAiPhysicalMailSent');
-        const elAiMeetingMailTotal = document.getElementById('kpiAiMeetingMailTotal');
+        const elAiAgentsSub = document.getElementById('kpiAiAgentsSub');
         const elRange = document.getElementById('statsRangeText');
         if (elTotalDids) elTotalDids.textContent = (k.totalDids != null ? String(k.totalDids) : '–');
         if (elTotalDidsSub) {
@@ -6099,21 +6232,7 @@ Guidelines:
         if (elInbound) elInbound.textContent = (k.inboundCount != null ? String(k.inboundCount) : '–');
         if (elOutbound) elOutbound.textContent = (k.outboundCount != null ? String(k.outboundCount) : '–');
         if (elAiAgents) elAiAgents.textContent = (k.aiAgentCount != null ? String(k.aiAgentCount) : '–');
-        if (elAiEmailsSent) elAiEmailsSent.textContent = (k.aiEmailSentCount != null ? String(k.aiEmailSentCount) : '–');
-
-        if (elAiMeetingLinksSent) elAiMeetingLinksSent.textContent = (k.aiMeetingLinkSentCount != null ? String(k.aiMeetingLinkSentCount) : '–');
-        if (elAiPhysicalMailSent) elAiPhysicalMailSent.textContent = (k.aiPhysicalMailSentCount != null ? String(k.aiPhysicalMailSentCount) : '–');
-        if (elAiMeetingMailTotal) {
-          const m = (k.aiMeetingLinkSentCount != null ? Number(k.aiMeetingLinkSentCount) : null);
-          const p = (k.aiPhysicalMailSentCount != null ? Number(k.aiPhysicalMailSentCount) : null);
-          const hasM = Number.isFinite(m);
-          const hasP = Number.isFinite(p);
-          if (!hasM && !hasP) {
-            elAiMeetingMailTotal.textContent = '–';
-          } else {
-            elAiMeetingMailTotal.textContent = String((hasM ? m : 0) + (hasP ? p : 0));
-          }
-        }
+        if (elAiAgentsSub) elAiAgentsSub.textContent = '';
         if (elInboundToday) {
           if (k.inboundToday != null) elInboundToday.textContent = `Today: ${k.inboundToday}`;
           else elInboundToday.textContent = '';
@@ -6133,53 +6252,116 @@ Guidelines:
         if (elRange && range.from && range.to){
           elRange.textContent = `Calls from ${range.from} to ${range.to}`;
         }
+
+        // Daily calls bar chart
         const series = j.series || {};
         const byDay = Array.isArray(series.callsByDay) ? series.callsByDay : [];
         const labels = byDay.map(p=>p.date);
         const inboundData = byDay.map(p=>Number(p.inbound||0));
         const outboundData = byDay.map(p=>Number(p.outbound||0));
         const canvas = document.getElementById('callsChart');
-        if (!canvas || !window.Chart) return;
-        const ctx = canvas.getContext('2d');
-        if (!callsChart){
-          callsChart = new Chart(ctx, {
-            type: 'bar',
-            data: {
-              labels,
-              datasets: [
-                { label: 'Inbound', data: inboundData, backgroundColor: 'rgba(34,197,94,0.7)' },
-                { label: 'Outbound', data: outboundData, backgroundColor: 'rgba(59,130,246,0.7)' }
-              ]
-            },
-            options: {
-              responsive: true,
-              maintainAspectRatio: false,
-              scales: {
-                x: {
-                  stacked: false,
-                  ticks: { color: 'rgba(255,255,255,.72)' },
-                  grid: { color: 'rgba(255,255,255,.10)' }
-                },
-                y: {
-                  beginAtZero: true,
-                  ticks: { precision: 0, color: 'rgba(255,255,255,.72)' },
-                  grid: { color: 'rgba(255,255,255,.10)' }
-                }
+        if (canvas && window.Chart) {
+          const ctx = canvas.getContext('2d');
+          if (!callsChart){
+            callsChart = new Chart(ctx, {
+              type: 'bar',
+              data: {
+                labels,
+                datasets: [
+                  { label: 'Inbound', data: inboundData, backgroundColor: 'rgba(34,197,94,0.7)' },
+                  { label: 'Outbound', data: outboundData, backgroundColor: 'rgba(59,130,246,0.7)' }
+                ]
               },
-              plugins: {
-                legend: {
-                  position: 'bottom',
-                  labels: { color: 'rgba(255,255,255,.72)' }
+              options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                  x: {
+                    stacked: false,
+                    ticks: { color: 'rgba(255,255,255,.72)' },
+                    grid: { color: 'rgba(255,255,255,.10)' }
+                  },
+                  y: {
+                    beginAtZero: true,
+                    ticks: { precision: 0, color: 'rgba(255,255,255,.72)' },
+                    grid: { color: 'rgba(255,255,255,.10)' }
+                  }
+                },
+                plugins: {
+                  legend: {
+                    position: 'bottom',
+                    labels: { color: 'rgba(255,255,255,.72)' }
+                  }
                 }
               }
-            }
-          });
-        } else {
-          callsChart.data.labels = labels;
-          if (callsChart.data.datasets[0]) callsChart.data.datasets[0].data = inboundData;
-          if (callsChart.data.datasets[1]) callsChart.data.datasets[1].data = outboundData;
-          callsChart.update();
+            });
+          } else {
+            callsChart.data.labels = labels;
+            if (callsChart.data.datasets[0]) callsChart.data.datasets[0].data = inboundData;
+            if (callsChart.data.datasets[1]) callsChart.data.datasets[1].data = outboundData;
+            callsChart.update();
+          }
         }
+
+        // Call distribution pie chart (inbound vs outbound)
+        const totalInbound = inboundData.reduce((a, b) => a + b, 0);
+        const totalOutbound = outboundData.reduce((a, b) => a + b, 0);
+        const callDistCanvas = document.getElementById('callDistributionChart');
+        if (callDistCanvas && window.Chart && (totalInbound > 0 || totalOutbound > 0)) {
+          const cdCtx = callDistCanvas.getContext('2d');
+          if (!callDistributionChart) {
+            callDistributionChart = new Chart(cdCtx, {
+              type: 'doughnut',
+              data: {
+                labels: ['Inbound', 'Outbound'],
+                datasets: [{
+                  data: [totalInbound, totalOutbound],
+                  backgroundColor: ['rgba(34,197,94,0.8)', 'rgba(59,130,246,0.8)'],
+                  borderWidth: 0
+                }]
+              },
+              options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                plugins: {
+                  legend: {
+                    position: 'bottom',
+                    labels: { color: 'rgba(255,255,255,.72)', font: { size: 10 }, boxWidth: 12 }
+                  }
+                }
+              }
+            });
+          } else {
+            callDistributionChart.data.datasets[0].data = [totalInbound, totalOutbound];
+            callDistributionChart.update();
+          }
+        }
+
+        // Status breakdown pie charts
+        const breakdowns = j.statusBreakdowns || {};
+        emailStatusChart = renderPieChart('emailStatusChart', 'emailStatusEmpty', breakdowns.email || [], emailStatusChart);
+        meetingStatusChart = renderPieChart('meetingStatusChart', 'meetingStatusEmpty', breakdowns.meeting || [], meetingStatusChart);
+        mailStatusChart = renderPieChart('mailStatusChart', 'mailStatusEmpty', breakdowns.mail || [], mailStatusChart);
+
+        // SMS: combine status + dlr_status for better breakdown
+        const smsData = (breakdowns.sms || []).map(d => {
+          let label = d.status || 'unknown';
+          if (d.dlr_status && d.dlr_status !== d.status) {
+            label = d.dlr_status;
+          }
+          return { status: label, count: d.count };
+        });
+        // Aggregate by status
+        const smsAggregated = [];
+        const smsMap = new Map();
+        for (const d of smsData) {
+          const existing = smsMap.get(d.status);
+          if (existing) existing.count += d.count;
+          else smsMap.set(d.status, { status: d.status, count: d.count });
+        }
+        smsMap.forEach(v => smsAggregated.push(v));
+        smsStatusChart = renderPieChart('smsStatusChart', 'smsStatusEmpty', smsAggregated, smsStatusChart);
+
       }catch(e){
         console.error('[loadStats]', e);
       }
