@@ -1923,7 +1923,7 @@
 
     <!-- AI Tool: Square Payments Modal -->
     <div id="aiToolSquareModal" class="ai-tool-modal">
-      <div class="ai-tool-modal-card" style="width:480px">
+      <div class="ai-tool-modal-card" style="width:520px">
         <div class="ai-tool-modal-header">
           <span class="ai-tool-modal-icon">🟦</span>
           <span class="ai-tool-modal-title">Square Payments</span>
@@ -1950,6 +1950,14 @@
               </select>
             </div>
           </div>
+          <div style="border-top:1px solid rgba(255,255,255,.10);padding-top:14px;margin-top:14px">
+            <label style="margin-bottom:6px;display:block">Webhook URL <span class="muted">(for payment status updates)</span></label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input id="squareWebhookUrl" type="text" readonly style="flex:1;background:rgba(0,0,0,.2);cursor:text">
+              <button type="button" class="btn--secondary" onclick="copySquareWebhookUrl()" style="white-space:nowrap">Copy</button>
+            </div>
+            <div class="muted" style="font-size:11px;margin-top:6px">Add this URL in Square Dashboard → Webhooks. Subscribe to: <code>payment.completed</code>, <code>payment.failed</code>, <code>order.updated</code></div>
+          </div>
         </div>
         <div class="ai-tool-modal-footer">
           <span id="squareSettingsStatus" class="muted" style="margin-right:auto"></span>
@@ -1960,7 +1968,7 @@
 
     <!-- AI Tool: Stripe Payments Modal -->
     <div id="aiToolStripeModal" class="ai-tool-modal">
-      <div class="ai-tool-modal-card" style="width:480px">
+      <div class="ai-tool-modal-card" style="width:520px">
         <div class="ai-tool-modal-header">
           <span class="ai-tool-modal-icon">💳</span>
           <span class="ai-tool-modal-title">Stripe Payments</span>
@@ -1975,6 +1983,14 @@
             </div>
           </div>
           <div class="muted" style="font-size:12px;margin-top:8px">Use a test key (sk_test_...) for testing, or a live key (sk_live_...) for production payments.</div>
+          <div style="border-top:1px solid rgba(255,255,255,.10);padding-top:14px;margin-top:14px">
+            <label style="margin-bottom:6px;display:block">Webhook URL <span class="muted">(for payment status updates)</span></label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input id="stripeWebhookUrl" type="text" readonly style="flex:1;background:rgba(0,0,0,.2);cursor:text">
+              <button type="button" class="btn--secondary" onclick="copyStripeWebhookUrl()" style="white-space:nowrap">Copy</button>
+            </div>
+            <div class="muted" style="font-size:11px;margin-top:6px">Add this URL in Stripe Dashboard → Webhooks. Subscribe to: <code>checkout.session.completed</code>, <code>checkout.session.expired</code></div>
+          </div>
         </div>
         <div class="ai-tool-modal-footer">
           <span id="stripeSettingsStatus" class="muted" style="margin-right:auto"></span>
@@ -5390,9 +5406,19 @@
     }
 
     // AI Payment settings (Square/Stripe)
+    function getPaymentWebhookUrl(provider) {
+      const userId = meProfile && meProfile.id ? meProfile.id : '';
+      if (!userId) return '';
+      const base = window.location.origin;
+      return `${base}/webhooks/user-${provider}/${userId}`;
+    }
+
     async function loadSquareSettings(){
       const status = $('#squareSettingsStatus');
       if (status) status.textContent = 'Loading…';
+      // Populate webhook URL
+      const webhookInput = $('#squareWebhookUrl');
+      if (webhookInput) webhookInput.value = getPaymentWebhookUrl('square');
       try {
         const r = await fetch('/api/me/ai/payment-settings');
         const j = await r.json();
@@ -5448,9 +5474,24 @@
       }
     }
 
+    function copySquareWebhookUrl() {
+      const input = $('#squareWebhookUrl');
+      if (!input || !input.value) return;
+      navigator.clipboard.writeText(input.value).then(() => {
+        showToast('Webhook URL copied to clipboard');
+      }).catch(() => {
+        input.select();
+        document.execCommand('copy');
+        showToast('Webhook URL copied to clipboard');
+      });
+    }
+
     async function loadStripeSettings(){
       const status = $('#stripeSettingsStatus');
       if (status) status.textContent = 'Loading…';
+      // Populate webhook URL
+      const webhookInput = $('#stripeWebhookUrl');
+      if (webhookInput) webhookInput.value = getPaymentWebhookUrl('stripe');
       try {
         const r = await fetch('/api/me/ai/payment-settings');
         const j = await r.json();
@@ -5500,6 +5541,18 @@
         btn.disabled = false;
         btn.textContent = old;
       }
+    }
+
+    function copyStripeWebhookUrl() {
+      const input = $('#stripeWebhookUrl');
+      if (!input || !input.value) return;
+      navigator.clipboard.writeText(input.value).then(() => {
+        showToast('Webhook URL copied to clipboard');
+      }).catch(() => {
+        input.select();
+        document.execCommand('copy');
+        showToast('Webhook URL copied to clipboard');
+      });
     }
 
     function renderDocTemplates(){

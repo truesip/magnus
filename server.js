@@ -1971,6 +1971,33 @@ async function initDb() {
     CONSTRAINT fk_user_ai_payment_settings_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
 
+  // Payment requests tracking (for webhook status updates)
+  await pool.query(`CREATE TABLE IF NOT EXISTS user_payment_requests (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    provider VARCHAR(16) NOT NULL,
+    provider_payment_id VARCHAR(128) NULL,
+    provider_checkout_id VARCHAR(128) NULL,
+    amount_cents BIGINT NOT NULL,
+    currency VARCHAR(3) NOT NULL DEFAULT 'USD',
+    description VARCHAR(512) NULL,
+    customer_email VARCHAR(255) NULL,
+    customer_phone VARCHAR(32) NULL,
+    payment_url TEXT NULL,
+    status ENUM('pending','completed','failed','expired','cancelled') NOT NULL DEFAULT 'pending',
+    call_id VARCHAR(128) NULL,
+    call_domain VARCHAR(128) NULL,
+    metadata JSON NULL,
+    paid_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    KEY idx_payment_requests_user (user_id),
+    KEY idx_payment_requests_provider (provider, provider_payment_id),
+    KEY idx_payment_requests_checkout (provider, provider_checkout_id),
+    KEY idx_payment_requests_status (user_id, status),
+    CONSTRAINT fk_payment_requests_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
   // AI document templates
   await pool.query(`CREATE TABLE IF NOT EXISTS ai_doc_templates (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -5121,6 +5148,9 @@ app.post('/api/ai/agent/:token/payment-link', async (req, res) => {
 
     const description = String(body.description || 'Payment').trim().slice(0, 500);
     const customerEmail = body.customer_email ? String(body.customer_email).trim() : null;
+    const customerPhone = body.customer_phone ? String(body.customer_phone).trim() : null;
+    const callId = body.call_id ? String(body.call_id).trim() : null;
+    const callDomain = body.call_domain ? String(body.call_domain).trim() : null;
     const providerOverride = body.provider ? String(body.provider).trim().toLowerCase() : null;
 
     // Determine which provider to use
@@ -5146,20 +5176,278 @@ app.post('/api/ai/agent/:token/payment-link', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid provider' });
     }
 
+    // Record the payment request in the database
+    const amountCents = Math.round(amount * 100);
+    const [insertResult] = await pool.execute(
+      `INSERT INTO user_payment_requests 
+       (user_id, provider, provider_payment_id, provider_checkout_id, amount_cents, currency, description, customer_email, customer_phone, payment_url, status, call_id, call_domain)
+       VALUES (?, ?, ?, ?, ?, 'USD', ?, ?, ?, ?, 'pending', ?, ?)`,
+      [
+        userId,
+        provider,
+        result.id || null,
+        result.order_id || result.checkout_id || null,
+        amountCents,
+        description,
+        customerEmail,
+        customerPhone,
+        result.url,
+        callId,
+        callDomain
+      ]
+    );
+    const requestId = insertResult?.insertId || null;
+
     return res.json({
       success: true,
       data: {
+        request_id: requestId,
         payment_url: result.url,
         payment_link_id: result.id,
         provider,
         amount,
-        description
+        description,
+        status: 'pending'
       }
     });
   } catch (e) {
     const msg = e?.message || 'Failed to create payment link';
     if (DEBUG) console.warn('[ai.payment-link] error:', msg);
     return res.status(500).json({ success: false, message: msg });
+  }
+});
+
+// API endpoint for AI agent to check payment status
+app.get('/api/ai/agent/:token/payment-status/:requestId', async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const token = String(req.params.token || '').trim();
+    const requestId = parseInt(req.params.requestId, 10);
+    if (!token) return res.status(400).json({ success: false, message: 'Missing token' });
+    if (!requestId) return res.status(400).json({ success: false, message: 'Missing request ID' });
+
+    // Verify agent token and get user
+    const tokenHash = sha256(token);
+    const [agentRows] = await pool.execute(
+      'SELECT a.*, u.id as owner_user_id FROM ai_agents a JOIN signup_users u ON a.user_id = u.id WHERE a.agent_action_token_hash = ? LIMIT 1',
+      [tokenHash]
+    );
+    const agent = agentRows && agentRows[0] ? agentRows[0] : null;
+    if (!agent) {
+      return res.status(401).json({ success: false, message: 'Invalid agent token' });
+    }
+
+    const userId = agent.owner_user_id || agent.user_id;
+
+    // Get the payment request
+    const [rows] = await pool.execute(
+      'SELECT id, provider, amount_cents, currency, description, status, paid_at, created_at FROM user_payment_requests WHERE id = ? AND user_id = ? LIMIT 1',
+      [requestId, userId]
+    );
+    const request = rows && rows[0] ? rows[0] : null;
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'Payment request not found' });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        request_id: request.id,
+        provider: request.provider,
+        amount: request.amount_cents / 100,
+        currency: request.currency,
+        description: request.description,
+        status: request.status,
+        paid_at: request.paid_at,
+        created_at: request.created_at
+      }
+    });
+  } catch (e) {
+    const msg = e?.message || 'Failed to check payment status';
+    if (DEBUG) console.warn('[ai.payment-status] error:', msg);
+    return res.status(500).json({ success: false, message: msg });
+  }
+});
+
+// ========== User Payment Webhooks (Square/Stripe for AI agent invoicing) ==========
+
+// Square webhook for user payment links
+// Configure in Square Dashboard: Webhooks -> Add Endpoint
+// Events: payment.completed, payment.failed, order.updated
+app.post('/webhooks/user-square/:userId', async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = parseInt(req.params.userId, 10);
+    if (!userId) return res.status(400).json({ success: false, message: 'Invalid user ID' });
+
+    const body = req.body || {};
+    const eventType = String(body.type || '').toLowerCase();
+    const data = body.data?.object || body.data || {};
+
+    if (DEBUG) console.log('[user-square.webhook] Received:', { userId, eventType, dataType: typeof data });
+
+    // Handle payment.completed or payment.updated events
+    if (eventType.includes('payment')) {
+      const payment = data.payment || data;
+      const orderId = String(payment.order_id || '').trim();
+      const paymentId = String(payment.id || '').trim();
+      const status = String(payment.status || '').toLowerCase();
+
+      if (!orderId && !paymentId) {
+        return res.status(200).json({ success: true, ignored: true, reason: 'no order_id or payment_id' });
+      }
+
+      let newStatus = null;
+      if (status === 'completed' || status === 'approved') newStatus = 'completed';
+      else if (status === 'failed' || status === 'canceled') newStatus = 'failed';
+
+      if (newStatus) {
+        // Try to find by order_id (checkout_id) or payment_id
+        const [rows] = await pool.execute(
+          `SELECT id, status FROM user_payment_requests 
+           WHERE user_id = ? AND provider = 'square' 
+           AND (provider_checkout_id = ? OR provider_payment_id = ?) 
+           AND status = 'pending' LIMIT 1`,
+          [userId, orderId || null, paymentId || null]
+        );
+        const request = rows && rows[0] ? rows[0] : null;
+
+        if (request) {
+          await pool.execute(
+            'UPDATE user_payment_requests SET status = ?, provider_payment_id = ?, paid_at = ? WHERE id = ?',
+            [newStatus, paymentId || null, newStatus === 'completed' ? new Date() : null, request.id]
+          );
+          if (DEBUG) console.log('[user-square.webhook] Updated payment request:', { requestId: request.id, newStatus });
+        }
+      }
+    }
+
+    // Handle order.updated for checkout link payments
+    if (eventType.includes('order')) {
+      const order = data.order || data;
+      const orderId = String(order.id || '').trim();
+      const state = String(order.state || '').toLowerCase();
+
+      if (orderId && (state === 'completed' || state === 'canceled')) {
+        const newStatus = state === 'completed' ? 'completed' : 'failed';
+        const [rows] = await pool.execute(
+          `SELECT id, status FROM user_payment_requests 
+           WHERE user_id = ? AND provider = 'square' AND provider_checkout_id = ? AND status = 'pending' LIMIT 1`,
+          [userId, orderId]
+        );
+        const request = rows && rows[0] ? rows[0] : null;
+
+        if (request) {
+          await pool.execute(
+            'UPDATE user_payment_requests SET status = ?, paid_at = ? WHERE id = ?',
+            [newStatus, newStatus === 'completed' ? new Date() : null, request.id]
+          );
+          if (DEBUG) console.log('[user-square.webhook] Updated payment request via order:', { requestId: request.id, newStatus });
+        }
+      }
+    }
+
+    return res.status(200).json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[user-square.webhook] Error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Webhook handling failed' });
+  }
+});
+
+// Stripe webhook for user payment links
+// Configure in Stripe Dashboard: Developers -> Webhooks -> Add Endpoint
+// Events: checkout.session.completed, checkout.session.expired, payment_intent.succeeded, payment_intent.payment_failed
+app.post('/webhooks/user-stripe/:userId', async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = parseInt(req.params.userId, 10);
+    if (!userId) return res.status(400).json({ success: false, message: 'Invalid user ID' });
+
+    // For user webhooks, we don't verify signature since each user has their own Stripe account
+    // The webhook URL contains the user ID which provides some security
+    const body = req.body || {};
+    const eventType = String(body.type || '').toLowerCase();
+    const data = body.data?.object || {};
+
+    if (DEBUG) console.log('[user-stripe.webhook] Received:', { userId, eventType });
+
+    // Handle checkout.session events
+    if (eventType.startsWith('checkout.session.')) {
+      const sessionId = String(data.id || '').trim();
+      const paymentLinkId = String(data.payment_link || '').trim();
+      const paymentStatus = String(data.payment_status || '').toLowerCase();
+      const paymentIntentId = data.payment_intent ? String(data.payment_intent) : null;
+
+      if (!paymentLinkId && !sessionId) {
+        return res.status(200).json({ success: true, ignored: true, reason: 'no payment_link or session' });
+      }
+
+      let newStatus = null;
+      if (eventType === 'checkout.session.completed' && paymentStatus === 'paid') {
+        newStatus = 'completed';
+      } else if (eventType === 'checkout.session.expired') {
+        newStatus = 'expired';
+      }
+
+      if (newStatus && paymentLinkId) {
+        const [rows] = await pool.execute(
+          `SELECT id, status FROM user_payment_requests 
+           WHERE user_id = ? AND provider = 'stripe' AND provider_payment_id = ? AND status = 'pending' LIMIT 1`,
+          [userId, paymentLinkId]
+        );
+        const request = rows && rows[0] ? rows[0] : null;
+
+        if (request) {
+          await pool.execute(
+            'UPDATE user_payment_requests SET status = ?, paid_at = ? WHERE id = ?',
+            [newStatus, newStatus === 'completed' ? new Date() : null, request.id]
+          );
+          if (DEBUG) console.log('[user-stripe.webhook] Updated payment request:', { requestId: request.id, newStatus });
+        }
+      }
+    }
+
+    // Handle payment_intent events as fallback
+    if (eventType.startsWith('payment_intent.')) {
+      const intentId = String(data.id || '').trim();
+      const status = String(data.status || '').toLowerCase();
+      const metadata = data.metadata || {};
+
+      let newStatus = null;
+      if (eventType === 'payment_intent.succeeded' || status === 'succeeded') {
+        newStatus = 'completed';
+      } else if (eventType === 'payment_intent.payment_failed' || status === 'canceled') {
+        newStatus = 'failed';
+      }
+
+      // Payment intents don't directly link to our payment_link_id, so this is best-effort
+      if (newStatus && metadata.payment_request_id) {
+        const requestId = parseInt(metadata.payment_request_id, 10);
+        if (requestId) {
+          const [rows] = await pool.execute(
+            'SELECT id, status FROM user_payment_requests WHERE id = ? AND user_id = ? AND status = "pending" LIMIT 1',
+            [requestId, userId]
+          );
+          const request = rows && rows[0] ? rows[0] : null;
+
+          if (request) {
+            await pool.execute(
+              'UPDATE user_payment_requests SET status = ?, paid_at = ? WHERE id = ?',
+              [newStatus, newStatus === 'completed' ? new Date() : null, request.id]
+            );
+            if (DEBUG) console.log('[user-stripe.webhook] Updated payment request via intent:', { requestId: request.id, newStatus });
+          }
+        }
+      }
+    }
+
+    return res.status(200).json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[user-stripe.webhook] Error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Webhook handling failed' });
   }
 });
 
