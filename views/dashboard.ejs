@@ -5631,16 +5631,21 @@
     }
 
     // AI Payment settings (Square/Stripe)
+    const PAYMENT_WEBHOOK_BASE = 'https://www.talkusa.net';
+
     function getPaymentWebhookUrl(provider) {
       const userId = meProfile && meProfile.id ? meProfile.id : '';
-      if (!userId) return '';
-      const base = window.location.origin;
-      return `${base}/webhooks/user-${provider}/${userId}`;
+      if (!userId) return 'Loading...';
+      return `${PAYMENT_WEBHOOK_BASE}/webhooks/user-${provider}/${userId}`;
     }
 
     async function loadSquareSettings(){
       const status = $('#squareSettingsStatus');
       if (status) status.textContent = 'Loading…';
+      // Ensure profile is loaded for webhook URL
+      if (!meProfile || !meProfile.id) {
+        try { await loadProfile(); } catch {}
+      }
       // Populate webhook URL
       const webhookInput = $('#squareWebhookUrl');
       if (webhookInput) webhookInput.value = getPaymentWebhookUrl('square');
@@ -5714,6 +5719,10 @@
     async function loadStripeSettings(){
       const status = $('#stripeSettingsStatus');
       if (status) status.textContent = 'Loading…';
+      // Ensure profile is loaded for webhook URL
+      if (!meProfile || !meProfile.id) {
+        try { await loadProfile(); } catch {}
+      }
       // Populate webhook URL
       const webhookInput = $('#stripeWebhookUrl');
       if (webhookInput) webhookInput.value = getPaymentWebhookUrl('stripe');
