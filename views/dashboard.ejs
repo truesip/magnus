@@ -877,6 +877,11 @@
               <canvas id="mailStatusChart"></canvas>
               <div id="mailStatusEmpty" class="muted" style="text-align:center;padding:20px;display:none">No mail sent yet</div>
             </div>
+            <div class="pie-chart-card">
+              <div class="pie-chart-title">Payments</div>
+              <canvas id="paymentStatusChart"></canvas>
+              <div id="paymentStatusEmpty" class="muted" style="text-align:center;padding:20px;display:none">No payment links sent yet</div>
+            </div>
           </div>
         </div>
       </section>
@@ -1078,6 +1083,7 @@
           <button id="ai-subtab-sms" type="button" class="ai-subtab">SMS</button>
           <button id="ai-subtab-meetings" type="button" class="ai-subtab">Meeting</button>
           <button id="ai-subtab-mail" type="button" class="ai-subtab">Mail</button>
+          <button id="ai-subtab-payments" type="button" class="ai-subtab">Payments</button>
           <button id="ai-subtab-tools" type="button" class="ai-subtab">Tools</button>
         </div>
 
@@ -1300,6 +1306,38 @@
               <button id="aiMailPrev">Prev</button>
               <span id="aiMailPageInfo" class="muted"></span>
               <button id="aiMailNext">Next</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="ai-pane-payments" style="display:none">
+          <div style="flex:1;min-width:320px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+              <h3 style="margin:0">Payments</h3>
+              <div style="margin-left:auto"></div>
+              <select id="aiPaymentsStatusFilter" style="width:150px">
+                <option value="">All statuses</option>
+                <option value="pending">Pending</option>
+                <option value="completed">Completed</option>
+                <option value="failed">Failed</option>
+                <option value="expired">Expired</option>
+              </select>
+              <select id="aiPaymentsProviderFilter" style="width:120px">
+                <option value="">All providers</option>
+                <option value="square">Square</option>
+                <option value="stripe">Stripe</option>
+              </select>
+              <button id="aiPaymentsRefreshBtn" type="button" class="btn--muted">Refresh</button>
+            </div>
+            <table id="ai-payments-table" style="display:none">
+              <thead><tr><th>Date</th><th>Amount</th><th>Description</th><th>Customer</th><th>Provider</th><th>Status</th><th>Paid</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div id="ai-payments-empty" class="muted">Loading…</div>
+            <div class="toolbar" id="ai-payments-pager" style="display:none">
+              <button id="aiPaymentsPrev">Prev</button>
+              <span id="aiPaymentsPageInfo" class="muted"></span>
+              <button id="aiPaymentsNext">Next</button>
             </div>
           </div>
         </div>
@@ -2025,6 +2063,7 @@
       sms: document.getElementById('ai-subtab-sms'),
       meetings: document.getElementById('ai-subtab-meetings'),
       mail: document.getElementById('ai-subtab-mail'),
+      payments: document.getElementById('ai-subtab-payments'),
       tools: document.getElementById('ai-subtab-tools'),
     };
     const aiPanes = {
@@ -2035,12 +2074,13 @@
       sms: document.getElementById('ai-pane-sms'),
       meetings: document.getElementById('ai-pane-meetings'),
       mail: document.getElementById('ai-pane-mail'),
+      payments: document.getElementById('ai-pane-payments'),
       tools: document.getElementById('ai-pane-tools'),
     };
 
     function activateAiSubtab(name){
       const n = String(name || '').toLowerCase();
-      const active = (n === 'tools' || n === 'conversations' || n === 'outbound-conversations' || n === 'emails' || n === 'sms' || n === 'meetings' || n === 'mail') ? n : 'agents';
+      const active = (n === 'tools' || n === 'conversations' || n === 'outbound-conversations' || n === 'emails' || n === 'sms' || n === 'meetings' || n === 'mail' || n === 'payments') ? n : 'agents';
       Object.keys(aiSubtabs).forEach(k => {
         const el = aiSubtabs[k];
         if (!el) return;
@@ -2108,6 +2148,13 @@
         e.preventDefault();
         activateAiSubtab('mail');
         openAiMailTab();
+      });
+    }
+    if (aiSubtabs.payments) {
+      aiSubtabs.payments.addEventListener('click', (e) => {
+        e.preventDefault();
+        activateAiSubtab('payments');
+        openAiPaymentsTab();
       });
     }
     tabs.overview.addEventListener('click',e=>{e.preventDefault();activate('overview');loadStats();});
@@ -4552,6 +4599,184 @@
       }
     }
 
+    // ========== AI Payments Tab ==========
+    let aiPaymentsData = [];
+    let aiPaymentsTotal = 0;
+    let aiPaymentsPage = 0;
+    const aiPaymentsPageSize = 25;
+    let aiPaymentsUiInit = false;
+
+    function initAiPaymentsUI(){
+      if (aiPaymentsUiInit) return;
+      aiPaymentsUiInit = true;
+
+      const statusSel = $('#aiPaymentsStatusFilter');
+      const providerSel = $('#aiPaymentsProviderFilter');
+      const refreshBtn = $('#aiPaymentsRefreshBtn');
+      const prevBtn = $('#aiPaymentsPrev');
+      const nextBtn = $('#aiPaymentsNext');
+
+      if (statusSel) statusSel.addEventListener('change', () => { aiPaymentsPage = 0; loadAiPayments(); });
+      if (providerSel) providerSel.addEventListener('change', () => { aiPaymentsPage = 0; loadAiPayments(); });
+      if (refreshBtn) refreshBtn.addEventListener('click', () => loadAiPayments());
+      if (prevBtn) prevBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (aiPaymentsPage > 0) {
+          aiPaymentsPage -= 1;
+          loadAiPayments();
+        }
+      });
+      if (nextBtn) nextBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        if ((aiPaymentsPage + 1) * aiPaymentsPageSize < aiPaymentsTotal) {
+          aiPaymentsPage += 1;
+          loadAiPayments();
+        }
+      });
+    }
+
+    async function openAiPaymentsTab(){
+      initAiPaymentsUI();
+      loadAiPayments();
+    }
+
+    function paymentStatusBadge(status){
+      const s = String(status || '').toLowerCase();
+      const cls = {
+        completed: 'bill-status-completed',
+        pending: 'bill-status-pending',
+        failed: 'bill-status-failed',
+        expired: 'bill-status-failed',
+        cancelled: 'bill-status-failed'
+      }[s] || 'bill-status-pending';
+      const label = s.charAt(0).toUpperCase() + s.slice(1);
+      return `<span class="bill-status ${cls}">${escapeHtml(label)}</span>`;
+    }
+
+    function renderAiPayments(){
+      const table = $('#ai-payments-table');
+      const empty = $('#ai-payments-empty');
+      const pager = $('#ai-payments-pager');
+      const pageInfo = $('#aiPaymentsPageInfo');
+      const prev = $('#aiPaymentsPrev');
+      const next = $('#aiPaymentsNext');
+      if (!table || !empty) return;
+      const tbody = table.querySelector('tbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+
+      if (!aiPaymentsData || !aiPaymentsData.length) {
+        table.style.display = 'none';
+        if (pager) pager.style.display = 'none';
+        if (pageInfo) pageInfo.textContent = '';
+        empty.style.display = 'block';
+        empty.textContent = 'No payment links sent yet.';
+        return;
+      }
+
+      for (const p of aiPaymentsData) {
+        const date = p.created_at ? fmtDateTime(p.created_at) : '';
+        const amountNum = (p.amount_cents != null) ? (Number(p.amount_cents) / 100) : 0;
+        const amount = `$${amountNum.toFixed(2)}`;
+        const desc = String(p.description || '-').slice(0, 50);
+        const customer = p.customer_email || p.customer_phone || '-';
+        const provider = String(p.provider || '-').charAt(0).toUpperCase() + String(p.provider || '-').slice(1);
+        const paidAt = p.paid_at ? fmtDateTime(p.paid_at) : '-';
+
+        const tr = document.createElement('tr');
+
+        const tdDate = document.createElement('td');
+        tdDate.textContent = date;
+        tr.appendChild(tdDate);
+
+        const tdAmount = document.createElement('td');
+        tdAmount.textContent = amount;
+        tdAmount.style.fontWeight = '600';
+        tr.appendChild(tdAmount);
+
+        const tdDesc = document.createElement('td');
+        tdDesc.textContent = desc;
+        if (p.description && p.description.length > 50) tdDesc.title = p.description;
+        tr.appendChild(tdDesc);
+
+        const tdCustomer = document.createElement('td');
+        tdCustomer.textContent = customer;
+        tr.appendChild(tdCustomer);
+
+        const tdProvider = document.createElement('td');
+        tdProvider.textContent = provider;
+        tr.appendChild(tdProvider);
+
+        const tdStatus = document.createElement('td');
+        tdStatus.innerHTML = paymentStatusBadge(p.status);
+        tr.appendChild(tdStatus);
+
+        const tdPaid = document.createElement('td');
+        tdPaid.textContent = paidAt;
+        tr.appendChild(tdPaid);
+
+        tbody.appendChild(tr);
+      }
+
+      empty.style.display = 'none';
+      table.style.display = 'table';
+
+      const totalPages = aiPaymentsTotal > 0 ? Math.max(1, Math.ceil(aiPaymentsTotal / aiPaymentsPageSize)) : 1;
+      if (pageInfo) pageInfo.textContent = `Page ${aiPaymentsPage + 1} of ${totalPages}`;
+
+      if (pager) {
+        pager.style.display = (aiPaymentsTotal > aiPaymentsPageSize) ? 'flex' : 'none';
+      }
+      if (prev) prev.disabled = (aiPaymentsPage <= 0);
+      if (next) next.disabled = ((aiPaymentsPage + 1) * aiPaymentsPageSize >= aiPaymentsTotal);
+    }
+
+    async function loadAiPayments(){
+      const table = $('#ai-payments-table');
+      const empty = $('#ai-payments-empty');
+      const pager = $('#ai-payments-pager');
+      if (empty) { empty.style.display = 'block'; empty.textContent = 'Loading…'; }
+      if (table) table.style.display = 'none';
+      if (pager) pager.style.display = 'none';
+
+      try {
+        const statusSel = $('#aiPaymentsStatusFilter');
+        const providerSel = $('#aiPaymentsProviderFilter');
+        const statusFilter = statusSel ? String(statusSel.value || '').trim() : '';
+        const providerFilter = providerSel ? String(providerSel.value || '').trim() : '';
+
+        let url = `/api/me/ai/payment-requests?page=${aiPaymentsPage}&limit=${aiPaymentsPageSize}`;
+        if (statusFilter) url += `&status=${encodeURIComponent(statusFilter)}`;
+        if (providerFilter) url += `&provider=${encodeURIComponent(providerFilter)}`;
+
+        const r = await fetch(url);
+        const j = await r.json();
+        if (!j || j.success === false) {
+          aiPaymentsData = [];
+          aiPaymentsTotal = 0;
+          renderAiPayments();
+          if (empty) empty.textContent = j?.message || 'Failed to load payments';
+          return;
+        }
+
+        aiPaymentsData = Array.isArray(j.data) ? j.data : [];
+        const total = Number(j.total);
+        aiPaymentsTotal = Number.isFinite(total) ? total : aiPaymentsData.length;
+
+        if (aiPaymentsTotal > 0 && aiPaymentsPage > 0 && aiPaymentsPage * aiPaymentsPageSize >= aiPaymentsTotal) {
+          aiPaymentsPage = 0;
+          return loadAiPayments();
+        }
+
+        renderAiPayments();
+      } catch (e) {
+        aiPaymentsData = [];
+        aiPaymentsTotal = 0;
+        renderAiPayments();
+        if (empty) empty.textContent = 'Failed to load payments';
+      }
+    }
+
     function renderAiConversationSessions(){
       const table = $('#ai-conv-sessions-table');
       const empty = $('#ai-conv-sessions-empty');
@@ -6557,6 +6782,7 @@ Guidelines:
     let smsStatusChart = null;
     let meetingStatusChart = null;
     let mailStatusChart = null;
+    let paymentStatusChart = null;
 
     const STATUS_COLORS = {
       completed: 'rgba(16,185,129,0.8)',
@@ -6805,6 +7031,9 @@ Guidelines:
         }
         smsMap.forEach(v => smsAggregated.push(v));
         smsStatusChart = renderPieChart('smsStatusChart', 'smsStatusEmpty', smsAggregated, smsStatusChart);
+
+        // Payment status breakdown chart
+        paymentStatusChart = renderPieChart('paymentStatusChart', 'paymentStatusEmpty', breakdowns.payment || [], paymentStatusChart);
 
       }catch(e){
         console.error('[loadStats]', e);

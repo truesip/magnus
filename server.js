@@ -5451,6 +5451,73 @@ app.post('/webhooks/user-stripe/:userId', async (req, res) => {
   }
 });
 
+// ========== Payment Requests History ==========
+app.get('/api/me/ai/payment-requests', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const statusFilter = String(req.query.status || '').trim().toLowerCase();
+    const providerFilter = String(req.query.provider || '').trim().toLowerCase();
+    const page = Math.max(0, parseInt(req.query.page) || 0);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 25));
+    const offset = page * limit;
+
+    let whereClauses = ['user_id = ?'];
+    let params = [userId];
+
+    if (statusFilter && ['pending', 'completed', 'failed', 'expired', 'cancelled'].includes(statusFilter)) {
+      whereClauses.push('status = ?');
+      params.push(statusFilter);
+    }
+    if (providerFilter && ['square', 'stripe'].includes(providerFilter)) {
+      whereClauses.push('provider = ?');
+      params.push(providerFilter);
+    }
+
+    const whereClause = whereClauses.join(' AND ');
+
+    const [countRows] = await pool.execute(
+      `SELECT COUNT(*) as total FROM user_payment_requests WHERE ${whereClause}`,
+      params
+    );
+    const total = countRows && countRows[0] ? Number(countRows[0].total) : 0;
+
+    const [rows] = await pool.execute(
+      `SELECT id, provider, amount_cents, currency, description, customer_email, customer_phone,
+              payment_url, status, call_id, call_domain, paid_at, created_at
+       FROM user_payment_requests
+       WHERE ${whereClause}
+       ORDER BY created_at DESC
+       LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    );
+
+    // Get payment stats for charts
+    const [statsRows] = await pool.execute(
+      `SELECT status, COUNT(*) as count, SUM(amount_cents) as total_cents
+       FROM user_payment_requests WHERE user_id = ? GROUP BY status`,
+      [userId]
+    );
+    const stats = {};
+    for (const r of (statsRows || [])) {
+      stats[r.status] = { count: Number(r.count) || 0, total_cents: Number(r.total_cents) || 0 };
+    }
+
+    return res.json({
+      success: true,
+      data: rows || [],
+      total,
+      page,
+      limit,
+      stats
+    });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.payment-requests.list] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load payment requests' });
+  }
+});
+
 // ========== AI document templates (DOCX) ==========
 const docTemplateUpload = multer({
   storage: multer.memoryStorage(),
@@ -14738,7 +14805,18 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
       if (DEBUG) console.warn('[me.stats.ai.meetingBreakdown] failed:', e.message || e);
     }
 
-    // Inbound calls grouped by day from user_did_cdrs (DIDWW) + ai_call_logs (Daily/Pipecat)
+    let paymentStatusBreakdown = [];
+    try {
+      const [rows] = await pool.execute(
+        `SELECT status, COUNT(*) AS count FROM user_payment_requests WHERE user_id = ? GROUP BY status`,
+        [userId]
+      );
+      paymentStatusBreakdown = rows.map(r => ({ status: r.status || 'unknown', count: Number(r.count || 0) }));
+    } catch (e) {
+      if (DEBUG) console.warn('[me.stats.ai.paymentBreakdown] failed:', e.message || e);
+    }
+
+    // Inbound calls grouped by day
     let inboundCount = 0;
     const inboundByDayMap = new Map();
     try {
@@ -14887,7 +14965,8 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
         email: emailStatusBreakdown,
         sms: smsStatusBreakdown,
         mail: mailStatusBreakdown,
-        meeting: meetingStatusBreakdown
+        meeting: meetingStatusBreakdown,
+        payment: paymentStatusBreakdown
       }
     });
   } catch (e) {
