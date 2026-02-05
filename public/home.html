@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TalkUSA — AI Voice & Video Agents</title>
-  <meta name="description" content="AI voice and video agents that answer calls, run meetings, and send follow‑ups via email and physical mail." />
+  <meta name="description" content="AI voice and video agents that answer calls, make outbound calls, collect payments, and send follow‑ups via SMS, email, and physical mail." />
   <style>
     :root{
       --bg:#050816;
@@ -458,7 +458,7 @@
         <div>
           <div class="eyebrow"><span class="dot" aria-hidden="true"></span> AI voice + video agents</div>
           <h1>Put <span class="grad">AI</span> on the phone—and in meetings.</h1>
-          <p class="lead">TalkUSA helps you automate real customer interactions: answer inbound calls, run video meetings, and send follow‑ups via email or physical mail. Configure it from one dashboard.</p>
+          <p class="lead">TalkUSA helps you automate real customer interactions: answer inbound calls, make outbound calls, run video meetings, collect payments, and send follow‑ups via SMS, email, or physical mail. Configure it from one dashboard.</p>
 
           <div class="hero__actions">
             <a class="btn btn--primary" href="/signup">Create account</a>
@@ -472,11 +472,19 @@
             </div>
             <div class="badge">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
-              Video meeting links
+              Video meetings
+            </div>
+            <div class="badge">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              SMS messaging
             </div>
             <div class="badge">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M22 6l-10 7L2 6"/></svg>
-              Email follow‑ups
+              Email + docs
+            </div>
+            <div class="badge">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
+              Payment links
             </div>
             <div class="badge">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
@@ -528,11 +536,11 @@
                     <div class="msg__who">Automation</div>
                     <div class="msg__time">00:12</div>
                   </div>
-                  <div class="msg__txt">Sent a video meeting link and a document email. (Optional: also send a physical letter.)</div>
+                  <div class="msg__txt">Meeting link sent via SMS, payment link created, and confirmation email queued.</div>
                   <div class="chips">
-                    <div class="chip"><strong>Email</strong> meeting link</div>
-                    <div class="chip"><strong>Email</strong> document</div>
-                    <div class="chip"><strong>Mail</strong> letter</div>
+                    <div class="chip"><strong>SMS</strong> meeting link</div>
+                    <div class="chip"><strong>Payment</strong> $150 invoice</div>
+                    <div class="chip"><strong>Email</strong> confirmation</div>
                   </div>
                 </div>
               </div>
@@ -561,10 +569,34 @@
 
           <div class="card" role="listitem">
             <div class="card__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.05 5A5 5 0 0 1 19 8.95M15.05 1A9 9 0 0 1 23 8.94m-1 7.98v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+            </div>
+            <h3>Outbound Dialer</h3>
+            <p>Upload lead lists and let AI agents make outbound calls automatically with personalized scripts.</p>
+          </div>
+
+          <div class="card" role="listitem">
+            <div class="card__icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
             </div>
             <h3>Video Meetings</h3>
             <p>Send meeting links instantly and track meeting history—ideal for onboarding, support, and demos.</p>
+          </div>
+
+          <div class="card" role="listitem">
+            <div class="card__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <h3>SMS Messaging</h3>
+            <p>Send SMS messages during or after calls—meeting links, confirmations, or custom follow‑ups.</p>
+          </div>
+
+          <div class="card" role="listitem">
+            <div class="card__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
+            </div>
+            <h3>Payment Collection</h3>
+            <p>Create and send payment links via Square or Stripe. Track payment status in real‑time with webhooks.</p>
           </div>
 
           <div class="card" role="listitem">
@@ -595,8 +627,8 @@
             <div class="card__icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 14l3-3 3 3 6-6"/></svg>
             </div>
-            <h3>History + Review</h3>
-            <p>Review calls, meetings, and outbound actions in your dashboard with searchable records.</p>
+            <h3>History + Analytics</h3>
+            <p>Review calls, meetings, payments, and all actions in your dashboard with charts and searchable records.</p>
           </div>
         </div>
       </div>
@@ -607,24 +639,24 @@
         <div class="section__head">
           <div class="kicker">Workflow</div>
           <h2>A simple loop: receive, assist, deliver.</h2>
-          <p>Use your number, meeting links, and outbound sending tools as one connected system.</p>
+          <p>Use your numbers, AI agents, meeting links, payments, and outbound tools as one connected system.</p>
         </div>
 
         <div class="steps">
           <div class="step">
             <div class="step__n">Step 1</div>
-            <h3>Receive</h3>
-            <p>Customers call your number or request a meeting link. You route traffic to the right agent.</p>
+            <h3>Receive or Reach Out</h3>
+            <p>Customers call your number, or your AI dials out from lead lists. Route traffic to the right agent.</p>
           </div>
           <div class="step">
             <div class="step__n">Step 2</div>
-            <h3>Assist</h3>
-            <p>The AI agent handles the conversation and escalates to humans when appropriate.</p>
+            <h3>Assist + Collect</h3>
+            <p>The AI agent handles the conversation, collects payments, and escalates to humans when needed.</p>
           </div>
           <div class="step">
             <div class="step__n">Step 3</div>
             <h3>Deliver</h3>
-            <p>Send follow‑ups: email documents, meeting links, or physical mail—automatically.</p>
+            <p>Send follow‑ups: SMS, email documents, meeting links, payment receipts, or physical mail—automatically.</p>
           </div>
         </div>
       </div>
@@ -634,8 +666,8 @@
       <div class="section__inner">
         <div class="section__head">
           <div class="kicker">Platform</div>
-          <h2>Voice + numbers + AI, in one place.</h2>
-          <p>TalkUSA still supports SIP trunking, virtual numbers, and call forwarding—now paired with AI voice + video and built‑in sending tools.</p>
+          <h2>Voice + numbers + AI + payments, in one place.</h2>
+          <p>TalkUSA supports SIP trunking, virtual numbers, and call forwarding—paired with AI voice + video, payment collection, SMS, and built‑in sending tools.</p>
         </div>
 
         <div class="grid">
@@ -644,7 +676,7 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92V21a2 2 0 0 1-2.18 2A19.86 19.86 0 0 1 3 5.18 2 2 0 0 1 5 3h4.09a2 2 0 0 1 2 1.72c.12.9.32 1.77.59 2.6a2 2 0 0 1-.45 2.11L9.91 10.91a16 16 0 0 0 3.18 3.18l1.48-1.32a2 2 0 0 1 2.11-.45c.83.27 1.7.47 2.6.59a2 2 0 0 1 1.72 2z"/></svg>
             </div>
             <h3>Bring your own workflow</h3>
-            <p>Configure agents, assign numbers, set transfer rules, upload document templates, and choose how follow‑ups are delivered.</p>
+            <p>Configure agents, assign numbers, connect Square/Stripe, set transfer rules, upload templates, and choose how follow‑ups are delivered.</p>
           </div>
 
           <div class="card span6">
@@ -652,7 +684,7 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             </div>
             <h3>Fast onboarding</h3>
-            <p>Create an account, buy or assign a number, and deploy an AI agent. Use email and mail tools for follow‑ups right away.</p>
+            <p>Create an account, buy a number, deploy an AI agent, and connect payments. Use SMS, email, and mail tools right away.</p>
           </div>
         </div>
       </div>
@@ -673,9 +705,9 @@
             <div class="price"><strong>From $99</strong><span>/mo</span></div>
             <div class="priceNote">Plus usage for AI minutes, email, and physical mail.</div>
             <ul class="priceList">
-              <li><strong>AI Voice</strong> inbound call handling</li>
+              <li><strong>AI Voice</strong> inbound + outbound calls</li>
+              <li><strong>SMS + Email</strong> messaging and documents</li>
               <li><strong>Video links</strong> + meeting follow‑ups</li>
-              <li><strong>Email</strong> documents from templates</li>
               <li><strong>Transfer</strong> to a human or department</li>
               <li><strong>History</strong> for calls, meetings, and sends</li>
             </ul>
@@ -692,11 +724,11 @@
             <div class="price"><strong>From $299</strong><span>/mo</span></div>
             <div class="priceNote">Higher included limits + priority routing options.</div>
             <ul class="priceList">
-              <li><strong>AI Voice + Video</strong> workflows</li>
-              <li><strong>Smart routing</strong> + transfer rules</li>
-              <li><strong>Document templates</strong> for consistent follow‑ups</li>
+              <li><strong>AI Voice + Video</strong> with outbound dialer</li>
+              <li><strong>Payment collection</strong> via Square or Stripe</li>
+              <li><strong>SMS + Email</strong> templates and automation</li>
               <li><strong>Physical mail</strong> for letters and notices</li>
-              <li><strong>Reporting</strong> and searchable history</li>
+              <li><strong>Analytics</strong> and real‑time payment tracking</li>
             </ul>
             <div class="priceActions">
               <a class="btn btn--primary" href="/signup">Start Growth</a>
