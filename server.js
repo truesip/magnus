@@ -4864,11 +4864,12 @@ app.get('/api/me/ai/payment-settings', requireAuth, async (req, res) => {
     const userId = req.session.userId;
 
     const row = await loadUserAiPaymentSettings(userId);
-    if (!row) return res.json({ success: true, data: null });
+    if (!row) return res.json({ success: true, data: { user_id: userId } });
 
     return res.json({
       success: true,
       data: {
+        user_id: userId,
         square_configured: !!(row.square_access_token_enc && row.square_access_token_iv && row.square_access_token_tag),
         square_location_id: row.square_location_id || '',
         square_environment: row.square_environment || 'production',

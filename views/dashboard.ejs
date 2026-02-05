@@ -5633,8 +5633,7 @@
     // AI Payment settings (Square/Stripe)
     const PAYMENT_WEBHOOK_BASE = 'https://www.talkusa.net';
 
-    function getPaymentWebhookUrl(provider) {
-      const userId = meProfile && meProfile.id ? meProfile.id : '';
+    function getPaymentWebhookUrl(provider, userId) {
       if (!userId) return 'Loading...';
       return `${PAYMENT_WEBHOOK_BASE}/webhooks/user-${provider}/${userId}`;
     }
@@ -5642,13 +5641,7 @@
     async function loadSquareSettings(){
       const status = $('#squareSettingsStatus');
       if (status) status.textContent = 'Loading…';
-      // Ensure profile is loaded for webhook URL
-      if (!meProfile || !meProfile.id) {
-        try { await loadProfile(); } catch {}
-      }
-      // Populate webhook URL
       const webhookInput = $('#squareWebhookUrl');
-      if (webhookInput) webhookInput.value = getPaymentWebhookUrl('square');
       try {
         const r = await fetch('/api/me/ai/payment-settings');
         const j = await r.json();
@@ -5656,12 +5649,14 @@
           if (status) status.textContent = j?.message || 'Failed to load';
           return;
         }
-        const d = j.data || null;
+        const d = j.data || {};
+        // Populate webhook URL using user_id from API response
+        if (webhookInput) webhookInput.value = getPaymentWebhookUrl('square', d.user_id);
         // Don't populate the access token (for security, we only show if configured)
         $('#squareAccessToken').value = '';
-        $('#squareLocationId').value = d ? (d.square_location_id || '') : '';
-        try { $('#squareEnvironment').value = d ? (d.square_environment || 'production') : 'production'; } catch {}
-        if (status) status.textContent = d && d.has_square ? 'Configured' : 'Not configured';
+        $('#squareLocationId').value = d.square_location_id || '';
+        try { $('#squareEnvironment').value = d.square_environment || 'production'; } catch {}
+        if (status) status.textContent = d.square_configured ? 'Configured' : 'Not configured';
       } catch (e) {
         if (status) status.textContent = 'Failed to load';
       }
@@ -5719,13 +5714,7 @@
     async function loadStripeSettings(){
       const status = $('#stripeSettingsStatus');
       if (status) status.textContent = 'Loading…';
-      // Ensure profile is loaded for webhook URL
-      if (!meProfile || !meProfile.id) {
-        try { await loadProfile(); } catch {}
-      }
-      // Populate webhook URL
       const webhookInput = $('#stripeWebhookUrl');
-      if (webhookInput) webhookInput.value = getPaymentWebhookUrl('stripe');
       try {
         const r = await fetch('/api/me/ai/payment-settings');
         const j = await r.json();
@@ -5733,10 +5722,12 @@
           if (status) status.textContent = j?.message || 'Failed to load';
           return;
         }
-        const d = j.data || null;
+        const d = j.data || {};
+        // Populate webhook URL using user_id from API response
+        if (webhookInput) webhookInput.value = getPaymentWebhookUrl('stripe', d.user_id);
         // Don't populate the secret key (for security, we only show if configured)
         $('#stripeSecretKey').value = '';
-        if (status) status.textContent = d && d.has_stripe ? 'Configured' : 'Not configured';
+        if (status) status.textContent = d.stripe_configured ? 'Configured' : 'Not configured';
       } catch (e) {
         if (status) status.textContent = 'Failed to load';
       }
