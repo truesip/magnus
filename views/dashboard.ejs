@@ -1164,6 +1164,26 @@
               </div>
               <div class="ai-tool-card-status" id="docTemplatesCardStatus"><span class="ai-tool-status-badge ai-tool-status-unconfigured">Not configured</span></div>
             </div>
+
+            <!-- Square Payments -->
+            <div class="ai-tool-card" data-tool="square">
+              <div class="ai-tool-card-icon">🟦</div>
+              <div class="ai-tool-card-content">
+                <div class="ai-tool-card-title">Square Payments</div>
+                <div class="ai-tool-card-desc">Let your AI agent send payment links to callers via Square.</div>
+              </div>
+              <div class="ai-tool-card-status" id="squareCardStatus"><span class="ai-tool-status-badge ai-tool-status-unconfigured">Not configured</span></div>
+            </div>
+
+            <!-- Stripe Payments -->
+            <div class="ai-tool-card" data-tool="stripe">
+              <div class="ai-tool-card-icon">💳</div>
+              <div class="ai-tool-card-content">
+                <div class="ai-tool-card-title">Stripe Payments</div>
+                <div class="ai-tool-card-desc">Let your AI agent send payment links to callers via Stripe.</div>
+              </div>
+              <div class="ai-tool-card-status" id="stripeCardStatus"><span class="ai-tool-status-badge ai-tool-status-unconfigured">Not configured</span></div>
+            </div>
           </div>
         </div>
 
@@ -1897,6 +1917,68 @@
             </table>
             <div id="ai-doc-templates-empty" class="muted">No templates uploaded yet.</div>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI Tool: Square Payments Modal -->
+    <div id="aiToolSquareModal" class="ai-tool-modal">
+      <div class="ai-tool-modal-card" style="width:480px">
+        <div class="ai-tool-modal-header">
+          <span class="ai-tool-modal-icon">🟦</span>
+          <span class="ai-tool-modal-title">Square Payments</span>
+          <button type="button" class="ai-tool-modal-close" onclick="closeToolModal('square')">&times;</button>
+        </div>
+        <div class="muted" style="margin-bottom:14px">Connect your Square account so your AI agent can send payment links to callers.</div>
+        <div class="ai-tool-modal-body">
+          <div class="ai-tool-modal-row">
+            <div style="flex:1">
+              <label>Access Token *</label>
+              <input id="squareAccessToken" type="password" placeholder="sq0atp-...">
+            </div>
+          </div>
+          <div class="ai-tool-modal-row">
+            <div>
+              <label>Location ID <span class="muted">(optional)</span></label>
+              <input id="squareLocationId" type="text" placeholder="Leave blank to use default">
+            </div>
+            <div>
+              <label>Environment</label>
+              <select id="squareEnvironment">
+                <option value="production">Production</option>
+                <option value="sandbox">Sandbox (Testing)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="ai-tool-modal-footer">
+          <span id="squareSettingsStatus" class="muted" style="margin-right:auto"></span>
+          <button id="saveSquareSettingsBtn" class="btn--primary">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI Tool: Stripe Payments Modal -->
+    <div id="aiToolStripeModal" class="ai-tool-modal">
+      <div class="ai-tool-modal-card" style="width:480px">
+        <div class="ai-tool-modal-header">
+          <span class="ai-tool-modal-icon">💳</span>
+          <span class="ai-tool-modal-title">Stripe Payments</span>
+          <button type="button" class="ai-tool-modal-close" onclick="closeToolModal('stripe')">&times;</button>
+        </div>
+        <div class="muted" style="margin-bottom:14px">Connect your Stripe account so your AI agent can send payment links to callers.</div>
+        <div class="ai-tool-modal-body">
+          <div class="ai-tool-modal-row">
+            <div style="flex:1">
+              <label>Secret Key *</label>
+              <input id="stripeSecretKey" type="password" placeholder="sk_live_... or sk_test_...">
+            </div>
+          </div>
+          <div class="muted" style="font-size:12px;margin-top:8px">Use a test key (sk_test_...) for testing, or a live key (sk_live_...) for production payments.</div>
+        </div>
+        <div class="ai-tool-modal-footer">
+          <span id="stripeSettingsStatus" class="muted" style="margin-right:auto"></span>
+          <button id="saveStripeSettingsBtn" class="btn--primary">Save</button>
         </div>
       </div>
     </div>
@@ -4838,7 +4920,9 @@
       transfer: 'aiToolTransferModal',
       sms: 'aiToolSmsModal',
       mail: 'aiToolMailModal',
-      doctemplates: 'aiToolDocTemplatesModal'
+      doctemplates: 'aiToolDocTemplatesModal',
+      square: 'aiToolSquareModal',
+      stripe: 'aiToolStripeModal'
     };
 
     function openToolModal(toolName) {
@@ -4853,6 +4937,8 @@
         if (toolName === 'sms') { loadAiSmsDidOptions(); loadAiSmsSettings(); }
         if (toolName === 'mail') loadMailSettings();
         if (toolName === 'doctemplates') loadDocTemplates();
+        if (toolName === 'square') loadSquareSettings();
+        if (toolName === 'stripe') loadStripeSettings();
       }
     }
 
@@ -4919,6 +5005,17 @@
         const templates = Array.isArray(j?.data) ? j.data : [];
         const count = templates.length;
         updateToolCardStatus('docTemplatesCardStatus', count > 0, count > 0 ? `${count} template${count > 1 ? 's' : ''}` : 'Not configured');
+      } catch (e) {}
+
+      // Payment settings status (Square/Stripe)
+      try {
+        const r = await fetch('/api/me/ai/payment-settings');
+        const j = await r.json();
+        const d = j && j.data;
+        const squareConfigured = !!(d && d.has_square);
+        const stripeConfigured = !!(d && d.has_stripe);
+        updateToolCardStatus('squareCardStatus', squareConfigured);
+        updateToolCardStatus('stripeCardStatus', stripeConfigured);
       } catch (e) {}
     }
 
@@ -5286,6 +5383,119 @@
         await loadMailSettings();
       } catch (e) {
         showToast('Failed to save mail settings', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    }
+
+    // AI Payment settings (Square/Stripe)
+    async function loadSquareSettings(){
+      const status = $('#squareSettingsStatus');
+      if (status) status.textContent = 'Loading…';
+      try {
+        const r = await fetch('/api/me/ai/payment-settings');
+        const j = await r.json();
+        if (!j || j.success === false) {
+          if (status) status.textContent = j?.message || 'Failed to load';
+          return;
+        }
+        const d = j.data || null;
+        // Don't populate the access token (for security, we only show if configured)
+        $('#squareAccessToken').value = '';
+        $('#squareLocationId').value = d ? (d.square_location_id || '') : '';
+        try { $('#squareEnvironment').value = d ? (d.square_environment || 'production') : 'production'; } catch {}
+        if (status) status.textContent = d && d.has_square ? 'Configured' : 'Not configured';
+      } catch (e) {
+        if (status) status.textContent = 'Failed to load';
+      }
+    }
+
+    async function saveSquareSettings(){
+      const btn = $('#saveSquareSettingsBtn');
+      if (!btn) return;
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = 'Saving...';
+      try {
+        const accessToken = ($('#squareAccessToken').value || '').trim();
+        if (!accessToken) {
+          showToast('Access token is required', 'error');
+          return;
+        }
+        const payload = {
+          access_token: accessToken,
+          location_id: ($('#squareLocationId').value || '').trim(),
+          environment: ($('#squareEnvironment').value || 'production').trim()
+        };
+        const r = await fetch('/api/me/ai/payment-settings/square', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const j = await r.json();
+        if (!j || j.success === false) {
+          showToast(j?.message || 'Failed to save Square settings', 'error');
+          return;
+        }
+        showToast('Square settings saved.');
+        await loadSquareSettings();
+      } catch (e) {
+        showToast('Failed to save Square settings', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    }
+
+    async function loadStripeSettings(){
+      const status = $('#stripeSettingsStatus');
+      if (status) status.textContent = 'Loading…';
+      try {
+        const r = await fetch('/api/me/ai/payment-settings');
+        const j = await r.json();
+        if (!j || j.success === false) {
+          if (status) status.textContent = j?.message || 'Failed to load';
+          return;
+        }
+        const d = j.data || null;
+        // Don't populate the secret key (for security, we only show if configured)
+        $('#stripeSecretKey').value = '';
+        if (status) status.textContent = d && d.has_stripe ? 'Configured' : 'Not configured';
+      } catch (e) {
+        if (status) status.textContent = 'Failed to load';
+      }
+    }
+
+    async function saveStripeSettings(){
+      const btn = $('#saveStripeSettingsBtn');
+      if (!btn) return;
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = 'Saving...';
+      try {
+        const secretKey = ($('#stripeSecretKey').value || '').trim();
+        if (!secretKey) {
+          showToast('Secret key is required', 'error');
+          return;
+        }
+        const payload = {
+          secret_key: secretKey
+        };
+        const r = await fetch('/api/me/ai/payment-settings/stripe', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const j = await r.json();
+        if (!j || j.success === false) {
+          showToast(j?.message || 'Failed to save Stripe settings', 'error');
+          return;
+        }
+        showToast('Stripe settings saved.');
+        await loadStripeSettings();
+      } catch (e) {
+        showToast('Failed to save Stripe settings', 'error');
       } finally {
         btn.disabled = false;
         btn.textContent = old;
@@ -6056,6 +6266,8 @@ Guidelines:
     $('#saveAiSmsSettingsBtn').addEventListener('click', (e) => { e.preventDefault(); saveAiSmsSettings(); });
     $('#aiSmsAllowedDidIds').addEventListener('change', () => { refreshAiSmsDefaultDidOptions(); });
     $('#saveMailSettingsBtn').addEventListener('click', (e) => { e.preventDefault(); saveMailSettings(); });
+    $('#saveSquareSettingsBtn').addEventListener('click', (e) => { e.preventDefault(); saveSquareSettings(); });
+    $('#saveStripeSettingsBtn').addEventListener('click', (e) => { e.preventDefault(); saveStripeSettings(); });
 
     $('#uploadDocTemplateBtn').addEventListener('click', async (e) => {
       e.preventDefault();

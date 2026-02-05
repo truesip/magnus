@@ -1953,7 +1953,25 @@ async function initDb() {
     CONSTRAINT fk_user_mail_settings_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
 
-  // AI document templates (DOCX) used by the AI agent to generate emails
+  // Per-user AI payment settings (Square/Stripe for invoicing callers)
+  await pool.query(`CREATE TABLE IF NOT EXISTS user_ai_payment_settings (
+    user_id BIGINT NOT NULL,
+    square_access_token_enc BLOB NULL,
+    square_access_token_iv VARBINARY(16) NULL,
+    square_access_token_tag VARBINARY(16) NULL,
+    square_location_id VARCHAR(64) NULL,
+    square_environment VARCHAR(16) NOT NULL DEFAULT 'production',
+    stripe_secret_key_enc BLOB NULL,
+    stripe_secret_key_iv VARBINARY(16) NULL,
+    stripe_secret_key_tag VARBINARY(16) NULL,
+    preferred_provider VARCHAR(16) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id),
+    CONSTRAINT fk_user_ai_payment_settings_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
+  // AI document templates
   await pool.query(`CREATE TABLE IF NOT EXISTS ai_doc_templates (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     user_id BIGINT NOT NULL,
@@ -4797,6 +4815,351 @@ app.put('/api/me/ai/mail-settings', requireAuth, async (req, res) => {
   } catch (e) {
     if (DEBUG) console.warn('[mail.settings.put] error:', e?.message || e);
     return res.status(500).json({ success: false, message: 'Failed to save mail settings' });
+  }
+});
+
+// ========== Per-user AI payment settings (Square/Stripe for invoicing callers) ==========
+async function loadUserAiPaymentSettings(userId) {
+  if (!pool) throw new Error('Database not configured');
+  const [rows] = await pool.execute(
+    `SELECT user_id, square_access_token_enc, square_access_token_iv, square_access_token_tag,
+            square_location_id, square_environment, stripe_secret_key_enc, stripe_secret_key_iv,
+            stripe_secret_key_tag, preferred_provider
+     FROM user_ai_payment_settings WHERE user_id = ? LIMIT 1`,
+    [userId]
+  );
+  return rows && rows[0] ? rows[0] : null;
+}
+
+app.get('/api/me/ai/payment-settings', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+
+    const row = await loadUserAiPaymentSettings(userId);
+    if (!row) return res.json({ success: true, data: null });
+
+    return res.json({
+      success: true,
+      data: {
+        square_configured: !!(row.square_access_token_enc && row.square_access_token_iv && row.square_access_token_tag),
+        square_location_id: row.square_location_id || '',
+        square_environment: row.square_environment || 'production',
+        stripe_configured: !!(row.stripe_secret_key_enc && row.stripe_secret_key_iv && row.stripe_secret_key_tag),
+        preferred_provider: row.preferred_provider || null
+      }
+    });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.payment.settings.get] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load payment settings' });
+  }
+});
+
+app.put('/api/me/ai/payment-settings/square', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const body = req.body || {};
+
+    const accessToken = String(body.access_token || body.accessToken || '').trim();
+    const locationId = String(body.location_id || body.locationId || '').trim().slice(0, 64) || null;
+    const environment = String(body.environment || 'production').trim().toLowerCase();
+
+    if (environment !== 'sandbox' && environment !== 'production') {
+      return res.status(400).json({ success: false, message: 'environment must be sandbox or production' });
+    }
+
+    const existing = await loadUserAiPaymentSettings(userId);
+
+    let tokenEnc = existing?.square_access_token_enc || null;
+    let tokenIv = existing?.square_access_token_iv || null;
+    let tokenTag = existing?.square_access_token_tag || null;
+
+    if (accessToken) {
+      const key = getUserSmtpEncryptionKey();
+      if (!key) return res.status(500).json({ success: false, message: 'USER_SMTP_ENCRYPTION_KEY not configured' });
+      const enc = encryptAes256Gcm(accessToken, key);
+      tokenEnc = enc.enc;
+      tokenIv = enc.iv;
+      tokenTag = enc.tag;
+    }
+
+    await pool.execute(
+      `INSERT INTO user_ai_payment_settings (user_id, square_access_token_enc, square_access_token_iv, square_access_token_tag, square_location_id, square_environment)
+       VALUES (?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE
+         square_access_token_enc = VALUES(square_access_token_enc),
+         square_access_token_iv = VALUES(square_access_token_iv),
+         square_access_token_tag = VALUES(square_access_token_tag),
+         square_location_id = VALUES(square_location_id),
+         square_environment = VALUES(square_environment),
+         updated_at = CURRENT_TIMESTAMP`,
+      [userId, tokenEnc, tokenIv, tokenTag, locationId, environment]
+    );
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.payment.settings.square.put] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to save Square settings' });
+  }
+});
+
+app.put('/api/me/ai/payment-settings/stripe', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const body = req.body || {};
+
+    const secretKey = String(body.secret_key || body.secretKey || '').trim();
+
+    const existing = await loadUserAiPaymentSettings(userId);
+
+    let keyEnc = existing?.stripe_secret_key_enc || null;
+    let keyIv = existing?.stripe_secret_key_iv || null;
+    let keyTag = existing?.stripe_secret_key_tag || null;
+
+    if (secretKey) {
+      const key = getUserSmtpEncryptionKey();
+      if (!key) return res.status(500).json({ success: false, message: 'USER_SMTP_ENCRYPTION_KEY not configured' });
+      const enc = encryptAes256Gcm(secretKey, key);
+      keyEnc = enc.enc;
+      keyIv = enc.iv;
+      keyTag = enc.tag;
+    }
+
+    await pool.execute(
+      `INSERT INTO user_ai_payment_settings (user_id, stripe_secret_key_enc, stripe_secret_key_iv, stripe_secret_key_tag)
+       VALUES (?,?,?,?)
+       ON DUPLICATE KEY UPDATE
+         stripe_secret_key_enc = VALUES(stripe_secret_key_enc),
+         stripe_secret_key_iv = VALUES(stripe_secret_key_iv),
+         stripe_secret_key_tag = VALUES(stripe_secret_key_tag),
+         updated_at = CURRENT_TIMESTAMP`,
+      [userId, keyEnc, keyIv, keyTag]
+    );
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.payment.settings.stripe.put] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to save Stripe settings' });
+  }
+});
+
+app.put('/api/me/ai/payment-settings/preferred', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const body = req.body || {};
+
+    const provider = String(body.provider || '').trim().toLowerCase() || null;
+    if (provider && provider !== 'square' && provider !== 'stripe') {
+      return res.status(400).json({ success: false, message: 'provider must be square or stripe' });
+    }
+
+    await pool.execute(
+      `INSERT INTO user_ai_payment_settings (user_id, preferred_provider)
+       VALUES (?,?)
+       ON DUPLICATE KEY UPDATE preferred_provider = VALUES(preferred_provider), updated_at = CURRENT_TIMESTAMP`,
+      [userId, provider]
+    );
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.payment.settings.preferred.put] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to save preferred provider' });
+  }
+});
+
+// AI Payment Link creation (called by AI agent at runtime)
+async function createUserSquarePaymentLink({ userId, amount, description, customerEmail }) {
+  const settings = await loadUserAiPaymentSettings(userId);
+  if (!settings || !settings.square_access_token_enc) {
+    throw new Error('Square is not configured');
+  }
+
+  const key = getUserSmtpEncryptionKey();
+  if (!key) throw new Error('Encryption key not configured');
+
+  const accessToken = decryptAes256Gcm(
+    settings.square_access_token_enc,
+    settings.square_access_token_iv,
+    settings.square_access_token_tag,
+    key
+  );
+
+  if (!accessToken) throw new Error('Square access token missing');
+
+  const env = settings.square_environment || 'production';
+  const baseUrl = env === 'sandbox' ? 'https://connect.squareupsandbox.com' : 'https://connect.squareup.com';
+
+  // Auto-discover location if not set
+  let locationId = settings.square_location_id;
+  if (!locationId) {
+    const locResp = await axios.get(`${baseUrl}/v2/locations`, {
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      timeout: 15000,
+      validateStatus: () => true
+    });
+    if (locResp.status >= 200 && locResp.status < 300 && locResp.data?.locations?.length) {
+      locationId = locResp.data.locations[0].id;
+    }
+    if (!locationId) throw new Error('No Square location found');
+  }
+
+  const amountCents = Math.round(Number(amount) * 100);
+  if (!amountCents || amountCents < 100) throw new Error('Amount must be at least $1.00');
+
+  const idempotencyKey = crypto.randomUUID();
+  const payload = {
+    idempotency_key: idempotencyKey,
+    quick_pay: {
+      name: description || 'Payment',
+      price_money: { amount: amountCents, currency: 'USD' },
+      location_id: locationId
+    },
+    checkout_options: {
+      allow_tipping: false,
+      ask_for_shipping_address: false
+    },
+    ...(customerEmail ? { pre_populated_data: { buyer_email: customerEmail } } : {})
+  };
+
+  const resp = await axios.post(`${baseUrl}/v2/online-checkout/payment-links`, payload, {
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json', 'Square-Version': '2024-01-18' },
+    timeout: 20000,
+    validateStatus: () => true
+  });
+
+  if (resp.status < 200 || resp.status >= 300) {
+    const msg = resp.data?.errors?.[0]?.detail || resp.data?.message || 'Square API error';
+    throw new Error(msg);
+  }
+
+  const paymentLink = resp.data?.payment_link;
+  if (!paymentLink?.url) throw new Error('Square did not return a payment link');
+
+  return {
+    url: paymentLink.url,
+    id: paymentLink.id,
+    order_id: paymentLink.order_id
+  };
+}
+
+async function createUserStripePaymentLink({ userId, amount, description, customerEmail }) {
+  const settings = await loadUserAiPaymentSettings(userId);
+  if (!settings || !settings.stripe_secret_key_enc) {
+    throw new Error('Stripe is not configured');
+  }
+
+  const key = getUserSmtpEncryptionKey();
+  if (!key) throw new Error('Encryption key not configured');
+
+  const secretKey = decryptAes256Gcm(
+    settings.stripe_secret_key_enc,
+    settings.stripe_secret_key_iv,
+    settings.stripe_secret_key_tag,
+    key
+  );
+
+  if (!secretKey) throw new Error('Stripe secret key missing');
+
+  const amountCents = Math.round(Number(amount) * 100);
+  if (!amountCents || amountCents < 50) throw new Error('Amount must be at least $0.50');
+
+  const stripe = Stripe(secretKey);
+
+  // Create a price on the fly
+  const price = await stripe.prices.create({
+    unit_amount: amountCents,
+    currency: 'usd',
+    product_data: {
+      name: description || 'Payment'
+    }
+  });
+
+  // Create payment link
+  const paymentLink = await stripe.paymentLinks.create({
+    line_items: [{ price: price.id, quantity: 1 }],
+    ...(customerEmail ? { metadata: { customer_email: customerEmail } } : {})
+  });
+
+  return {
+    url: paymentLink.url,
+    id: paymentLink.id
+  };
+}
+
+// API endpoint for AI agent to create payment links
+app.post('/api/ai/agent/:token/payment-link', async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const token = String(req.params.token || '').trim();
+    if (!token) return res.status(400).json({ success: false, message: 'Missing token' });
+
+    // Verify agent token and get user
+    const tokenHash = sha256(token);
+    const [agentRows] = await pool.execute(
+      'SELECT a.*, u.id as owner_user_id FROM ai_agents a JOIN signup_users u ON a.user_id = u.id WHERE a.agent_action_token_hash = ? LIMIT 1',
+      [tokenHash]
+    );
+    const agent = agentRows && agentRows[0] ? agentRows[0] : null;
+    if (!agent) {
+      return res.status(401).json({ success: false, message: 'Invalid agent token' });
+    }
+
+    const userId = agent.owner_user_id || agent.user_id;
+    const body = req.body || {};
+
+    const amount = parseFloat(body.amount);
+    if (!Number.isFinite(amount) || amount < 0.50) {
+      return res.status(400).json({ success: false, message: 'amount must be at least 0.50' });
+    }
+    if (amount > 10000) {
+      return res.status(400).json({ success: false, message: 'amount cannot exceed 10000' });
+    }
+
+    const description = String(body.description || 'Payment').trim().slice(0, 500);
+    const customerEmail = body.customer_email ? String(body.customer_email).trim() : null;
+    const providerOverride = body.provider ? String(body.provider).trim().toLowerCase() : null;
+
+    // Determine which provider to use
+    const settings = await loadUserAiPaymentSettings(userId);
+    let provider = providerOverride || settings?.preferred_provider || null;
+
+    // Auto-select if not specified
+    if (!provider) {
+      if (settings?.square_access_token_enc) provider = 'square';
+      else if (settings?.stripe_secret_key_enc) provider = 'stripe';
+    }
+
+    if (!provider) {
+      return res.status(400).json({ success: false, message: 'No payment provider configured. Configure Square or Stripe in Tools.' });
+    }
+
+    let result;
+    if (provider === 'square') {
+      result = await createUserSquarePaymentLink({ userId, amount, description, customerEmail });
+    } else if (provider === 'stripe') {
+      result = await createUserStripePaymentLink({ userId, amount, description, customerEmail });
+    } else {
+      return res.status(400).json({ success: false, message: 'Invalid provider' });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        payment_url: result.url,
+        payment_link_id: result.id,
+        provider,
+        amount,
+        description
+      }
+    });
+  } catch (e) {
+    const msg = e?.message || 'Failed to create payment link';
+    if (DEBUG) console.warn('[ai.payment-link] error:', msg);
+    return res.status(500).json({ success: false, message: msg });
   }
 });
 
