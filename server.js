@@ -1756,28 +1756,7 @@ async function initDb() {
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
 
-  // Dodo Payments table - tracks card payments (Dodo Checkout Sessions) and credits
-  await pool.query(`CREATE TABLE IF NOT EXISTS dodo_payments (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    checkout_session_id VARCHAR(191) NULL,
-    order_id VARCHAR(191) NOT NULL,
-    payment_id VARCHAR(191) NULL,
-    amount DECIMAL(10,2) NOT NULL,
-    currency VARCHAR(16) NOT NULL DEFAULT 'USD',
-    status VARCHAR(64) NOT NULL DEFAULT 'pending',
-    credited TINYINT(1) NOT NULL DEFAULT 0,
-    raw_payload JSON NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uniq_dodo_order (order_id),
-    UNIQUE KEY uniq_dodo_checkout_session (checkout_session_id),
-    UNIQUE KEY uniq_dodo_payment (payment_id),
-    KEY idx_dodo_user (user_id),
-    FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
-  )`);
-
-  // Bill.com / BILL payments table - tracks invoice payments and credits
+  // Bill.com / BILL payments table
   await pool.query(`CREATE TABLE IF NOT EXISTS billcom_payments (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     user_id BIGINT NOT NULL,
@@ -3830,12 +3809,6 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
     `, [], { total: 0, count: 0 });
     const stripeStats = stripeStatsRows || { total: 0, count: 0 };
 
-    const [dodoStatsRows] = await safeQuery(`
-      SELECT COALESCE(SUM(amount), 0) as total, COUNT(*) as count 
-      FROM dodo_payments WHERE status='completed' AND credited=1
-    `, [], { total: 0, count: 0 });
-    const dodoStats = dodoStatsRows || { total: 0, count: 0 };
-
     const [cryptoStatsRows] = await safeQuery(`
       SELECT COALESCE(SUM(price_amount), 0) as total, COUNT(*) as count 
       FROM nowpayments_payments WHERE payment_status IN ('finished','confirmed') AND credited=1
@@ -3855,10 +3828,9 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
 
     // Pending payments - count each individually for resilience
     const [pendingStripe] = await safeQuery(`SELECT COUNT(*) as c FROM stripe_payments WHERE status='pending'`, [], { c: 0 });
-    const [pendingDodo] = await safeQuery(`SELECT COUNT(*) as c FROM dodo_payments WHERE status='pending'`, [], { c: 0 });
     const [pendingCrypto] = await safeQuery(`SELECT COUNT(*) as c FROM nowpayments_payments WHERE payment_status='waiting'`, [], { c: 0 });
     const [pendingSquare] = await safeQuery(`SELECT COUNT(*) as c FROM square_payments WHERE status='pending'`, [], { c: 0 });
-    const pendingPayments = { count: (Number(pendingStripe?.c) || 0) + (Number(pendingDodo?.c) || 0) + (Number(pendingCrypto?.c) || 0) + (Number(pendingSquare?.c) || 0) };
+    const pendingPayments = { count: (Number(pendingStripe?.c) || 0) + (Number(pendingCrypto?.c) || 0) + (Number(pendingSquare?.c) || 0) };
 
     // Telephony stats
     const [didStatsRows] = await safeQuery(`
@@ -3965,7 +3937,7 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
       ORDER BY date ASC
     `, [], null) || [];
 
-    const totalRevenue = Number(stripeStats.total) + Number(dodoStats.total) + Number(cryptoStats.total) + Number(squareStats.total);
+    const totalRevenue = Number(stripeStats.total) + Number(cryptoStats.total) + Number(squareStats.total);
 
     return res.json({
       success: true,
@@ -3981,7 +3953,6 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
           revenueByMethod: {
             stripe: { total: Number(stripeStats.total) || 0, count: Number(stripeStats.count) || 0 },
             crypto: { total: Number(cryptoStats.total) || 0, count: Number(cryptoStats.count) || 0 },
-            dodo: { total: Number(dodoStats.total) || 0, count: Number(dodoStats.count) || 0 },
             square: { total: Number(squareStats.total) || 0, count: Number(squareStats.count) || 0 },
             billcom: { count: Number(billcomStats.count) || 0 }
           },
@@ -15243,151 +15214,19 @@ async function handleStripeCheckout(req, res) {
   }
 }
 
-// Create a Dodo Payments Checkout Session for card payments
-// Returns a hosted Dodo checkout URL where the user can pay with card.
-async function handleDodoPaymentsCheckout(req, res) {
-  let billingId = null;
-  try {
-    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
-    if (!DODO_PAYMENTS_API_KEY || !DODO_PAYMENTS_REFILL_PRODUCT_ID) {
-      return res.status(500).json({ success: false, message: 'Card payments are not configured' });
-    }
-
-    const userId = req.session.userId;
-    const { amount } = req.body || {};
-
-    const amountNum = parseFloat(amount);
-    if (!Number.isFinite(amountNum)) {
-      return res.status(400).json({ success: false, message: 'Invalid amount' });
-    }
-    if (amountNum < CHECKOUT_MIN_AMOUNT || amountNum > CHECKOUT_MAX_AMOUNT) {
-      return res.status(400).json({ success: false, message: `Amount must be between $${CHECKOUT_MIN_AMOUNT} and $${CHECKOUT_MAX_AMOUNT}` });
-    }
-
-    // Fetch user info for description + email
-    let username = '';
-    let firstName = '';
-    let lastName = '';
-    let userEmail = '';
-    try {
-      const [rows] = await pool.execute('SELECT username, firstname, lastname, email FROM signup_users WHERE id=? LIMIT 1', [userId]);
-      if (rows && rows[0]) {
-        if (rows[0].username) username = String(rows[0].username);
-        if (rows[0].firstname) firstName = String(rows[0].firstname);
-        if (rows[0].lastname) lastName = String(rows[0].lastname);
-        if (rows[0].email) userEmail = String(rows[0].email);
-      }
-    } catch (e) {
-      if (DEBUG) console.warn('[dodopayments.checkout] Failed to fetch user info:', e.message || e);
-    }
-
-    const baseUser = username || (req.session.username || 'unknown');
-    const fullName = `${firstName || ''} ${lastName || ''}`.trim();
-    const displayName = fullName || baseUser;
-
-    if (!userEmail) {
-      return res.status(400).json({ success: false, message: 'An email address is required for card payments' });
-    }
-
-    // Insert pending billing record (we will mark completed after successful webhook).
-    // billing_history.id is our invoice number.
-    const [insertResult] = await pool.execute(
-      'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, null, 'pending']
-    );
-    billingId = insertResult.insertId;
-
-    const desc = buildRefillDescription(billingId);
-    try {
-      await pool.execute('UPDATE billing_history SET description = ? WHERE id = ?', [desc, billingId]);
-    } catch {}
-
-    // Build deterministic order_id encoding userId + billingId for correlation with Dodo Payments
-    const orderId = `dd-${userId}-${billingId}`;
-
-    const baseUrl = PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    const returnUrl = joinUrl(baseUrl, '/dashboard?payment=success&method=card');
-
-    // Dodo Payments uses a Product Cart. For variable-dollar refills, configure a
-    // single "pay-what-you-want" product in Dodo and provide amount (in cents).
-    const dodo = await getDodoPaymentsApiClient();
-    const session = await dodo.checkoutSessions.create({
-      product_cart: [
-        {
-          product_id: String(DODO_PAYMENTS_REFILL_PRODUCT_ID),
-          quantity: 1,
-          amount: Math.round(amountNum * 100)
-        }
-      ],
-      customer: {
-        email: String(userEmail).trim(),
-        name: String(displayName || '').trim() || undefined
-      },
-      return_url: returnUrl,
-      metadata: {
-        order_id: orderId,
-        user_id: String(userId),
-        billing_id: String(billingId)
-      }
-    });
-
-    const checkoutSessionId = session && (session.session_id || session.sessionId || session.id)
-      ? String(session.session_id || session.sessionId || session.id)
-      : '';
-    const paymentUrl = session && (session.checkout_url || session.checkoutUrl)
-      ? String(session.checkout_url || session.checkoutUrl)
-      : null;
-
-    if (!paymentUrl) {
-      if (DEBUG) console.error('[dodopayments.checkout] Missing checkout URL in response:', session);
-      await pool.execute(
-        'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
-        ['failed', JSON.stringify(session || {}), billingId]
-      );
-      return res.status(502).json({ success: false, message: 'Card payment provider did not return a checkout URL' });
-    }
-
-    // Record Dodo checkout session for tracking/idempotency
-    try {
-      await pool.execute(
-        'INSERT INTO dodo_payments (user_id, checkout_session_id, order_id, payment_id, amount, currency, status, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)',
-        [userId, checkoutSessionId || null, String(orderId), null, amountNum, 'USD', 'pending', JSON.stringify(session)]
-      );
-    } catch (e) {
-      if (DEBUG) console.warn('[dodopayments.checkout] Failed to insert dodo_payments row:', e.message || e);
-      // Do not fail the checkout creation if this insert fails; webhook can still be correlated via order_id.
-    }
-
-    return res.json({ success: true, payment_url: paymentUrl });
-  } catch (e) {
-    if (billingId) {
-      try {
-        await pool.execute(
-          'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
-          ['failed', String(e?.message || e), billingId]
-        );
-      } catch {}
-    }
-    if (DEBUG) console.error('[dodopayments.checkout] error:', e?.message || e);
-    return res.status(500).json({ success: false, message: 'Failed to create card payment' });
-  }
-}
-
-// Provider switch: choose Square, Stripe, or Dodo Payments for card checkout
+// Provider switch: choose Square or Stripe for card checkout
 app.post('/api/me/card/checkout', requireAuth, async (req, res) => {
   const provider = String(process.env.CARD_PAYMENT_PROVIDER || CARD_PAYMENT_PROVIDER || 'square').trim().toLowerCase();
   if (provider === 'stripe') return handleStripeCheckout(req, res);
   if (provider === 'square') return handleSquareCheckout(req, res);
-  if (provider === 'dodopayments' || provider === 'dodo') return handleDodoPaymentsCheckout(req, res);
   return res.status(500).json({ success: false, message: 'Card payment provider is not configured' });
 });
 
 // Provider-specific endpoints (kept for compatibility)
 app.post('/api/me/square/checkout', requireAuth, handleSquareCheckout);
 app.post('/api/me/stripe/checkout', requireAuth, handleStripeCheckout);
-app.post('/api/me/dodopayments/checkout', requireAuth, handleDodoPaymentsCheckout);
 
-// NOWPayments IPN webhook (server-to-server callback)
+// NOWPayments IPN webhook
 app.post('/nowpayments/ipn', async (req, res) => {
   try {
     if (!pool) {
@@ -15613,242 +15452,6 @@ app.post('/nowpayments/ipn', async (req, res) => {
   } catch (e) {
     if (DEBUG) console.error('[nowpayments.ipn] Unhandled error:', e.message || e);
     return res.status(500).json({ success: false, message: 'IPN handling failed' });
-  }
-});
-
-// Dodo Payments webhook for card payments (payment.succeeded)
-// Configure Dodo to send webhooks to:
-//   PUBLIC_BASE_URL + /webhooks/dodopayments
-app.post('/webhooks/dodopayments', async (req, res) => {
-  try {
-    if (!pool) {
-      return res.status(500).json({ success: false, message: 'Database not configured' });
-    }
-
-    const raw = req.rawBody;
-    if (!raw || !Buffer.isBuffer(raw)) {
-      if (DEBUG) console.warn('[dodopayments.webhook] Missing rawBody');
-      return res.status(400).json({ success: false, message: 'Invalid payload' });
-    }
-
-    const rawBody = raw.toString('utf8');
-    const webhookSecret = String(DODO_PAYMENTS_WEBHOOK_SECRET || '').trim();
-
-    let event = null;
-    if (webhookSecret) {
-      try {
-        const dodo = await getDodoPaymentsApiClient();
-        event = dodo.webhooks.unwrap(rawBody, req.headers, webhookSecret);
-      } catch (e) {
-        if (DEBUG) console.warn('[dodopayments.webhook] Signature verification failed:', e?.message || e);
-        return res.status(400).json({ success: false, message: 'Invalid signature' });
-      }
-    } else {
-      if (DEBUG) console.warn('[dodopayments.webhook] DODO_PAYMENTS_WEBHOOK_SECRET not set; skipping signature verification');
-      try {
-        event = JSON.parse(rawBody);
-      } catch {
-        return res.status(400).json({ success: false, message: 'Invalid JSON' });
-      }
-    }
-
-    const type = String(event?.type || '').trim().toLowerCase();
-    if (!type.startsWith('payment.')) {
-      return res.status(200).json({ success: true, ignored: true });
-    }
-
-    const payment = event?.data && typeof event.data === 'object' ? event.data : null;
-    const meta = payment && typeof payment.metadata === 'object' ? payment.metadata : {};
-
-    const orderId = String(meta.order_id || meta.orderId || '').trim();
-    const paymentId = String(payment?.paymentId || payment?.payment_id || payment?.id || '').trim() || null;
-
-    // Best-effort: persist latest event payload for debugging
-    const payloadJson = JSON.stringify(event);
-    if (orderId) {
-      try {
-        await pool.execute(
-          'UPDATE dodo_payments SET status = ?, payment_id = COALESCE(?, payment_id), raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE order_id = ? LIMIT 1',
-          [type || 'unknown', paymentId, payloadJson, orderId]
-        );
-      } catch {}
-    }
-
-    if (!orderId) {
-      if (DEBUG) console.warn('[dodopayments.webhook] Missing order_id in metadata');
-      return res.status(200).json({ success: true, ignored: true });
-    }
-
-    // Order id format: dd-<userId>-<billingId>
-    const m = /^dd-(\d+)-(\d+)$/.exec(orderId);
-    if (!m) {
-      if (DEBUG) console.warn('[dodopayments.webhook] order_id does not match expected pattern:', orderId);
-      return res.status(200).json({ success: true, ignored: true });
-    }
-
-    const userId = Number(m[1]);
-    const billingId = Number(m[2]);
-
-    // Handle terminal failures
-    if (type === 'payment.failed' || type === 'payment.cancelled') {
-      try {
-        const [bRows] = await pool.execute(
-          'SELECT id, user_id, status FROM billing_history WHERE id = ? LIMIT 1',
-          [billingId]
-        );
-        const b = bRows && bRows[0] ? bRows[0] : null;
-        if (b && String(b.user_id) === String(userId) && b.status !== 'completed') {
-          await pool.execute(
-            'UPDATE billing_history SET status = ?, magnus_response = ? WHERE id = ?',
-            ['failed', `DodoPayments status: ${type}`, billingId]
-          );
-        }
-      } catch {}
-
-      try {
-        await pool.execute(
-          'UPDATE dodo_payments SET status = ?, credited = 0, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE order_id = ? LIMIT 1',
-          [type.toUpperCase(), payloadJson, orderId]
-        );
-      } catch {}
-
-      return res.status(200).json({ success: true, failed: true });
-    }
-
-    // Only credit on payment.succeeded
-    if (type !== 'payment.succeeded') {
-      return res.status(200).json({ success: true, ignored: true });
-    }
-
-    // Fetch billing_history row
-    const [billingRows] = await pool.execute(
-      'SELECT id, user_id, amount, description, status FROM billing_history WHERE id = ? LIMIT 1',
-      [billingId]
-    );
-    const billing = billingRows && billingRows[0] ? billingRows[0] : null;
-    if (!billing || String(billing.user_id) !== String(userId)) {
-      if (DEBUG) console.warn('[dodopayments.webhook] Billing row not found or user mismatch for order:', { orderId, userId, billingId });
-      return res.status(200).json({ success: true, ignored: true });
-    }
-
-    // Acquire a per-order lock to prevent double-crediting.
-    let lockAcquired = false;
-    try {
-      const [lockResult] = await pool.execute(
-        'UPDATE dodo_payments SET status = ?, payment_id = COALESCE(?, payment_id), credited = 2, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE order_id = ? AND credited = 0',
-        ['PROCESSING', paymentId, payloadJson, orderId]
-      );
-      lockAcquired = !!(lockResult && lockResult.affectedRows > 0);
-    } catch (e) {
-      if (DEBUG) console.warn('[dodopayments.webhook] Failed to acquire processing lock:', e.message || e);
-    }
-
-    if (!lockAcquired) {
-      // If row missing (or insert failed earlier), insert a lock row now.
-      try {
-        await pool.execute(
-          'INSERT INTO dodo_payments (user_id, checkout_session_id, order_id, payment_id, amount, currency, status, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, 2, ?)',
-          [userId, null, orderId, paymentId, Number(billing.amount || 0), 'USD', 'PROCESSING', payloadJson]
-        );
-        lockAcquired = true;
-      } catch (e) {
-        if (e?.code !== 'ER_DUP_ENTRY' && DEBUG) console.warn('[dodopayments.webhook] Failed to insert lock row:', e.message || e);
-      }
-    }
-
-    if (!lockAcquired) {
-      // Someone else has already processed or is processing.
-      try {
-        const [freshRows] = await pool.execute('SELECT credited FROM dodo_payments WHERE order_id = ? LIMIT 1', [orderId]);
-        const creditedVal = freshRows && freshRows[0] ? Number(freshRows[0].credited || 0) : 0;
-        if (creditedVal === 1) return res.status(200).json({ success: true, alreadyCredited: true });
-        return res.status(200).json({ success: true, pending: true, duplicate: true });
-      } catch {
-        return res.status(200).json({ success: true, pending: true });
-      }
-    }
-
-    // If billing row is already completed, treat this as already credited.
-    if (billing.status === 'completed') {
-      try {
-        await pool.execute(
-          'UPDATE dodo_payments SET status = ?, credited = 1, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE order_id = ? AND credited <> 1',
-          ['COMPLETED', payloadJson, orderId]
-        );
-      } catch {}
-      return res.status(200).json({ success: true, alreadyCredited: true });
-    }
-
-    // Fetch user row for MagnusBilling id and email
-    const [userRows] = await pool.execute(
-      'SELECT id, magnus_user_id, username, firstname, lastname, email FROM signup_users WHERE id = ? LIMIT 1',
-      [userId]
-    );
-    const user = userRows && userRows[0] ? userRows[0] : null;
-    if (!user) {
-      try { await pool.execute('UPDATE dodo_payments SET credited = 0, status = ? WHERE order_id = ? AND credited = 2', ['FAILED', orderId]); } catch {}
-      return res.status(200).json({ success: true, ignored: true });
-    }
-
-    const magnusUserId = String(user.magnus_user_id || '').trim();
-    if (!magnusUserId) {
-      try { await pool.execute('UPDATE dodo_payments SET credited = 0, status = ? WHERE order_id = ? AND credited = 2', ['FAILED', orderId]); } catch {}
-      return res.status(200).json({ success: true, ignored: true });
-    }
-
-    const nameBase = user.username || '';
-    const fullName = `${user.firstname || ''} ${user.lastname || ''}`.trim();
-    const displayName = fullName || nameBase || 'Customer';
-    const userEmail = user.email || '';
-
-    // Use amount from billing_history as source of truth
-    const amountNum = Number(billing.amount || 0);
-    const desc = billing.description || buildRefillDescription(billingId);
-
-    const httpsAgent = magnusBillingAgent;
-    const hostHeader = process.env.MAGNUSBILLING_HOST_HEADER;
-
-    const result = await applyMagnusRefill({
-      userId,
-      magnusUserId,
-      amountNum,
-      desc,
-      displayName,
-      userEmail,
-      httpsAgent,
-      hostHeader,
-      billingId,
-      paymentMethod: 'Dodo Payments (Card)',
-      processorTransactionId: paymentId || 'N/A'
-    });
-
-    if (!result.success) {
-      if (DEBUG) console.error('[dodopayments.webhook] Failed to credit MagnusBilling for order:', { orderId, error: result.error });
-      // Release the processing lock so a future retry can attempt again.
-      try {
-        await pool.execute(
-          'UPDATE dodo_payments SET status = ?, credited = 0, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE order_id = ? AND credited = 2',
-          ['FAILED', payloadJson, orderId]
-        );
-      } catch {}
-      return res.status(500).json({ success: false, message: 'Failed to credit MagnusBilling' });
-    }
-
-    // Mark as credited
-    try {
-      await pool.execute(
-        'UPDATE dodo_payments SET status = ?, payment_id = COALESCE(?, payment_id), credited = 1, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE order_id = ?',
-        ['COMPLETED', paymentId, payloadJson, orderId]
-      );
-    } catch (e) {
-      if (DEBUG) console.warn('[dodopayments.webhook] Failed to mark payment as credited:', e.message || e);
-    }
-
-    if (DEBUG) console.log('[dodopayments.webhook] Successfully credited order:', { orderId, billingId, userId });
-    return res.status(200).json({ success: true });
-  } catch (e) {
-    if (DEBUG) console.error('[dodopayments.webhook] Unhandled error:', e.message || e);
-    return res.status(500).json({ success: false, message: 'Webhook handling failed' });
   }
 });
 
@@ -18749,13 +18352,7 @@ const BILLCOM_WEBHOOK_SECURITY_KEY = process.env.BILLCOM_WEBHOOK_SECURITY_KEY ||
 // Card payment provider selector
 // - square (default): Square Payment Links
 // - stripe: Stripe hosted Checkout
-// - dodopayments: Dodo Payments Checkout Sessions
 const CARD_PAYMENT_PROVIDER = String(process.env.CARD_PAYMENT_PROVIDER || 'square').trim().toLowerCase();
-
-// Dodo Payments configuration (Checkout Sessions)
-const DODO_PAYMENTS_API_KEY = process.env.DODO_PAYMENTS_API_KEY || '';
-const DODO_PAYMENTS_WEBHOOK_SECRET = process.env.DODO_PAYMENTS_WEBHOOK_SECRET || '';
-const DODO_PAYMENTS_REFILL_PRODUCT_ID = process.env.DODO_PAYMENTS_REFILL_PRODUCT_ID || '';
 
 // Stripe configuration (hosted Checkout)
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
@@ -18777,25 +18374,6 @@ function getStripeWebhookClient() {
   const key = String(STRIPE_SECRET_KEY || '').trim() || 'sk_test_dummy';
   stripeWebhookClient = Stripe(key);
   return stripeWebhookClient;
-}
-
-let dodoPaymentsClientPromise;
-async function getDodoPaymentsApiClient() {
-  if (dodoPaymentsClientPromise) return dodoPaymentsClientPromise;
-
-  const key = String(DODO_PAYMENTS_API_KEY || '').trim();
-  if (!key) throw new Error('DODO_PAYMENTS_API_KEY not configured');
-
-  dodoPaymentsClientPromise = (async () => {
-    const mod = await import('dodopayments');
-    const DodoPayments = mod?.default || mod;
-    return new DodoPayments({ bearerAuth: key });
-  })().catch((e) => {
-    dodoPaymentsClientPromise = null;
-    throw e;
-  });
-
-  return dodoPaymentsClientPromise;
 }
 
 function nowpaymentsAxios() {
