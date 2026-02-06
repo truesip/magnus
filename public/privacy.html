@@ -6,20 +6,20 @@
   <title>TalkUSA – Privacy Policy</title>
   <style>
     :root{
-      --bg:#050816;
-      --bg2:#0b1024;
-      --card:rgba(255,255,255,.06);
-      --card2:rgba(255,255,255,.08);
-      --border:rgba(255,255,255,.12);
+      --bg:#111111;
+      --bg2:#1a1a1a;
+      --card:rgba(255,255,255,.04);
+      --card2:rgba(255,255,255,.06);
+      --border:rgba(255,255,255,.10);
       --text:rgba(255,255,255,.92);
-      --muted:rgba(255,255,255,.70);
-      --muted2:rgba(255,255,255,.55);
-      --primary:#4f46e5;
-      --accent:#22d3ee;
-      --accent2:#a78bfa;
-      --shadow:0 24px 80px rgba(0,0,0,.55);
-      --radius:16px;
-      --radius2:22px;
+      --muted:rgba(255,255,255,.65);
+      --muted2:rgba(255,255,255,.45);
+      --primary:#10b981;
+      --accent:#10b981;
+      --accent2:#6ee7b7;
+      --shadow:0 8px 32px rgba(0,0,0,.50);
+      --radius:12px;
+      --radius2:16px;
       --max:1200px;
     }
 
@@ -27,10 +27,7 @@
     html,body{height:100%}
     body{
       font-family: ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
-      background: radial-gradient(1200px 600px at 20% 10%, rgba(79,70,229,.18) 0%, transparent 55%),
-                  radial-gradient(900px 520px at 85% 35%, rgba(34,211,238,.14) 0%, transparent 60%),
-                  radial-gradient(900px 520px at 55% 90%, rgba(167,139,250,.10) 0%, transparent 60%),
-                  linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
+      background: var(--bg);
       color:var(--text);
       line-height:1.65;
       overflow-x:hidden;
@@ -42,9 +39,8 @@
 
     /* Navigation */
     nav{
-      background: rgba(5,8,22,.72);
+      background: rgba(17,17,17,.95);
       border-bottom:1px solid rgba(255,255,255,.08);
-      backdrop-filter: blur(14px);
       position: sticky;
       top: 0;
       z-index: 20;
@@ -73,8 +69,8 @@
     .brand__mark{
       width:34px;height:34px;
       border-radius:10px;
-      background: linear-gradient(135deg, rgba(79,70,229,1) 0%, rgba(34,211,238,1) 100%);
-      box-shadow: 0 14px 30px rgba(79,70,229,.25);
+      background: linear-gradient(135deg, #10b981 0%, #6ee7b7 100%);
+      box-shadow: 0 8px 20px rgba(16,185,129,.25);
       display:inline-block;
       flex:none;
     }
@@ -121,34 +117,25 @@
       padding:11px 14px;
       font-weight:900;
       font-size:14px;
-      border:1px solid rgba(79,70,229,.45);
-      background: linear-gradient(135deg, rgba(79,70,229,1) 0%, rgba(34,211,238,1) 100%);
+      border:1px solid rgba(16,185,129,.45);
+      background: #10b981;
       color:#071024 !important;
       transition: transform .15s ease, border-color .15s ease;
       white-space:nowrap;
     }
-    .nav-cta:hover{transform: translateY(-1px); border-color: rgba(34,211,238,.75); text-decoration:none}
+    .nav-cta:hover{transform: translateY(-1px); border-color: rgba(16,185,129,.75); background:#0d9668; text-decoration:none}
 
     /* Main */
     main{
       max-width: 960px;
       margin: 36px auto 64px auto;
       padding: 28px 24px 34px 24px;
-      background: linear-gradient(180deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.05) 100%);
+      background: #1a1a1a;
       border-radius: var(--radius2);
-      border:1px solid rgba(255,255,255,.12);
+      border:1px solid rgba(255,255,255,.08);
       box-shadow: var(--shadow);
       position: relative;
       overflow: hidden;
-    }
-    main::before{
-      content:"";
-      position:absolute;
-      inset:-2px;
-      background: radial-gradient(700px 260px at 10% 10%, rgba(34,211,238,.14) 0%, transparent 55%),
-                  radial-gradient(620px 280px at 90% 15%, rgba(79,70,229,.18) 0%, transparent 55%);
-      pointer-events:none;
-      opacity:.9;
     }
     main > *{position:relative}
 
@@ -186,7 +173,7 @@
 
     /* Footer */
     footer {
-      background: rgba(0,0,0,.22);
+      background: #0a0a0a;
       border-top: 1px solid rgba(255,255,255,.08);
       color: rgba(255,255,255,.92);
       padding: 52px 20px 26px;
