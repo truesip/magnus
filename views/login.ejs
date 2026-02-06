@@ -6,20 +6,20 @@
   <title>Login - TalkUSA</title>
   <style>
     :root{
-      --bg:#050816;
-      --bg2:#0b1024;
-      --card:rgba(255,255,255,.06);
-      --card2:rgba(255,255,255,.08);
-      --border:rgba(255,255,255,.12);
+      --bg:#111111;
+      --bg2:#1a1a1a;
+      --card:rgba(255,255,255,.04);
+      --card2:rgba(255,255,255,.06);
+      --border:rgba(255,255,255,.10);
       --text:rgba(255,255,255,.92);
-      --muted:rgba(255,255,255,.70);
-      --muted2:rgba(255,255,255,.55);
-      --primary:#4f46e5;
-      --accent:#22d3ee;
-      --accent2:#a78bfa;
-      --shadow:0 24px 80px rgba(0,0,0,.55);
-      --radius:16px;
-      --radius2:22px;
+      --muted:rgba(255,255,255,.65);
+      --muted2:rgba(255,255,255,.45);
+      --primary:#10b981;
+      --accent:#10b981;
+      --accent2:#6ee7b7;
+      --shadow:0 8px 32px rgba(0,0,0,.50);
+      --radius:12px;
+      --radius2:16px;
       --max:1200px;
     }
 
@@ -27,10 +27,7 @@
     html,body{height:100%}
     body{
       font-family: ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
-      background: radial-gradient(1200px 600px at 20% 10%, rgba(79,70,229,.18) 0%, transparent 55%),
-                  radial-gradient(900px 520px at 85% 35%, rgba(34,211,238,.14) 0%, transparent 60%),
-                  radial-gradient(900px 520px at 55% 90%, rgba(167,139,250,.10) 0%, transparent 60%),
-                  linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
+      background: var(--bg);
       color:var(--text);
       overflow-x:hidden;
       min-height:100vh;
@@ -45,9 +42,8 @@
       position:sticky;
       top:0;
       z-index:50;
-      background: rgba(5,8,22,.72);
+      background: rgba(17,17,17,.95);
       border-bottom:1px solid rgba(255,255,255,.08);
-      backdrop-filter: blur(14px);
     }
     .nav-container{
       max-width:var(--max);
@@ -72,8 +68,8 @@
     .brand__mark{
       width:34px;height:34px;
       border-radius:10px;
-      background: linear-gradient(135deg, rgba(79,70,229,1) 0%, rgba(34,211,238,1) 100%);
-      box-shadow: 0 14px 30px rgba(79,70,229,.25);
+      background: linear-gradient(135deg, #10b981 0%, #6ee7b7 100%);
+      box-shadow: 0 8px 20px rgba(16,185,129,.25);
       display:inline-block;
       flex:none;
     }
@@ -109,7 +105,7 @@
       color:var(--muted);
     }
     .nav-login:hover{transform: translateY(-1px); background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.18); color:var(--text)}
-    .nav-login[aria-current="page"]{border-color: rgba(34,211,238,.45); background: rgba(34,211,238,.10); color:var(--text)}
+    .nav-login[aria-current="page"]{border-color: rgba(16,185,129,.45); background: rgba(16,185,129,.12); color:var(--text)}
 
     .nav-cta{
       display:inline-flex;
@@ -121,13 +117,13 @@
       padding:11px 14px;
       font-weight:900;
       font-size:14px;
-      border:1px solid rgba(79,70,229,.45);
-      background: linear-gradient(135deg, rgba(79,70,229,1) 0%, rgba(34,211,238,1) 100%);
+      border:1px solid rgba(16,185,129,.45);
+      background: #10b981;
       color:#071024 !important;
       transition: transform .15s ease, border-color .15s ease;
       white-space:nowrap;
     }
-    .nav-cta:hover{transform: translateY(-1px); border-color: rgba(34,211,238,.75)}
+    .nav-cta:hover{transform: translateY(-1px); border-color: rgba(16,185,129,.75); background:#0d9668}
 
     @media (max-width:768px){.nav-links{display:none}}
 
@@ -135,22 +131,14 @@
     .main-content{flex:1;display:grid;place-items:center;padding:70px 20px 40px}
     .card{
       border-radius: var(--radius2);
-      border:1px solid rgba(255,255,255,.12);
-      background: linear-gradient(180deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.05) 100%);
+      border:1px solid rgba(255,255,255,.08);
+      background: #1a1a1a;
       box-shadow: var(--shadow);
       padding:26px 22px;
       max-width:460px;
       width:calc(100% - 24px);
       position:relative;
       overflow:hidden;
-    }
-    .card::before{
-      content:"";
-      position:absolute;
-      inset:-2px;
-      background: radial-gradient(600px 220px at 10% 10%, rgba(34,211,238,.14) 0%, transparent 55%),
-                  radial-gradient(520px 240px at 85% 20%, rgba(79,70,229,.18) 0%, transparent 55%);
-      pointer-events:none;
     }
     .card > *{position:relative}
 
@@ -161,25 +149,25 @@
     label{display:block;font-size:13px;color:rgba(255,255,255,.82);font-weight:800;margin-bottom:8px}
     input{width:100%;padding:14px 14px;border:1px solid rgba(255,255,255,.12);border-radius:12px;font-size:14px;background: rgba(255,255,255,.05);color:var(--text)}
     input::placeholder{color:rgba(255,255,255,.45)}
-    input:focus{outline:none;border-color: rgba(34,211,238,.55);box-shadow:0 0 0 4px rgba(34,211,238,.10);background: rgba(255,255,255,.07)}
+    input:focus{outline:none;border-color: rgba(16,185,129,.55);box-shadow:0 0 0 4px rgba(16,185,129,.10);background: rgba(255,255,255,.07)}
 
-    .btn{width:100%;margin:18px 0 0;padding:14px 16px;background: linear-gradient(135deg, rgba(79,70,229,1) 0%, rgba(34,211,238,1) 100%);color:#071024;border:none;border-radius:12px;font-weight:950;letter-spacing:.2px;display:block;cursor:pointer;box-shadow: 0 10px 30px rgba(79,70,229,.20);transition: transform .15s ease, box-shadow .15s ease}
-    .btn:hover{transform: translateY(-1px);box-shadow: 0 14px 40px rgba(79,70,229,.25)}
+    .btn{width:100%;margin:18px 0 0;padding:14px 16px;background: #10b981;color:#071024;border:none;border-radius:12px;font-weight:950;letter-spacing:.2px;display:block;cursor:pointer;box-shadow: 0 8px 24px rgba(16,185,129,.20);transition: transform .15s ease, box-shadow .15s ease}
+    .btn:hover{transform: translateY(-1px);box-shadow: 0 12px 32px rgba(16,185,129,.25);background:#0d9668}
 
     .error{background: rgba(239,68,68,.10);border:1px solid rgba(239,68,68,.35);color:rgba(255,255,255,.88);border-left:4px solid #ef4444;border-radius:14px;padding:12px 12px;font-size:13px;margin-bottom:14px}
 
     .hint{font-size:13px;color:var(--muted2);margin-top:14px;text-align:center}
-    .hint a{color:rgba(255,255,255,.86);text-decoration:underline;text-decoration-color: rgba(34,211,238,.65);text-underline-offset:3px}
-    .hint a:hover{color:#fff;text-decoration-color: rgba(167,139,250,.85)}
+    .hint a{color:rgba(255,255,255,.86);text-decoration:underline;text-decoration-color: rgba(16,185,129,.65);text-underline-offset:3px}
+    .hint a:hover{color:#fff;text-decoration-color: rgba(16,185,129,.85)}
 
     .forgot-link{font-size:13px;color:var(--muted2);text-align:right;margin-top:8px}
     .forgot-link a{color:rgba(255,255,255,.72);text-decoration:none}
     .forgot-link a:hover{color:#fff;text-decoration:underline}
 
     /* Modal styles */
-    .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);backdrop-filter:blur(4px);display:none;place-items:center;z-index:100}
+    .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.70);display:none;place-items:center;z-index:100}
     .modal-overlay.active{display:grid}
-    .modal{background:linear-gradient(180deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.05) 100%);border:1px solid rgba(255,255,255,.12);border-radius:var(--radius2);padding:26px 22px;max-width:420px;width:calc(100% - 40px);position:relative;box-shadow:var(--shadow)}
+    .modal{background:#1a1a1a;border:1px solid rgba(255,255,255,.10);border-radius:var(--radius2);padding:26px 22px;max-width:420px;width:calc(100% - 40px);position:relative;box-shadow:var(--shadow)}
     .modal h2{margin:0 0 8px 0;font-size:18px;text-align:center}
     .modal-sub{color:var(--muted);font-size:13px;text-align:center;margin-bottom:16px}
     .modal-close{position:absolute;top:12px;right:12px;background:none;border:none;color:var(--muted);cursor:pointer;font-size:20px;padding:4px 8px}
@@ -190,7 +178,7 @@
     .hidden{display:none!important}
 
     /* Footer */
-    .site-footer{background: rgba(0,0,0,.22);border-top: 1px solid rgba(255,255,255,.08);padding:52px 20px 26px;text-align:center;margin-top:auto}
+    .site-footer{background: #0a0a0a;border-top: 1px solid rgba(255,255,255,.08);padding:52px 20px 26px;text-align:center;margin-top:auto}
     .footer-brand{font-weight:900;font-size:20px;letter-spacing:.2px;color:#fff;margin-bottom:6px}
     .footer-tagline{color:rgba(255,255,255,.60);margin-bottom:26px}
     .footer-contact{margin-top:10px;color:rgba(255,255,255,.72);font-size:14px;line-height:1.8}
