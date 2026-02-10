@@ -256,6 +256,86 @@
     }
     .chip strong{color:rgba(255,255,255,.92)}
 
+    /* Showcase (layout inspired by provided reference) */
+    .section__head--center{text-align:center;margin-left:auto;margin-right:auto}
+    .showcase-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:18px;margin-top:36px}
+    .showcase-card{
+      border-radius:24px;
+      border:1px solid rgba(255,255,255,.10);
+      background:#0b0b0b;
+      overflow:hidden;
+      display:flex;
+      flex-direction:column;
+      min-height:420px;
+    }
+    .showcase-card__body{padding:26px 24px}
+    .showcase-card h3{margin:0 0 10px 0;font-size:24px;line-height:1.15;letter-spacing:-.01em;color:#fff}
+    .showcase-card p{margin:0;color:rgba(255,255,255,.72);font-size:14px;line-height:1.65;max-width:58ch}
+    .showcase-link{display:inline-flex;align-items:center;gap:10px;margin-top:18px;font-weight:850;color:#fff;text-decoration:none}
+    .showcase-link:hover{text-decoration:underline;text-underline-offset:3px}
+    .showcase-visual{margin-top:auto;position:relative;height:210px}
+    .showcase-card--globe .showcase-visual{height:245px}
+    .showcase-visual svg{position:absolute;inset:0;width:100%;height:100%}
+
+    .split{
+      display:grid;
+      grid-template-columns: 1fr 1.1fr;
+      gap:24px;
+      align-items:start;
+      margin-top:34px;
+    }
+    .split h2{margin:0 0 10px 0;font-size:36px;line-height:1.15;letter-spacing:-.02em}
+    .split p{margin:0;color:var(--muted);font-size:16px;line-height:1.75}
+    .feature-stack{display:flex;flex-direction:column;gap:12px}
+    .feature-row{
+      background:rgba(255,255,255,.04);
+      border:1px solid rgba(255,255,255,.10);
+      border-radius:16px;
+      padding:14px 16px;
+      display:flex;
+      align-items:center;
+      gap:14px;
+    }
+    .feature-row__icon{
+      width:38px;height:38px;
+      border-radius:12px;
+      display:grid;
+      place-items:center;
+      background:rgba(16,185,129,.15);
+      border:1px solid rgba(16,185,129,.35);
+      color:#bbf7d0;
+      flex:none;
+      font-size:18px;
+    }
+    .feature-row h4{margin:0;font-size:14px;font-weight:950;color:rgba(255,255,255,.92)}
+    .feature-row p{margin:2px 0 0 0;font-size:12px;color:rgba(255,255,255,.65);line-height:1.55}
+    .feature-row__end{margin-left:auto;color:rgba(255,255,255,.35);font-weight:950}
+
+    .phone-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:38px}
+    .phone{
+      border-radius:24px;
+      border:1px solid rgba(255,255,255,.10);
+      background: radial-gradient(540px 340px at 50% 0%, rgba(255,255,255,.06) 0%, transparent 60%), #0b0b0b;
+      overflow:hidden;
+      box-shadow: var(--shadow);
+      min-height:520px;
+      position:relative;
+    }
+    .phone::before{content:"";position:absolute;inset:0;background: linear-gradient(180deg, rgba(255,255,255,.03) 0%, rgba(255,255,255,0) 35%);pointer-events:none}
+    .phone__top{position:relative;padding:16px 16px 10px;display:flex;align-items:center;justify-content:space-between;gap:10px}
+    .phone__title{font-weight:900;color:rgba(255,255,255,.90);font-size:12px;letter-spacing:.2px;display:flex;align-items:center;gap:8px}
+    .phone__meta{color:rgba(255,255,255,.55);font-size:12px;font-weight:800}
+    .phone__screen{position:relative;padding:12px 16px 76px;display:flex;flex-direction:column;gap:10px}
+    .bubble{max-width:86%;padding:10px 12px;border-radius:14px;border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.06);color:rgba(255,255,255,.82);font-size:12px;line-height:1.55}
+    .bubble--me{align-self:flex-end;background:rgba(0,0,0,.22);border-color:rgba(255,255,255,.12)}
+    .phone__input{position:absolute;left:12px;right:12px;bottom:12px;border-radius:16px;border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.06);padding:12px 12px;display:flex;align-items:center;gap:10px}
+    .phone__placeholder{flex:1;color:rgba(255,255,255,.55);font-size:12px}
+    .phone__send{width:34px;height:34px;border-radius:12px;background:#10b981;color:#071024;display:grid;place-items:center;font-weight:950}
+
+    .call-center{display:grid;place-items:center;min-height:320px;position:relative}
+    .hangup{width:54px;height:54px;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);display:grid;place-items:center;color:#fff;font-weight:950}
+    .hangup::before{content:"✕";font-size:18px;line-height:1}
+
     /* Sections */
     .section{padding:90px 20px}
     .section--alt{background: #161616; border-top: 1px solid rgba(255,255,255,.06); border-bottom: 1px solid rgba(255,255,255,.06)}
@@ -396,6 +476,9 @@
       .priceCard{grid-column: span 6}
       .steps{grid-template-columns:1fr}
       .nav__links{display:none}
+      .showcase-grid{grid-template-columns:1fr}
+      .split{grid-template-columns:1fr}
+      .phone-grid{grid-template-columns:1fr}
     }
     @media (max-width: 620px){
       .hero{padding-top:108px}
@@ -526,6 +609,168 @@
             </div>
           </div>
         </aside>
+      </div>
+    </section>
+
+    <section class="section section--alt" id="omnichannel">
+      <div class="section__inner">
+        <div class="section__head section__head--center">
+          <div class="kicker">Any use case. Any industry. Any language.</div>
+          <h2>Support your customers anywhere and everywhere</h2>
+        </div>
+
+        <div class="showcase-grid" aria-label="TalkUSA use cases">
+          <article class="showcase-card showcase-card--waves">
+            <div class="showcase-card__body">
+              <h3>From customer support to sales, and everything in between.</h3>
+              <p>TalkUSA powers real conversations over voice + video, then delivers follow‑ups via SMS, email, or physical mail. Use it for support, lead qualification, renewals, appointment flows, and collections.</p>
+              <a class="showcase-link" href="#contact">Talk to Sales <span aria-hidden="true">→</span></a>
+            </div>
+            <div class="showcase-visual" aria-hidden="true">
+              <svg viewBox="0 0 800 240" preserveAspectRatio="none">
+                <path d="M0 170 C 120 120, 240 220, 360 170 C 520 110, 640 230, 800 160 L 800 240 L 0 240 Z" fill="#fb7185" opacity=".85"/>
+                <path d="M0 165 C 150 95, 250 210, 380 150 C 520 85, 640 210, 800 140 L 800 240 L 0 240 Z" fill="#f97316" opacity=".92"/>
+                <path d="M0 175 C 160 120, 280 210, 420 160 C 560 110, 690 205, 800 170 L 800 240 L 0 240 Z" fill="#fbbf24" opacity=".95"/>
+                <path d="M0 190 C 140 235, 280 105, 430 180 C 560 245, 680 130, 800 200 L 800 240 L 0 240 Z" fill="#7c3aed" opacity=".78"/>
+                <path d="M0 210 C 180 250, 310 140, 450 200 C 600 265, 690 170, 800 220 L 800 240 L 0 240 Z" fill="#0ea5e9" opacity=".55"/>
+              </svg>
+            </div>
+          </article>
+
+          <article class="showcase-card showcase-card--globe">
+            <div class="showcase-card__body">
+              <h3>Keep your customer’s data secure—with routing you control.</h3>
+              <p>Built on a telecom foundation, TalkUSA supports configurable transfers, audit‑friendly history, and secure integrations—so every call, meeting, payment, and follow‑up stays tied to the conversation.</p>
+            </div>
+            <div class="showcase-visual" aria-hidden="true">
+              <svg viewBox="0 0 800 320" preserveAspectRatio="none">
+                <defs>
+                  <pattern id="globeDots" width="10" height="10" patternUnits="userSpaceOnUse">
+                    <circle cx="2" cy="2" r="1.2" fill="rgba(0,0,0,.35)" />
+                  </pattern>
+                  <clipPath id="globeClip">
+                    <circle cx="585" cy="245" r="200" />
+                  </clipPath>
+                </defs>
+
+                <path d="M110 290 C 180 120, 330 65, 465 260" stroke="#f97316" stroke-width="10" fill="none" stroke-linecap="round" opacity=".95"/>
+                <path d="M210 300 C 285 120, 430 55, 560 250" stroke="#a855f7" stroke-width="10" fill="none" stroke-linecap="round" opacity=".9"/>
+                <path d="M320 310 C 410 130, 545 70, 650 245" stroke="#fbbf24" stroke-width="10" fill="none" stroke-linecap="round" opacity=".95"/>
+                <path d="M650 305 C 680 210, 720 165, 760 250" stroke="#7c3aed" stroke-width="10" fill="none" stroke-linecap="round" opacity=".9"/>
+
+                <g clip-path="url(#globeClip)">
+                  <circle cx="585" cy="245" r="210" fill="#2563eb" />
+                  <rect x="360" y="40" width="520" height="520" fill="url(#globeDots)" opacity=".55"/>
+                </g>
+              </svg>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="agents">
+      <div class="section__inner">
+        <div class="split">
+          <div>
+            <h2>Build AI agents people want to talk to.</h2>
+            <p>Design agents for real conversations—voice or video—with SMS, email, payments, and human handoffs built in. Start simple, then add automation as your workflows grow.</p>
+            <div style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap">
+              <a class="btn btn--primary" href="/signup">Get started</a>
+              <a class="btn" href="#contact">Talk to us</a>
+            </div>
+          </div>
+
+          <div class="feature-stack" role="list" aria-label="Platform highlights">
+            <div class="feature-row" role="listitem">
+              <div class="feature-row__icon" aria-hidden="true">📞</div>
+              <div>
+                <h4>Calls, SMS, and Video</h4>
+                <p>Omni‑channel communication—route, follow up, and escalate to a human when needed.</p>
+              </div>
+              <div class="feature-row__end" aria-hidden="true">↗</div>
+            </div>
+
+            <div class="feature-row" role="listitem">
+              <div class="feature-row__icon" aria-hidden="true">⚡</div>
+              <div>
+                <h4>Outbound dialing with concurrency controls</h4>
+                <p>Run campaigns with configurable concurrency and real‑time lead statuses.</p>
+              </div>
+              <div class="feature-row__end" aria-hidden="true">↗</div>
+            </div>
+
+            <div class="feature-row" role="listitem">
+              <div class="feature-row__icon" aria-hidden="true">🧾</div>
+              <div>
+                <h4>Information on every conversation</h4>
+                <p>Track outcomes, transfers, payments, and follow‑ups from one dashboard.</p>
+              </div>
+              <div class="feature-row__end" aria-hidden="true">↗</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--alt" id="channels">
+      <div class="section__inner">
+        <div class="section__head section__head--center">
+          <div class="kicker">True omni‑channel communication.</div>
+          <h2>Make a call. Send a text. Start a meeting. All on TalkUSA.</h2>
+        </div>
+
+        <div class="phone-grid" role="list" aria-label="Examples">
+          <div class="phone" role="listitem" aria-label="Inbound call example">
+            <div class="phone__top">
+              <div class="phone__title"><span aria-hidden="true">🗣️</span> Inbound call</div>
+              <div class="phone__meta">Voice</div>
+            </div>
+            <div class="phone__screen">
+              <div class="bubble">Hi Daniel, this is TalkUSA AI. Do you have a moment to confirm your upcoming appointment?</div>
+              <div class="bubble bubble--me">Yes—tomorrow at 2pm.</div>
+              <div class="bubble">Great. Want a calendar invite by SMS or email?</div>
+            </div>
+            <div class="phone__input" aria-hidden="true">
+              <div class="phone__placeholder">Message</div>
+              <div class="phone__send">➤</div>
+            </div>
+          </div>
+
+          <div class="phone" role="listitem" aria-label="Voice call example">
+            <div class="phone__top">
+              <div class="phone__title"><span aria-hidden="true">📞</span> TalkUSA Voice</div>
+              <div class="phone__meta">00:55</div>
+            </div>
+            <div class="call-center">
+              <div style="text-align:center">
+                <div style="color:rgba(255,255,255,.55);font-size:12px;font-weight:800;margin-bottom:8px">Jack</div>
+                <div style="font-size:18px;font-weight:900;color:rgba(255,255,255,.92)">Alright, thanks.</div>
+              </div>
+            </div>
+            <div style="position:absolute;left:0;right:0;bottom:18px;display:flex;justify-content:center">
+              <div class="hangup" aria-hidden="true"></div>
+            </div>
+          </div>
+
+          <div class="phone" role="listitem" aria-label="SMS follow-up example">
+            <div class="phone__top">
+              <div class="phone__title"><span aria-hidden="true">💬</span> Follow‑up</div>
+              <div class="phone__meta">SMS</div>
+            </div>
+            <div class="phone__screen">
+              <div class="bubble">Hi Greg, I need to confirm a few details to move your request along.</div>
+              <div class="bubble">What’s your last name?</div>
+              <div class="bubble bubble--me">Smith</div>
+              <div class="bubble">What’s this for?</div>
+              <div class="bubble bubble--me">New home</div>
+            </div>
+            <div class="phone__input" aria-hidden="true">
+              <div class="phone__placeholder">Message</div>
+              <div class="phone__send">➤</div>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
