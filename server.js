@@ -13317,8 +13317,84 @@ app.get('/api/me/ai/numbers/available', requireAuth, async (req, res) => {
       ? avail.data
       : (Array.isArray(avail?.numbers) ? avail.numbers : (Array.isArray(avail) ? avail : []));
 
-    const qRegion = String(region || '').toLowerCase();
+    const qRegionRaw = String(region || '').trim();
+    const qRegionLower = qRegionRaw.toLowerCase();
     const qCity = String(city || '').toLowerCase();
+
+    const US_STATE_NAME_TO_CODE = {
+      'alabama': 'AL',
+      'alaska': 'AK',
+      'arizona': 'AZ',
+      'arkansas': 'AR',
+      'california': 'CA',
+      'colorado': 'CO',
+      'connecticut': 'CT',
+      'delaware': 'DE',
+      'florida': 'FL',
+      'georgia': 'GA',
+      'hawaii': 'HI',
+      'idaho': 'ID',
+      'illinois': 'IL',
+      'indiana': 'IN',
+      'iowa': 'IA',
+      'kansas': 'KS',
+      'kentucky': 'KY',
+      'louisiana': 'LA',
+      'maine': 'ME',
+      'maryland': 'MD',
+      'massachusetts': 'MA',
+      'michigan': 'MI',
+      'minnesota': 'MN',
+      'mississippi': 'MS',
+      'missouri': 'MO',
+      'montana': 'MT',
+      'nebraska': 'NE',
+      'nevada': 'NV',
+      'new hampshire': 'NH',
+      'new jersey': 'NJ',
+      'new mexico': 'NM',
+      'new york': 'NY',
+      'north carolina': 'NC',
+      'north dakota': 'ND',
+      'ohio': 'OH',
+      'oklahoma': 'OK',
+      'oregon': 'OR',
+      'pennsylvania': 'PA',
+      'rhode island': 'RI',
+      'south carolina': 'SC',
+      'south dakota': 'SD',
+      'tennessee': 'TN',
+      'texas': 'TX',
+      'utah': 'UT',
+      'vermont': 'VT',
+      'virginia': 'VA',
+      'washington': 'WA',
+      'west virginia': 'WV',
+      'wisconsin': 'WI',
+      'wyoming': 'WY'
+    };
+    const US_STATE_CODE_SET = new Set(Object.values(US_STATE_NAME_TO_CODE));
+
+    function normalizeUsStateCode(s) {
+      const raw = String(s || '').trim();
+      if (!raw) return '';
+
+      const lower = raw.toLowerCase();
+      if (US_STATE_NAME_TO_CODE[lower]) return US_STATE_NAME_TO_CODE[lower];
+
+      const upper = raw.toUpperCase();
+      if (/^[A-Z]{2}$/.test(upper) && US_STATE_CODE_SET.has(upper)) return upper;
+
+      // Accept values like "US-WA" or "WA, US".
+      const tokens = upper.split(/[^A-Z]+/).filter(Boolean);
+      for (let i = tokens.length - 1; i >= 0; i--) {
+        const tok = tokens[i];
+        if (tok === 'US' || tok === 'USA') continue;
+        if (tok.length === 2 && US_STATE_CODE_SET.has(tok)) return tok;
+      }
+
+      return '';
+    }
 
     function digitsOnly(s) {
       return String(s || '').replace(/\D/g, '');
@@ -13361,9 +13437,16 @@ app.get('/api/me/ai/numbers/available', requireAuth, async (req, res) => {
         if (!npa || npa !== areaCode) continue;
       }
 
-      if (qRegion) {
-        const r = String(regionVal || '').toLowerCase();
-        if (!r.includes(qRegion)) continue;
+      if (qRegionRaw) {
+        const rRaw = String(regionVal || '').trim();
+        const qCode = normalizeUsStateCode(qRegionRaw);
+        if (qCode) {
+          const rCode = normalizeUsStateCode(rRaw);
+          if (!rCode || rCode !== qCode) continue;
+        } else {
+          const r = rRaw.toLowerCase();
+          if (!r.includes(qRegionLower)) continue;
+        }
       }
 
       if (qCity) {
