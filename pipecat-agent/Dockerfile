@@ -1,10 +1,14 @@
 # Pipecat Cloud agent image
 # NOTE: Pipecat Cloud expects Linux/ARM64 images.
-FROM python:3.11-slim
+#
+# IMPORTANT: Pipecat Cloud requires a long-running runner process (app.py) inside the image.
+# The last-known-good images in this repo ship /app/app.py and start it by default.
+# We layer our bot.py and Python deps on top of that runner image.
+FROM truesip/agenttalkusa:ambience-2026-01-19-a7959c8
 
 WORKDIR /app
 
-# Install system dependencies for audio processing
+# Install system dependencies for audio processing (not included in the base runner image)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsndfile1 \
@@ -16,4 +20,4 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir -r req
 
 COPY bot.py ./bot.py
 
-CMD ["python", "bot.py"]
+# Do not override CMD; base image starts the Pipecat runner (python app.py)
