@@ -3791,6 +3791,10 @@ app.post('/api/reset-password', otpVerifyLimiter, async (req, res) => {
 app.get('/dashboard', requireAuth, (req, res) => {
   const localMarkup = parseFloat(process.env.DID_LOCAL_MONTHLY_MARKUP || '10.20') || 0;
   const tollfreeMarkup = parseFloat(process.env.DID_TOLLFREE_MONTHLY_MARKUP || '25.20') || 0;
+
+  const aiLocalFee = parseFloat(process.env.AI_DID_LOCAL_MONTHLY_FEE || process.env.DID_LOCAL_MONTHLY_MARKUP || '10.20') || 0;
+  const aiTollfreeFee = parseFloat(process.env.AI_DID_TOLLFREE_MONTHLY_FEE || process.env.DID_TOLLFREE_MONTHLY_MARKUP || '25.20') || 0;
+
   const checkoutMin = Number.isFinite(CHECKOUT_MIN_AMOUNT) ? CHECKOUT_MIN_AMOUNT : 100;
   const checkoutMax = Number.isFinite(CHECKOUT_MAX_AMOUNT) ? CHECKOUT_MAX_AMOUNT : 500;
   const sipDomain = process.env.SIP_DOMAIN || process.env.MAGNUSBILLING_TLS_SERVERNAME || process.env.MAGNUSBILLING_HOST_HEADER || '';
@@ -3798,6 +3802,8 @@ app.get('/dashboard', requireAuth, (req, res) => {
     username: req.session.username || '',
     localDidMarkup: localMarkup,
     tollfreeDidMarkup: tollfreeMarkup,
+    aiLocalDidFee: aiLocalFee,
+    aiTollfreeDidFee: aiTollfreeFee,
     checkoutMinAmount: checkoutMin,
     checkoutMaxAmount: checkoutMax,
     sipDomain,
@@ -10344,6 +10350,35 @@ function buildDailyRoomCreationApiUrl({ agentName }) {
   }
 }
 
+function parseDailyPhoneNumberBuyResult(buy, fallbackNumber) {
+  const dailyNumberId = buy?.id
+    || buy?.data?.id
+    || buy?.data?.number_id
+    || buy?.number_id
+    || buy?.data?.phone_number_id
+    || buy?.phone_number_id;
+
+  const phoneNumber = buy?.number
+    || buy?.data?.number
+    || buy?.phone_number
+    || buy?.data?.phone_number
+    || fallbackNumber;
+
+  if (!dailyNumberId || !phoneNumber) {
+    if (DEBUG) console.warn('[ai.number.buy] Unexpected Daily response:', buy);
+    throw new Error('Phone number purchase succeeded but the response was missing id/number');
+  }
+
+  return { dailyNumberId: String(dailyNumberId), phoneNumber: String(phoneNumber) };
+}
+
+async function dailyBuySpecificPhoneNumber(number) {
+  const desired = String(number || '').trim();
+  if (!desired) throw new Error('Phone number is required');
+  const buy = await dailyApiCall({ method: 'POST', path: '/buy-phone-number', body: { number: desired } });
+  return parseDailyPhoneNumberBuyResult(buy, desired);
+}
+
 async function dailyBuyAnyAvailableNumber() {
   // Daily Phone Numbers
   // GET /list-available-numbers -> { total_count, data: [{ number, region, ... }] }
@@ -10366,15 +10401,7 @@ async function dailyBuyAnyAvailableNumber() {
   const buyBody = pickNumber ? { number: String(pickNumber) } : {};
   const buy = await dailyApiCall({ method: 'POST', path: '/buy-phone-number', body: buyBody });
 
-  const dailyNumberId = buy?.id || buy?.data?.id;
-  const phoneNumber = buy?.number || buy?.data?.number || pickNumber;
-
-  if (!dailyNumberId || !phoneNumber) {
-    if (DEBUG) console.warn('[ai.number.buy] Unexpected Daily response:', buy);
-    throw new Error('Phone number purchase succeeded but the response was missing id/number');
-  }
-
-  return { dailyNumberId: String(dailyNumberId), phoneNumber: String(phoneNumber) };
+  return parseDailyPhoneNumberBuyResult(buy, pickNumber);
 }
 
 async function dailyReleasePhoneNumber(dailyNumberId) {
@@ -13246,6 +13273,123 @@ app.get('/api/me/ai/numbers', requireAuth, async (req, res) => {
   }
 });
 
+// Search available numbers (Daily)
+app.get('/api/me/ai/numbers/available', requireAuth, async (req, res) => {
+  try {
+    const areaCode = String(req.query.area_code || '').trim();
+    const region = String(req.query.region || '').trim();
+    const city = String(req.query.city || '').trim();
+
+    const patternTypeRaw = String(req.query.pattern_type || '').trim().toLowerCase();
+    const patternRaw = String(req.query.pattern || '').trim();
+
+    const limitRaw = req.query.limit;
+    let limit = 20;
+    if (limitRaw != null && String(limitRaw).trim() !== '') {
+      const n = parseInt(String(limitRaw), 10);
+      if (Number.isFinite(n) && n > 0) limit = Math.min(n, 50);
+    }
+
+    if (areaCode && !/^\d{3}$/.test(areaCode)) {
+      return res.status(400).json({ success: false, message: 'area_code must be 3 digits' });
+    }
+
+    let patternType = '';
+    if (patternTypeRaw) {
+      const allowed = ['contains', 'starts_with', 'ends_with'];
+      if (!allowed.includes(patternTypeRaw)) {
+        return res.status(400).json({ success: false, message: 'pattern_type must be one of: contains, starts_with, ends_with' });
+      }
+      patternType = patternTypeRaw;
+    }
+
+    const pattern = String(patternRaw || '').replace(/\D/g, '');
+    if (pattern && (pattern.length < 3 || pattern.length > 7)) {
+      return res.status(400).json({ success: false, message: 'pattern must be 3-7 digits' });
+    }
+
+    if (!areaCode && !region && !city && !pattern) {
+      return res.status(400).json({ success: false, message: 'Provide at least one filter (area_code, region, city, or pattern)' });
+    }
+
+    const avail = await dailyApiCall({ method: 'GET', path: '/list-available-numbers' });
+    const items = Array.isArray(avail?.data)
+      ? avail.data
+      : (Array.isArray(avail?.numbers) ? avail.numbers : (Array.isArray(avail) ? avail : []));
+
+    const qRegion = String(region || '').toLowerCase();
+    const qCity = String(city || '').toLowerCase();
+
+    function digitsOnly(s) {
+      return String(s || '').replace(/\D/g, '');
+    }
+
+    // For US/CA numbers, match against the 10-digit national number (NPA-NXX-XXXX).
+    function nanpNationalDigits(phoneNumber) {
+      let d = digitsOnly(phoneNumber);
+      if (d.length >= 11 && d.startsWith('1')) d = d.slice(1);
+      if (d.length > 10) d = d.slice(-10);
+      return d;
+    }
+
+    function getNanpAreaCode(phoneNumber) {
+      const nat = nanpNationalDigits(phoneNumber);
+      if (nat.length !== 10) return '';
+      return nat.slice(0, 3);
+    }
+
+    function matchPattern(targetDigits) {
+      if (!pattern) return true;
+      const t = String(targetDigits || '');
+      const type = patternType || 'contains';
+      if (type === 'starts_with') return t.startsWith(pattern);
+      if (type === 'ends_with') return t.endsWith(pattern);
+      return t.includes(pattern);
+    }
+
+    const results = [];
+
+    for (const it of (items || [])) {
+      const num = it?.number || it?.phone_number || it?.phoneNumber;
+      if (!num) continue;
+
+      const regionVal = it?.region || it?.state || it?.region_name || it?.state_name || it?.province || '';
+      const cityVal = it?.city || it?.locality || it?.city_name || '';
+
+      if (areaCode) {
+        const npa = getNanpAreaCode(num);
+        if (!npa || npa !== areaCode) continue;
+      }
+
+      if (qRegion) {
+        const r = String(regionVal || '').toLowerCase();
+        if (!r.includes(qRegion)) continue;
+      }
+
+      if (qCity) {
+        const c = String(cityVal || '').toLowerCase();
+        if (!c.includes(qCity)) continue;
+      }
+
+      const targetDigits = nanpNationalDigits(num) || digitsOnly(num);
+      if (!matchPattern(targetDigits)) continue;
+
+      results.push({
+        number: String(num),
+        region: regionVal ? String(regionVal) : '',
+        city: cityVal ? String(cityVal) : ''
+      });
+
+      if (results.length >= limit) break;
+    }
+
+    return res.json({ success: true, data: results });
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.numbers.available] error:', e?.data || e?.message || e);
+    return res.status(500).json({ success: false, message: e?.message || 'Failed to search available numbers' });
+  }
+});
+
 // Buy any available number
 app.post('/api/me/ai/numbers/buy', requireAuth, async (req, res) => {
   try {
@@ -13310,7 +13454,14 @@ app.post('/api/me/ai/numbers/buy', requireAuth, async (req, res) => {
       }
     }
 
-    const { dailyNumberId, phoneNumber } = await dailyBuyAnyAvailableNumber();
+    const requestedNumber = String((req.body && (req.body.number || req.body.phone_number || req.body.phoneNumber)) || '').trim();
+    if (requestedNumber && requestedNumber.length > 64) {
+      return res.status(400).json({ success: false, message: 'number is too long' });
+    }
+
+    const { dailyNumberId, phoneNumber } = requestedNumber
+      ? await dailyBuySpecificPhoneNumber(requestedNumber)
+      : await dailyBuyAnyAvailableNumber();
 
     const [ins] = await pool.execute(
       'INSERT INTO ai_numbers (user_id, daily_number_id, phone_number) VALUES (?,?,?)',

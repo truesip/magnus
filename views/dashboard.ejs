@@ -614,6 +614,40 @@
     #ai-numbers-table{table-layout:fixed}
     #ai-numbers-table td:nth-child(2) select{width:100% !important;min-width:0;max-width:100%}
 
+    /* Buy AI Number modal */
+    .buy-number-tabs{
+      display:flex;
+      gap:6px;
+      padding:6px;
+      border-radius:14px;
+      border:1px solid rgba(255,255,255,.10);
+      background:rgba(0,0,0,.18);
+    }
+    .buy-number-tab{
+      flex:1;
+      text-align:center;
+      background:transparent;
+      border:1px solid transparent;
+      color:rgba(255,255,255,.65);
+      padding:10px 12px;
+      border-radius:12px;
+      font-weight:900;
+      font-size:12px;
+      cursor:pointer;
+      transition:all .15s ease;
+    }
+    .buy-number-tab:hover{background:rgba(255,255,255,.06);color:#fff}
+    .buy-number-tab.active{
+      background:rgba(255,255,255,.10);
+      border-color:rgba(255,255,255,.14);
+      color:#fff;
+    }
+    #ai-buy-results-table{table-layout:fixed}
+    #ai-buy-results-table th:last-child,
+    #ai-buy-results-table td:last-child{width:110px;white-space:nowrap}
+    #ai-buy-results-table th:nth-child(2),
+    #ai-buy-results-table td:nth-child(2){width:38%;overflow-wrap:anywhere}
+
     /* Make the white inline cards in the AI panes match the dashboard theme */
     #view-ai div[style*="background:#ffffff"],
     #view-ai div[style*="background:#fff"]{
@@ -1517,6 +1551,76 @@
       </div>
     </div>
 
+    <!-- Buy AI Number Modal -->
+    <div id="buyAiNumberModal" class="ai-tool-modal">
+      <div class="ai-tool-modal-card" style="width:640px">
+        <div class="ai-tool-modal-header">
+          <span class="ai-tool-modal-icon">📞</span>
+          <span class="ai-tool-modal-title">Buy a phone number</span>
+          <button type="button" class="ai-tool-modal-close" id="closeBuyAiNumberModalBtn">&times;</button>
+        </div>
+        <div class="muted" style="margin-bottom:14px">Search for available phone numbers by area code or location.</div>
+
+        <div class="buy-number-tabs" role="tablist" aria-label="Search method">
+          <button type="button" class="buy-number-tab active" data-mode="area" role="tab" aria-selected="true">Area Code</button>
+          <button type="button" class="buy-number-tab" data-mode="location" role="tab" aria-selected="false">Region &amp; City</button>
+        </div>
+
+        <div class="ai-tool-modal-body" style="margin-top:12px">
+          <div id="buyAiNumberModeArea" class="buy-number-pane">
+            <div class="ai-tool-modal-row">
+              <div>
+                <label>Area Code</label>
+                <input id="aiBuyAreaCode" type="text" inputmode="numeric" pattern="\d{3}" maxlength="3" placeholder="Enter 3-digit area code">
+              </div>
+              <div>
+                <label>Pattern Type <span class="muted">(Optional)</span></label>
+                <select id="aiBuyPatternType">
+                  <option value="contains">Contains</option>
+                  <option value="starts_with">Starts with</option>
+                  <option value="ends_with">Ends with</option>
+                </select>
+              </div>
+            </div>
+            <div class="ai-tool-modal-row">
+              <div>
+                <label>Pattern Value <span class="muted">(Optional)</span></label>
+                <input id="aiBuyPatternValue" type="text" inputmode="numeric" placeholder="Enter 3-7 digits">
+              </div>
+              <div></div>
+            </div>
+          </div>
+
+          <div id="buyAiNumberModeLocation" class="buy-number-pane" style="display:none">
+            <div class="ai-tool-modal-row">
+              <div>
+                <label>Region / State</label>
+                <input id="aiBuyRegion" type="text" placeholder="e.g. Washington">
+              </div>
+              <div>
+                <label>City</label>
+                <input id="aiBuyCity" type="text" placeholder="e.g. Seattle">
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
+            <button id="aiBuySearchBtn" class="btn--primary" type="button">Search</button>
+          </div>
+          <div class="muted" id="aiBuyFeeNote" style="font-size:12px;margin-top:10px">Each number is billed at <strong>$<span id="aiBuyFeeValue">0.00</span>/mo</strong>.</div>
+
+          <div style="border-top:1px solid rgba(255,255,255,.10);padding-top:14px;margin-top:14px">
+            <div id="aiBuySearchStatus" class="muted" style="margin-bottom:10px">Enter your search and click Search.</div>
+            <table id="ai-buy-results-table" style="display:none">
+              <thead><tr><th>Number</th><th>Location</th><th>Action</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div id="ai-buy-results-empty" class="muted" style="display:none"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
 
     <!-- AI Agent Modal -->
     <div id="dialerCreateModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
@@ -2052,6 +2156,8 @@
   <script>
     const LOCAL_DID_MARKUP = <%= typeof localDidMarkup !== 'undefined' ? localDidMarkup : 10.20 %> || 0;
     const TOLLFREE_DID_MARKUP = <%= typeof tollfreeDidMarkup !== 'undefined' ? tollfreeDidMarkup : 25.20 %> || 0;
+    const AI_LOCAL_DID_FEE = <%= typeof aiLocalDidFee !== 'undefined' ? aiLocalDidFee : 10.20 %> || 0;
+    const AI_TOLLFREE_DID_FEE = <%= typeof aiTollfreeDidFee !== 'undefined' ? aiTollfreeDidFee : 25.20 %> || 0;
     const CHECKOUT_MIN_AMOUNT = <%= typeof checkoutMinAmount !== 'undefined' ? checkoutMinAmount : 100 %>;
     const CHECKOUT_MAX_AMOUNT = <%= typeof checkoutMaxAmount !== 'undefined' ? checkoutMaxAmount : 500 %>;
     const SIP_DOMAIN = <%- JSON.stringify(typeof sipDomain !== 'undefined' ? sipDomain : '') %>;
@@ -6595,32 +6701,273 @@ Guidelines:
       }
     });
 
-    // Buy number
-    $('#buyAiNumberBtn').addEventListener('click', async () => {
+    // ========== Buy AI Numbers (Daily) ==========
+    let buyAiNumberMode = 'area';
+    let buyAiNumberSearching = false;
+
+    function setBuyAiNumberFeeNote(){
+      const v = document.getElementById('aiBuyFeeValue');
+      if (!v) return;
+      const fee = Number.isFinite(AI_LOCAL_DID_FEE) ? AI_LOCAL_DID_FEE : 0;
+      v.textContent = fee.toFixed(2);
+    }
+
+    function resetBuyAiNumberResults(statusText){
+      const table = document.getElementById('ai-buy-results-table');
+      const empty = document.getElementById('ai-buy-results-empty');
+      const status = document.getElementById('aiBuySearchStatus');
+
+      if (table){
+        const tbody = table.querySelector('tbody');
+        if (tbody) tbody.innerHTML = '';
+        table.style.display = 'none';
+      }
+
+      if (empty){
+        empty.style.display = 'none';
+        empty.textContent = '';
+      }
+
+      if (status && statusText){
+        status.textContent = statusText;
+      }
+    }
+
+    function setBuyAiNumberMode(mode){
+      buyAiNumberMode = (String(mode || '').toLowerCase() === 'location') ? 'location' : 'area';
+      const modal = document.getElementById('buyAiNumberModal');
+      if (!modal) return;
+
+      modal.querySelectorAll('.buy-number-tab').forEach(btn => {
+        const m = String(btn.getAttribute('data-mode') || '').toLowerCase();
+        const active = m === buyAiNumberMode;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+
+      const areaPane = document.getElementById('buyAiNumberModeArea');
+      const locPane = document.getElementById('buyAiNumberModeLocation');
+      if (areaPane) areaPane.style.display = buyAiNumberMode === 'area' ? 'block' : 'none';
+      if (locPane) locPane.style.display = buyAiNumberMode === 'location' ? 'block' : 'none';
+
+      try {
+        if (buyAiNumberMode === 'area') document.getElementById('aiBuyAreaCode')?.focus();
+        else document.getElementById('aiBuyRegion')?.focus();
+      } catch {}
+    }
+
+    function openBuyAiNumberModal(){
+      const modal = document.getElementById('buyAiNumberModal');
+      if (!modal) return;
+      modal.style.display = 'flex';
+      setBuyAiNumberFeeNote();
+      setBuyAiNumberMode(buyAiNumberMode || 'area');
+      resetBuyAiNumberResults('Enter your search and click Search.');
+    }
+
+    function closeBuyAiNumberModal(){
+      const modal = document.getElementById('buyAiNumberModal');
+      if (!modal) return;
+      modal.style.display = 'none';
+    }
+
+    function renderBuyAiNumberResults(items){
+      const table = document.getElementById('ai-buy-results-table');
+      const tbody = table ? table.querySelector('tbody') : null;
+      const empty = document.getElementById('ai-buy-results-empty');
+
+      if (tbody) tbody.innerHTML = '';
+
+      const arr = Array.isArray(items) ? items : [];
+      if (!arr.length){
+        if (table) table.style.display = 'none';
+        if (empty){
+          empty.style.display = 'block';
+          empty.textContent = 'No numbers found for that search.';
+        }
+        return;
+      }
+
+      if (empty){
+        empty.style.display = 'none';
+        empty.textContent = '';
+      }
+
+      for (const it of arr){
+        const num = String(it && (it.number || it.phone_number || it.phoneNumber) ? (it.number || it.phone_number || it.phoneNumber) : '').trim();
+        if (!num) continue;
+        const loc = [it.city, it.region].filter(Boolean).join(', ') || '-';
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+          `<td>${escapeHtml(num)}</td>`+
+          `<td>${escapeHtml(loc)}</td>`+
+          `<td><button type="button" class="ai-buy-number btn--primary" data-number="${escapeHtml(num)}">Buy</button></td>`;
+        if (tbody) tbody.appendChild(tr);
+      }
+
+      if (table) table.style.display = 'table';
+    }
+
+    async function searchAvailableAiNumbers(){
+      if (buyAiNumberSearching) return;
+
+      const status = document.getElementById('aiBuySearchStatus');
+      const btn = document.getElementById('aiBuySearchBtn');
+
+      const params = new URLSearchParams();
+      params.set('limit', '25');
+
+      if (buyAiNumberMode === 'area'){
+        const area = String(document.getElementById('aiBuyAreaCode')?.value || '').trim();
+        const patternType = String(document.getElementById('aiBuyPatternType')?.value || '').trim();
+        const pattern = String(document.getElementById('aiBuyPatternValue')?.value || '').replace(/\D/g, '').trim();
+
+        if (!/^\d{3}$/.test(area)){
+          showToast('Please enter a valid 3-digit area code.', 'error');
+          if (status) status.textContent = 'Enter a valid 3-digit area code.';
+          return;
+        }
+        params.set('area_code', area);
+
+        if (pattern){
+          if (pattern.length < 3 || pattern.length > 7){
+            showToast('Pattern value must be 3-7 digits.', 'error');
+            if (status) status.textContent = 'Pattern value must be 3-7 digits.';
+            return;
+          }
+          params.set('pattern', pattern);
+          if (patternType) params.set('pattern_type', patternType);
+        }
+      } else {
+        const region = String(document.getElementById('aiBuyRegion')?.value || '').trim();
+        const city = String(document.getElementById('aiBuyCity')?.value || '').trim();
+        if (!region && !city){
+          showToast('Enter a region/state or a city.', 'error');
+          if (status) status.textContent = 'Enter a region/state or a city.';
+          return;
+        }
+        if (region) params.set('region', region);
+        if (city) params.set('city', city);
+      }
+
+      buyAiNumberSearching = true;
+      if (btn){
+        btn.disabled = true;
+        btn.textContent = 'Searching...';
+      }
+      if (status) status.textContent = 'Searching...';
+      resetBuyAiNumberResults();
+
+      try {
+        const r = await fetch(`/api/me/ai/numbers/available?${params.toString()}`);
+        const j = await r.json().catch(() => null);
+        if (!r.ok || !j || j.success === false){
+          showToast(j?.message || 'Search failed', 'error');
+          if (status) status.textContent = j?.message || 'Search failed. Please try again.';
+          return;
+        }
+        const arr = Array.isArray(j.data) ? j.data : [];
+        renderBuyAiNumberResults(arr);
+        if (status) status.textContent = arr.length ? `Found ${arr.length} result${arr.length === 1 ? '' : 's'}.` : 'No results.';
+      } catch (e){
+        showToast('Search failed', 'error');
+        if (status) status.textContent = 'Search failed. Please try again.';
+      } finally {
+        buyAiNumberSearching = false;
+        if (btn){
+          btn.disabled = false;
+          btn.textContent = 'Search';
+        }
+      }
+    }
+
+    // Modal wire-up
+    (function initBuyAiNumberModal(){
+      const modal = document.getElementById('buyAiNumberModal');
+      if (!modal) return;
+
+      modal.addEventListener('click', (e) => {
+        if (e.target === modal) closeBuyAiNumberModal();
+      });
+
+      const closeBtn = document.getElementById('closeBuyAiNumberModalBtn');
+      if (closeBtn) closeBtn.addEventListener('click', () => closeBuyAiNumberModal());
+
+      modal.querySelectorAll('.buy-number-tab').forEach((tabBtn) => {
+        tabBtn.addEventListener('click', () => {
+          setBuyAiNumberMode(tabBtn.getAttribute('data-mode'));
+          resetBuyAiNumberResults('Enter your search and click Search.');
+        });
+      });
+
+      const searchBtn = document.getElementById('aiBuySearchBtn');
+      if (searchBtn) searchBtn.addEventListener('click', () => searchAvailableAiNumbers());
+
+      ['aiBuyAreaCode', 'aiBuyPatternValue', 'aiBuyRegion', 'aiBuyCity'].forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('keypress', (ev) => {
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            searchAvailableAiNumbers();
+          }
+        });
+      });
+
+      modal.addEventListener('click', async (ev) => {
+        const btn = ev.target && ev.target.closest ? ev.target.closest('button.ai-buy-number') : null;
+        if (!btn) return;
+
+        if (aiNumbersBalanceLocked()) {
+          showToast('Balance must be positive to buy/assign AI numbers. Add funds to continue.', 'error');
+          applyAiNumbersBalanceLock();
+          return;
+        }
+
+        const number = String(btn.getAttribute('data-number') || '').trim();
+        if (!number) return;
+
+        if (!confirm(`Purchase ${number}? You will be charged monthly.`)) return;
+
+        btn.disabled = true;
+        const old = btn.textContent;
+        btn.textContent = 'Buying...';
+
+        try {
+          const r = await fetch('/api/me/ai/numbers/buy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ number })
+          });
+          const j = await r.json().catch(() => null);
+          if (!r.ok || !j || j.success === false) {
+            showToast(j?.message || 'Failed to buy number', 'error');
+            return;
+          }
+          showToast('Number purchased.');
+          closeBuyAiNumberModal();
+          await loadAiNumbers();
+        } catch (e) {
+          showToast('Failed to buy number', 'error');
+        } finally {
+          btn.disabled = false;
+          btn.textContent = old;
+        }
+      });
+    })();
+
+    // Buy number (opens modal)
+    $('#buyAiNumberBtn').addEventListener('click', () => {
       if (aiNumbersBalanceLocked()) {
         showToast('Balance must be positive to buy/assign AI numbers. Add funds to continue.', 'error');
         applyAiNumbersBalanceLock();
+        if (document.getElementById('addFundModal')) {
+          document.getElementById('addFundModal').style.display = 'flex';
+          try { document.getElementById('fundAmount')?.focus(); } catch {}
+        }
         return;
       }
-      const btn = $('#buyAiNumberBtn');
-      btn.disabled = true;
-      const old = btn.textContent;
-      btn.textContent = 'Buying...';
-      try {
-        const r = await fetch('/api/me/ai/numbers/buy', { method: 'POST' });
-        const j = await r.json();
-        if (!j || j.success === false) {
-          showToast(j?.message || 'Failed to buy number', 'error');
-          return;
-        }
-        showToast('Number purchased.');
-        await loadAiNumbers();
-      } catch (e) {
-        showToast('Failed to buy number', 'error');
-      } finally {
-        btn.disabled = false;
-        btn.textContent = old;
-      }
+      openBuyAiNumberModal();
     });
 
     // Delegated handlers for edit/delete + assign/unassign
