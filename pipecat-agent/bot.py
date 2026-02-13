@@ -258,10 +258,10 @@ _cartesia_default_voice_cache: Optional[str] = None
 
 
 class ResilientCartesiaTTSService(CartesiaTTSService):
-    \"\"\"Wrap CartesiaTTSService with serialized connect attempts + backoff.
+    """Wrap CartesiaTTSService with serialized connect attempts + backoff.
 
     This prevents connection storms that trigger Cartesia's HTTP 429 websocket rejects.
-    \"\"\"
+    """
 
     def __init__(
         self,
@@ -280,11 +280,11 @@ class ResilientCartesiaTTSService(CartesiaTTSService):
     async def _connect_websocket(self):
         # Fast-path if already connected.
         try:
-            if getattr(self, \"_websocket\", None) and self._websocket.state is not None:
+            if getattr(self, "_websocket", None) and self._websocket.state is not None:
                 # State.OPEN is value 1; avoid importing State here.
-                if str(getattr(self._websocket, \"state\", \"\")).lower() == \"open\" or getattr(
-                    getattr(self._websocket, \"state\", None), \"name\", \"\"
-                ).lower() == \"open\":
+                if str(getattr(self._websocket, "state", "")).lower() == "open" or getattr(
+                    getattr(self._websocket, "state", None), "name", ""
+                ).lower() == "open":
                     return
         except Exception:
             pass
@@ -298,10 +298,10 @@ class ResilientCartesiaTTSService(CartesiaTTSService):
             async with self._connect_lock:
                 # Another coroutine may have connected while we were waiting.
                 try:
-                    if getattr(self, \"_websocket\", None) and self._websocket.state is not None:
-                        if str(getattr(self._websocket, \"state\", \"\")).lower() == \"open\" or getattr(
-                            getattr(self._websocket, \"state\", None), \"name\", \"\"
-                        ).lower() == \"open\":
+                    if getattr(self, "_websocket", None) and self._websocket.state is not None:
+                        if str(getattr(self._websocket, "state", "")).lower() == "open" or getattr(
+                            getattr(self._websocket, "state", None), "name", ""
+                        ).lower() == "open":
                             return
                 except Exception:
                     pass
@@ -310,9 +310,9 @@ class ResilientCartesiaTTSService(CartesiaTTSService):
                     await super()._connect_websocket()
                     # Success?
                     try:
-                        if getattr(self, \"_websocket\", None) and (
-                            str(getattr(self._websocket, \"state\", \"\")).lower() == \"open\"
-                            or getattr(getattr(self._websocket, \"state\", None), \"name\", \"\").lower() == \"open\"
+                        if getattr(self, "_websocket", None) and (
+                            str(getattr(self._websocket, "state", "")).lower() == "open"
+                            or getattr(getattr(self._websocket, "state", None), "name", "").lower() == "open"
                         ):
                             return
                     except Exception:
@@ -320,16 +320,16 @@ class ResilientCartesiaTTSService(CartesiaTTSService):
                 except Exception as e:  # pragma: no cover - super already catches most
                     last_error = str(e)
                 else:
-                    last_error = \"Cartesia websocket still not open after connect() call\"
+                    last_error = "Cartesia websocket still not open after connect() call"
 
             # Backoff before retrying to avoid hammering Cartesia and hitting 429s.
             await asyncio.sleep(delay + random.uniform(0, delay * 0.5))
             delay = min(delay * 2, self._connect_backoff_max)
 
         # If we get here, all attempts failed; surface a clear error.
-        err_msg = last_error or \"failed to establish Cartesia websocket connection\"
-        await self.push_error(error_msg=f\"Cartesia connect failed after retries: {err_msg}\")
-        raise RuntimeError(f\"Cartesia TTS connection failed after {self._connect_max_attempts} attempts: {err_msg}\")
+        err_msg = last_error or "failed to establish Cartesia websocket connection"
+        await self.push_error(error_msg=f"Cartesia connect failed after retries: {err_msg}")
+        raise RuntimeError(f"Cartesia TTS connection failed after {self._connect_max_attempts} attempts: {err_msg}")
 
 
 async def _resolve_cartesia_voice_id(*, api_key: str) -> str:
