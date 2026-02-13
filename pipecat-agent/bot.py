@@ -3143,3 +3143,4 @@ async def bot(session_args: Any):
                 await heygen_http_session.close()
             except Exception:
                 pass
+
