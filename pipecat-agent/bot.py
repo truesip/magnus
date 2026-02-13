@@ -4,6 +4,7 @@ import inspect
 import io
 import json
 import os
+import random
 import re
 import uuid
 import wave
@@ -254,6 +255,81 @@ def _extract_session_mode(body: Any) -> str:
 
 
 _cartesia_default_voice_cache: Optional[str] = None
+
+
+class ResilientCartesiaTTSService(CartesiaTTSService):
+    \"\"\"Wrap CartesiaTTSService with serialized connect attempts + backoff.
+
+    This prevents connection storms that trigger Cartesia's HTTP 429 websocket rejects.
+    \"\"\"
+
+    def __init__(
+        self,
+        *args,
+        connect_backoff_initial: float = 0.5,
+        connect_backoff_max: float = 8.0,
+        connect_max_attempts: int = 6,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self._connect_lock = asyncio.Lock()
+        self._connect_backoff_initial = max(0.1, float(connect_backoff_initial))
+        self._connect_backoff_max = max(self._connect_backoff_initial, float(connect_backoff_max))
+        self._connect_max_attempts = max(1, int(connect_max_attempts))
+
+    async def _connect_websocket(self):
+        # Fast-path if already connected.
+        try:
+            if getattr(self, \"_websocket\", None) and self._websocket.state is not None:
+                # State.OPEN is value 1; avoid importing State here.
+                if str(getattr(self._websocket, \"state\", \"\")).lower() == \"open\" or getattr(
+                    getattr(self._websocket, \"state\", None), \"name\", \"\"
+                ).lower() == \"open\":
+                    return
+        except Exception:
+            pass
+
+        attempt = 0
+        delay = self._connect_backoff_initial
+        last_error: str | None = None
+
+        while attempt < self._connect_max_attempts:
+            attempt += 1
+            async with self._connect_lock:
+                # Another coroutine may have connected while we were waiting.
+                try:
+                    if getattr(self, \"_websocket\", None) and self._websocket.state is not None:
+                        if str(getattr(self._websocket, \"state\", \"\")).lower() == \"open\" or getattr(
+                            getattr(self._websocket, \"state\", None), \"name\", \"\"
+                        ).lower() == \"open\":
+                            return
+                except Exception:
+                    pass
+
+                try:
+                    await super()._connect_websocket()
+                    # Success?
+                    try:
+                        if getattr(self, \"_websocket\", None) and (
+                            str(getattr(self._websocket, \"state\", \"\")).lower() == \"open\"
+                            or getattr(getattr(self._websocket, \"state\", None), \"name\", \"\").lower() == \"open\"
+                        ):
+                            return
+                    except Exception:
+                        pass
+                except Exception as e:  # pragma: no cover - super already catches most
+                    last_error = str(e)
+                else:
+                    last_error = \"Cartesia websocket still not open after connect() call\"
+
+            # Backoff before retrying to avoid hammering Cartesia and hitting 429s.
+            await asyncio.sleep(delay + random.uniform(0, delay * 0.5))
+            delay = min(delay * 2, self._connect_backoff_max)
+
+        # If we get here, all attempts failed; surface a clear error.
+        err_msg = last_error or \"failed to establish Cartesia websocket connection\"
+        await self.push_error(error_msg=f\"Cartesia connect failed after retries: {err_msg}\")
+        raise RuntimeError(f\"Cartesia TTS connection failed after {self._connect_max_attempts} attempts: {err_msg}\")
 
 
 async def _resolve_cartesia_voice_id(*, api_key: str) -> str:
@@ -1420,13 +1496,20 @@ async def bot(session_args: Any):
     if not (is_video_meeting and video_avatar_provider == "akool"):
         cartesia_key = _require("CARTESIA_API_KEY")
         voice_id = await _resolve_cartesia_voice_id(api_key=cartesia_key)
-        tts = CartesiaTTSService(
+        cartesia_connect_backoff_initial = _parse_float("CARTESIA_CONNECT_BACKOFF_INITIAL", 0.5)
+        cartesia_connect_backoff_max = _parse_float("CARTESIA_CONNECT_BACKOFF_MAX", 8.0)
+        cartesia_connect_max_attempts = _parse_int("CARTESIA_CONNECT_MAX_ATTEMPTS", 6)
+
+        tts = ResilientCartesiaTTSService(
             api_key=cartesia_key,
             voice_id=voice_id,
             cartesia_version=_env("CARTESIA_VERSION", "2025-04-16").strip() or "2025-04-16",
             model=_env("CARTESIA_MODEL", "sonic-3").strip() or "sonic-3",
             sample_rate=sample_rate,
             text_filters=[MarkdownTextFilter()],
+            connect_backoff_initial=cartesia_connect_backoff_initial,
+            connect_backoff_max=cartesia_connect_backoff_max,
+            connect_max_attempts=cartesia_connect_max_attempts,
         )
 
     # Conversation context (OpenAI-compatible)
