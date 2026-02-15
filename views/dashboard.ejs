@@ -1874,6 +1874,14 @@
           <input id="aiAgentTransferNumber" type="text" placeholder="Leave blank to use default (Tools → Call Transfer)" style="width:100%;box-sizing:border-box">
           <div class="muted" style="margin-top:4px">Overrides the default transfer destination for this agent only.</div>
         </div>
+        <div style="margin-bottom:10px;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04)">
+          <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;font-size:13px;font-weight:700">
+            <input id="aiAgentInboundTransferEnabled" type="checkbox"> <span>📲 Direct Transfer on Inbound Calls</span>
+          </label>
+          <div class="muted" style="margin-bottom:6px;font-size:12px">When enabled, inbound calls to this agent's number will be immediately transferred without the AI answering.</div>
+          <input id="aiAgentInboundTransferNumber" type="text" placeholder="E.164 format like +18005551234" style="width:100%;box-sizing:border-box" disabled>
+          <div class="muted" style="margin-top:4px;font-size:11px">The number to transfer inbound calls to (required when enabled).</div>
+        </div>
         <div style="margin-bottom:10px">
           <label style="display:block;margin-bottom:4px;font-size:13px">Default Document Template</label>
           <select id="aiAgentDefaultTemplateSelect" style="width:100%;box-sizing:border-box">
@@ -6276,6 +6284,15 @@
       $('#aiAgentPrompt').value = agent ? String(agent.prompt || '') : '';
       try { $('#aiAgentTransferNumber').value = agent ? String(agent.transfer_to_number || '') : ''; } catch {}
 
+      // Inbound direct transfer settings
+      const inboundTransferEnabled = agent ? Boolean(agent.inbound_transfer_enabled) : false;
+      const inboundTransferNumber = agent ? String(agent.inbound_transfer_number || '') : '';
+      try {
+        $('#aiAgentInboundTransferEnabled').checked = inboundTransferEnabled;
+        $('#aiAgentInboundTransferNumber').value = inboundTransferNumber;
+        $('#aiAgentInboundTransferNumber').disabled = !inboundTransferEnabled;
+      } catch {}
+
       // Background ambience
       const bgUrl = agent ? String(agent.background_audio_url || '') : '';
       const bgGain = agent && agent.background_audio_gain != null ? String(agent.background_audio_gain) : '';
@@ -6513,6 +6530,13 @@ Guidelines:
       $('#aiAgentPrompt').value = template.prompt || '';
       try { $('#aiAgentTransferNumber').value = ''; } catch {}
 
+      // Reset inbound transfer fields
+      try {
+        $('#aiAgentInboundTransferEnabled').checked = false;
+        $('#aiAgentInboundTransferNumber').value = '';
+        $('#aiAgentInboundTransferNumber').disabled = true;
+      } catch {}
+
       // Reset background audio fields
       try { $('#aiAgentBackgroundAudioUrl').value = ''; } catch {}
       try { $('#aiAgentBackgroundAudioGain').value = ''; } catch {}
@@ -6562,6 +6586,15 @@ Guidelines:
     $('#createAiAgentBtn').addEventListener('click', () => openAiTemplateModal());
     $('#cancelAiAgentBtn').addEventListener('click', () => closeAiAgentModal());
     $('#aiAgentModal').addEventListener('click', (e) => { if (e.target === $('#aiAgentModal')) closeAiAgentModal(); });
+
+    // Inbound transfer checkbox toggle
+    $('#aiAgentInboundTransferEnabled').addEventListener('change', (e) => {
+      const enabled = e.target.checked;
+      $('#aiAgentInboundTransferNumber').disabled = !enabled;
+      if (enabled) {
+        $('#aiAgentInboundTransferNumber').focus();
+      }
+    });
 
     // Background audio upload UI
     const bgFileInputEl = $('#aiAgentBackgroundAudioFile');
@@ -6627,6 +6660,8 @@ Guidelines:
       const cartesia_voice_id = getSelectedCartesiaVoiceId();
       const defaultTpl = ($('#aiAgentDefaultTemplateSelect').value || '').trim();
       const transfer_to_number = ($('#aiAgentTransferNumber').value || '').trim();
+      const inbound_transfer_enabled = $('#aiAgentInboundTransferEnabled').checked;
+      const inbound_transfer_number = ($('#aiAgentInboundTransferNumber').value || '').trim();
 
       const background_audio_url = ($('#aiAgentBackgroundAudioUrl').value || '').trim();
       const bgGainRaw = ($('#aiAgentBackgroundAudioGain').value || '').trim();
@@ -6660,6 +6695,8 @@ Guidelines:
             prompt,
             cartesia_voice_id: (cartesia_voice_id || null),
             transfer_to_number,
+            inbound_transfer_enabled,
+            inbound_transfer_number: inbound_transfer_number ? inbound_transfer_number : null,
             default_doc_template_id: defaultTpl ? defaultTpl : null,
             background_audio_url: background_audio_url ? background_audio_url : null,
             background_audio_gain
