@@ -2148,7 +2148,7 @@ async function initDb() {
 
   // 2. Add voicemail fields to dialer_campaigns
   for (const col of [
-    { name: 'voicemail_mode', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN voicemail_mode ENUM('none','agent','audio') NOT NULL DEFAULT 'agent' AFTER concurrency_limit" },
+    { name: 'voicemail_mode', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN voicemail_mode ENUM('dialout','audio') NOT NULL DEFAULT 'dialout' AFTER concurrency_limit" },
     { name: 'voicemail_audio_blob', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN voicemail_audio_blob MEDIUMBLOB NULL AFTER voicemail_mode" },
     { name: 'voicemail_audio_filename', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN voicemail_audio_filename VARCHAR(255) NULL AFTER voicemail_audio_blob" },
     { name: 'voicemail_audio_mime', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN voicemail_audio_mime VARCHAR(128) NULL AFTER voicemail_audio_filename" },
@@ -2166,6 +2166,31 @@ async function initDb() {
     } catch (e) {
       if (DEBUG) console.warn(`[schema] dialer_campaigns.${col.name} check failed`, e.message || e);
     }
+  }
+
+  // Fix voicemail_mode ENUM if it has old values (none, agent, audio) -> (dialout, audio)
+  try {
+    const [cols] = await pool.query(
+      "SELECT COLUMN_TYPE FROM information_schema.columns WHERE table_schema=? AND table_name='dialer_campaigns' AND column_name='voicemail_mode' LIMIT 1",
+      [dbName]
+    );
+    if (cols && cols.length) {
+      const colType = String(cols[0].COLUMN_TYPE || '').toLowerCase();
+      // Check if it has the old ENUM values
+      if (colType.includes("'none'") || colType.includes("'agent'")) {
+        try {
+          // Update any 'agent' values to 'dialout', 'none' to 'dialout'
+          await pool.query("UPDATE dialer_campaigns SET voicemail_mode = 'dialout' WHERE voicemail_mode IN ('none', 'agent')");
+          // Modify the ENUM to the correct values
+          await pool.query("ALTER TABLE dialer_campaigns MODIFY COLUMN voicemail_mode ENUM('dialout','audio') NOT NULL DEFAULT 'dialout'");
+          if (DEBUG) console.log('[schema] Fixed dialer_campaigns.voicemail_mode ENUM values');
+        } catch (e) {
+          if (DEBUG) console.warn('[schema] Failed to fix dialer_campaigns.voicemail_mode ENUM:', e.message || e);
+        }
+      }
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[schema] dialer_campaigns.voicemail_mode ENUM check failed', e.message || e);
   }
 
   // 3. Add inbound transfer fields to ai_agents
