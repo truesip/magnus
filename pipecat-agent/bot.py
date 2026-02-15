@@ -766,26 +766,6 @@ async def bot(session_args: Any):
     except Exception:
         caller_memory = None
 
-    # Extract voicemail detection settings (for outbound dialer campaigns)
-    voicemail_detection_enabled = False
-    voicemail_mode = "dialout"  # dialout | audio
-    voicemail_audio_url = ""
-    try:
-        if isinstance(body, dict):
-            voicemail_detection_enabled = bool(
-                body.get("voicemail_detection_enabled") or body.get("voicemailDetectionEnabled")
-            )
-            voicemail_mode = str(
-                body.get("voicemail_mode") or body.get("voicemailMode") or "dialout"
-            ).strip().lower()
-            if voicemail_mode not in ("dialout", "audio"):
-                voicemail_mode = "dialout"
-            voicemail_audio_url = str(
-                body.get("voicemail_audio_url") or body.get("voicemailAudioUrl") or ""
-            ).strip()
-    except Exception:
-        pass
-
     # Extract agent inbound transfer settings (for direct transfer on call start)
     agent_inbound_transfer_enabled = False
     agent_inbound_transfer_number = ""
@@ -2857,11 +2837,6 @@ async def bot(session_args: Any):
             akool_forward_enabled=akool_vision_publish_enabled,
             vision_state=vision_state,
         )
-
-    # NOTE: Voicemail detection will be added when Pipecat supports it natively
-    # The backend infrastructure (APIs, database, config) is already in place
-    if voicemail_detection_enabled:
-        logger.info(f"Voicemail config: mode={voicemail_mode}, audio_url={'set' if voicemail_audio_url else 'none'}")
 
     steps = [
         transport.input(),
