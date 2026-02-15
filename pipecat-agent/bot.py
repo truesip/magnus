@@ -3056,6 +3056,34 @@ async def bot(session_args: Any):
         nonlocal greeted
         nonlocal video_capture_started
 
+        # Audio-only mode: play campaign audio then hang up
+        if audio_only_mode and audio_only_pcm:
+            logger.info("Participant joined, playing campaign audio...")
+            try:
+                # Wait a moment for audio to stabilize
+                await asyncio.sleep(0.5)
+                
+                # Queue the audio frames
+                num_frames = len(audio_only_pcm) // 2  # 16-bit = 2 bytes per sample
+                audio_frame = TTSAudioRawFrame(
+                    audio=audio_only_pcm,
+                    sample_rate=sample_rate,
+                    num_channels=1,
+                )
+                audio_frame.num_frames = num_frames
+                
+                # Queue audio followed by end frame to hang up
+                await task.queue_frames([audio_frame, EndFrame()])
+                logger.info(f"Queued {num_frames} audio frames for playback")
+            except Exception as e:
+                logger.error(f"Failed to queue campaign audio: {e}")
+                # End the call anyway
+                try:
+                    await task.queue_frames([EndFrame()])
+                except Exception:
+                    pass
+            return
+
         # Optional greeting
         if greeting and not greeted:
             greeted = True
@@ -3188,81 +3216,18 @@ async def bot(session_args: Any):
             logger.error(f"Inbound direct transfer error: {e}")
             # Continue with normal flow if transfer fails
 
-    # Audio-only mode: play campaign audio and hang up
+    # Audio-only mode: fetch audio first, then play after call establishes
+    audio_only_pcm = None
     if audio_only_mode and campaign_audio_url:
-        logger.info(f"Audio-only mode enabled, playing campaign audio from {campaign_audio_url}")
+        logger.info(f"Audio-only mode enabled, fetching campaign audio from {campaign_audio_url}")
         try:
-            # Fetch campaign audio
+            # Fetch and convert audio before starting the call
             audio_data = await _download_bytes_limited(campaign_audio_url, max_bytes=10 * 1024 * 1024)
-            
-            # Convert WAV to PCM16 mono at the target sample rate
-            pcm = _wav_to_pcm16_mono(wav_bytes=audio_data, target_sample_rate=sample_rate)
-            
-            # Wait for dialout to start
-            await _maybe_start_dialout()
-            await asyncio.sleep(1.5)  # Give dialout time to establish
-            
-            # Calculate number of frames and send audio
-            num_frames = len(pcm) // 2  # 16-bit = 2 bytes per sample
-            audio_frame = TTSAudioRawFrame(
-                audio=pcm,
-                sample_rate=sample_rate,
-                num_channels=1,
-            )
-            audio_frame.num_frames = num_frames
-            
-            await task.queue_frames([audio_frame, EndFrame()])
-            
-            # Run the pipeline to play the audio
-            runner = PipelineRunner()
-            await runner.run(task)
-            
-            logger.info("Campaign audio playback completed")
+            audio_only_pcm = _wav_to_pcm16_mono(wav_bytes=audio_data, target_sample_rate=sample_rate)
+            logger.info(f"Campaign audio loaded: {len(audio_only_pcm)} bytes")
         except Exception as e:
-            logger.error(f"Audio-only mode playback failed: {e}")
-            # Still try to hang up
-            try:
-                await transport.leave()
-            except Exception:
-                pass
-        finally:
-            # Calculate call duration
-            call_end_time = asyncio.get_event_loop().time()
-            call_duration_sec = int(call_end_time - call_start_time)
-
-            # Send dialout status callback to portal if this was a dialer call
-            if dialout_settings and call_id and portal_base_url:
-                try:
-                    webhook_url = f"{portal_base_url}/webhooks/pipecat/dialout-completed"
-                    webhook_payload = {
-                        "call_id": call_id,
-                        "call_domain": call_domain,
-                        "result": "completed",
-                        "duration_sec": call_duration_sec,
-                        "dialout_phone": dialout_settings.get("phoneNumber") or dialout_settings.get("phone_number") or "",
-                    }
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        headers = {"Content-Type": "application/json"}
-                        if portal_token:
-                            headers["Authorization"] = f"Bearer {portal_token}"
-                        await client.post(webhook_url, json=webhook_payload, headers=headers)
-                except Exception as e:
-                    logger.debug(f"Dialout completion webhook failed: {e}")
-
-            # Close portal log client
-            if portal_log_client:
-                try:
-                    await portal_log_client.aclose()
-                except Exception:
-                    pass
-
-            # Close HeyGen session
-            if heygen_http_session:
-                try:
-                    await heygen_http_session.close()
-                except Exception:
-                    pass
-        return
+            logger.error(f"Failed to load campaign audio: {e}")
+            # Continue without audio - will just end the call
 
     # Normal AI mode
     runner = PipelineRunner()
