@@ -9538,17 +9538,29 @@ app.delete('/api/me/dialer/campaigns/:campaignId/audio', requireAuth, async (req
   }
 });
 
-// Bot endpoint: stream campaign audio (authenticated by PORTAL_AGENT_ACTION_TOKEN)
+// Bot endpoint: stream campaign audio (authenticated by PORTAL_AGENT_ACTION_TOKEN if set)
 app.get('/api/ai/agent/campaigns/:campaignId/audio', async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     
-    // Authenticate using PORTAL_AGENT_ACTION_TOKEN
+    // Authenticate using PORTAL_AGENT_ACTION_TOKEN (optional - only enforced if token is configured)
     const authHeader = String(req.headers.authorization || '');
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
     const expectedToken = String(process.env.PORTAL_AGENT_ACTION_TOKEN || '').trim();
     
-    if (!expectedToken || token !== expectedToken) {
+    if (DEBUG) {
+      console.log('[ai.agent.campaigns.audio] Auth check:', {
+        hasAuthHeader: !!authHeader,
+        tokenLength: token.length,
+        expectedTokenLength: expectedToken.length,
+        tokenMatch: token === expectedToken,
+        tokenRequired: !!expectedToken
+      });
+    }
+    
+    // Only enforce token authentication if PORTAL_AGENT_ACTION_TOKEN is configured
+    if (expectedToken && token !== expectedToken) {
+      if (DEBUG) console.log('[ai.agent.campaigns.audio] Auth failed: token mismatch');
       return res.status(401).json({ success: false, message: 'Unauthorized' });
     }
     
