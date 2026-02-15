@@ -2122,6 +2122,71 @@ async function initDb() {
     if (DEBUG) console.warn('[schema] dialer_call_logs.idx_dialer_logs_billed check failed', e.message || e);
   }
 
+  // Voicemail audio & direct transfer feature migrations
+  // 1. Make dialer_campaigns.ai_agent_id NULLABLE
+  try {
+    const [cols] = await pool.query(
+      "SELECT IS_NULLABLE FROM information_schema.columns WHERE table_schema=? AND table_name='dialer_campaigns' AND column_name='ai_agent_id' LIMIT 1",
+      [dbName]
+    );
+    if (cols && cols.length && cols[0].IS_NULLABLE === 'NO') {
+      try {
+        // Drop foreign key constraint first
+        await pool.query('ALTER TABLE dialer_campaigns DROP FOREIGN KEY fk_dialer_campaigns_agent');
+        // Modify column to nullable
+        await pool.query('ALTER TABLE dialer_campaigns MODIFY COLUMN ai_agent_id BIGINT NULL');
+        // Re-add foreign key constraint
+        await pool.query('ALTER TABLE dialer_campaigns ADD CONSTRAINT fk_dialer_campaigns_agent FOREIGN KEY (ai_agent_id) REFERENCES ai_agents(id) ON DELETE CASCADE');
+        if (DEBUG) console.log('[schema] Made dialer_campaigns.ai_agent_id NULLABLE');
+      } catch (e) {
+        if (DEBUG) console.warn('[schema] Failed to make dialer_campaigns.ai_agent_id NULLABLE:', e.message || e);
+      }
+    }
+  } catch (e) {
+    if (DEBUG) console.warn('[schema] dialer_campaigns.ai_agent_id nullable check failed', e.message || e);
+  }
+
+  // 2. Add voicemail fields to dialer_campaigns
+  for (const col of [
+    { name: 'voicemail_mode', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN voicemail_mode ENUM('none','agent','audio') NOT NULL DEFAULT 'agent' AFTER concurrency_limit" },
+    { name: 'voicemail_audio_blob', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN voicemail_audio_blob MEDIUMBLOB NULL AFTER voicemail_mode" },
+    { name: 'voicemail_audio_filename', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN voicemail_audio_filename VARCHAR(255) NULL AFTER voicemail_audio_blob" },
+    { name: 'voicemail_audio_mime', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN voicemail_audio_mime VARCHAR(128) NULL AFTER voicemail_audio_filename" },
+    { name: 'voicemail_audio_size', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN voicemail_audio_size BIGINT NULL AFTER voicemail_audio_mime" }
+  ]) {
+    try {
+      const [rows] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='dialer_campaigns' AND column_name=? LIMIT 1",
+        [dbName, col.name]
+      );
+      if (!rows || !rows.length) {
+        await pool.query(col.ddl);
+        if (DEBUG) console.log(`[schema] Added dialer_campaigns.${col.name} column`);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn(`[schema] dialer_campaigns.${col.name} check failed`, e.message || e);
+    }
+  }
+
+  // 3. Add inbound transfer fields to ai_agents
+  for (const col of [
+    { name: 'inbound_transfer_enabled', ddl: "ALTER TABLE ai_agents ADD COLUMN inbound_transfer_enabled TINYINT(1) NOT NULL DEFAULT 0 AFTER transfer_to_number" },
+    { name: 'inbound_transfer_number', ddl: "ALTER TABLE ai_agents ADD COLUMN inbound_transfer_number VARCHAR(32) NULL AFTER inbound_transfer_enabled" }
+  ]) {
+    try {
+      const [rows] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_agents' AND column_name=? LIMIT 1",
+        [dbName, col.name]
+      );
+      if (!rows || !rows.length) {
+        await pool.query(col.ddl);
+        if (DEBUG) console.log(`[schema] Added ai_agents.${col.name} column`);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn(`[schema] ai_agents.${col.name} check failed`, e.message || e);
+    }
+  }
+
   // AI email send audit log + idempotency
   await pool.query(`CREATE TABLE IF NOT EXISTS ai_email_sends (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -8932,15 +8997,20 @@ async function hydrateDialerCampaignRows(userId, rows) {
 function serializeDialerCampaign(row) {
   if (!row) return null;
   const stats = row.stats || buildDialerStatsSeed();
+  const hasVoicemailAudio = Boolean(row.voicemail_audio_blob && row.voicemail_audio_size);
   return {
     id: Number(row.id),
     name: row.name,
     status: row.status,
-    ai_agent_id: Number(row.ai_agent_id),
+    ai_agent_id: row.ai_agent_id ? Number(row.ai_agent_id) : null,
     ai_agent_name: row.ai_agent_name || '',
     sip_account_id: row.sip_account_id,
     sip_account_label: row.sip_account_label || '',
     concurrency_limit: Number(row.concurrency_limit || 1),
+    voicemail_mode: row.voicemail_mode || 'dialout',
+    has_voicemail_audio: hasVoicemailAudio,
+    voicemail_audio_filename: hasVoicemailAudio ? (row.voicemail_audio_filename || null) : null,
+    voicemail_audio_size: hasVoicemailAudio ? Number(row.voicemail_audio_size || 0) : null,
     last_started_at: row.last_started_at ? new Date(row.last_started_at).toISOString() : null,
     last_paused_at: row.last_paused_at ? new Date(row.last_paused_at).toISOString() : null,
     created_at: row.created_at ? new Date(row.created_at).toISOString() : null,
@@ -8986,18 +9056,31 @@ app.post('/api/me/dialer/campaigns', requireAuth, async (req, res) => {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     const userId = req.session.userId;
     const name = String(req.body?.name || '').trim().slice(0, 191);
-    const aiAgentId = Number(req.body?.ai_agent_id || req.body?.aiAgentId || 0);
+    const aiAgentId = Number(req.body?.ai_agent_id || req.body?.aiAgentId || 0) || null;
     const sipAccountId = String(req.body?.sip_account_id || req.body?.sipAccountId || '').trim();
     const concurrencyRaw = parseInt(req.body?.concurrency_limit ?? req.body?.concurrencyLimit ?? 1, 10);
+    const voicemailMode = String(req.body?.voicemail_mode || req.body?.voicemailMode || 'dialout').toLowerCase();
+    
     if (!name) return res.status(400).json({ success: false, message: 'Campaign name is required' });
-    if (!aiAgentId) return res.status(400).json({ success: false, message: 'AI agent is required' });
+    if (!['dialout', 'audio'].includes(voicemailMode)) {
+      return res.status(400).json({ success: false, message: 'voicemail_mode must be dialout or audio' });
+    }
+    
+    // For audio mode, agent is optional (voicemail will play pre-recorded audio)
+    // For dialout mode, agent is required
+    if (voicemailMode === 'dialout' && !aiAgentId) {
+      return res.status(400).json({ success: false, message: 'AI agent is required for dialout mode' });
+    }
 
     const concurrency = Math.min(
       DIALER_MAX_CONCURRENCY,
       Math.max(DIALER_MIN_CONCURRENCY, Number.isFinite(concurrencyRaw) ? concurrencyRaw : DIALER_MIN_CONCURRENCY)
     );
 
-    const agent = await ensureAiAgentForUser({ userId, agentId: aiAgentId });
+    let agent = null;
+    if (aiAgentId) {
+      agent = await ensureAiAgentForUser({ userId, agentId: aiAgentId });
+    }
     let sipAccount = { id: '', label: 'Pipecat Dial-out' };
     if (sipAccountId) {
       sipAccount = await ensureSipAccountForUser({ req, sipAccountId });
@@ -9005,9 +9088,9 @@ app.post('/api/me/dialer/campaigns', requireAuth, async (req, res) => {
 
     const [result] = await pool.execute(
       `INSERT INTO dialer_campaigns
-        (user_id, name, ai_agent_id, ai_agent_name, sip_account_id, sip_account_label, concurrency_limit)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [userId, name, agent.id, agent.name, sipAccount.id || '', sipAccount.label || 'Pipecat Dial-out', concurrency]
+        (user_id, name, ai_agent_id, ai_agent_name, sip_account_id, sip_account_label, concurrency_limit, voicemail_mode)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [userId, name, agent?.id || null, agent?.name || null, sipAccount.id || '', sipAccount.label || 'Pipecat Dial-out', concurrency, voicemailMode]
     );
 
     const campaignId = result && result.insertId ? Number(result.insertId) : null;
@@ -9354,6 +9437,179 @@ app.get('/api/me/dialer/campaigns/:campaignId/leads-by-status', requireAuth, asy
   }
 });
 
+// Upload voicemail audio for a campaign
+const voicemailAudioUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    const mime = String(file.mimetype || '').toLowerCase();
+    if (mime === 'audio/wav' || mime === 'audio/x-wav' || mime === 'audio/wave') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only WAV audio files are supported'));
+    }
+  }
+});
+
+app.post('/api/me/dialer/campaigns/:campaignId/voicemail-audio', requireAuth, voicemailAudioUpload.single('audio'), async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const campaignId = Number(req.params.campaignId || 0);
+    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
+    
+    const campaign = await fetchDialerCampaignById({ userId, campaignId });
+    if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
+    
+    const file = req.file;
+    if (!file || !file.buffer) {
+      return res.status(400).json({ success: false, message: 'Missing audio file (field name: audio)' });
+    }
+    
+    const filename = String(file.originalname || 'voicemail.wav').slice(0, 255);
+    const mime = String(file.mimetype || 'audio/wav').slice(0, 128);
+    const size = file.buffer.length;
+    
+    // Simple WAV validation: check for RIFF header
+    if (file.buffer.length < 44) {
+      return res.status(400).json({ success: false, message: 'Invalid WAV file: file too small' });
+    }
+    const header = file.buffer.toString('ascii', 0, 4);
+    if (header !== 'RIFF') {
+      return res.status(400).json({ success: false, message: 'Invalid WAV file: missing RIFF header' });
+    }
+    
+    await pool.execute(
+      `UPDATE dialer_campaigns
+       SET voicemail_audio_blob = ?,
+           voicemail_audio_filename = ?,
+           voicemail_audio_mime = ?,
+           voicemail_audio_size = ?,
+           updated_at = NOW()
+       WHERE id = ? AND user_id = ?`,
+      [file.buffer, filename, mime, size, campaignId, userId]
+    );
+    
+    return res.json({
+      success: true,
+      data: {
+        filename,
+        size,
+        mime
+      }
+    });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.voicemail-audio.upload] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: e?.message || 'Failed to upload voicemail audio' });
+  }
+});
+
+// Download voicemail audio for a campaign (user endpoint)
+app.get('/api/me/dialer/campaigns/:campaignId/voicemail-audio', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const campaignId = Number(req.params.campaignId || 0);
+    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
+    
+    const [rows] = await pool.execute(
+      `SELECT voicemail_audio_blob, voicemail_audio_filename, voicemail_audio_mime
+       FROM dialer_campaigns
+       WHERE id = ? AND user_id = ? AND status <> 'deleted'
+       LIMIT 1`,
+      [campaignId, userId]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    
+    if (!row || !row.voicemail_audio_blob) {
+      return res.status(404).json({ success: false, message: 'No voicemail audio found for this campaign' });
+    }
+    
+    const filename = row.voicemail_audio_filename || 'voicemail.wav';
+    const mime = row.voicemail_audio_mime || 'audio/wav';
+    const blob = row.voicemail_audio_blob;
+    
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', blob.length);
+    return res.send(blob);
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.voicemail-audio.download] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to download voicemail audio' });
+  }
+});
+
+// Delete voicemail audio for a campaign
+app.delete('/api/me/dialer/campaigns/:campaignId/voicemail-audio', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const campaignId = Number(req.params.campaignId || 0);
+    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
+    
+    const campaign = await fetchDialerCampaignById({ userId, campaignId });
+    if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
+    
+    await pool.execute(
+      `UPDATE dialer_campaigns
+       SET voicemail_audio_blob = NULL,
+           voicemail_audio_filename = NULL,
+           voicemail_audio_mime = NULL,
+           voicemail_audio_size = NULL,
+           updated_at = NOW()
+       WHERE id = ? AND user_id = ?`,
+      [campaignId, userId]
+    );
+    
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.voicemail-audio.delete] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to delete voicemail audio' });
+  }
+});
+
+// Bot endpoint: stream voicemail audio (authenticated by PORTAL_AGENT_ACTION_TOKEN)
+app.get('/api/ai/agent/campaigns/:campaignId/voicemail-audio', async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    
+    // Authenticate using PORTAL_AGENT_ACTION_TOKEN
+    const authHeader = String(req.headers.authorization || '');
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+    const expectedToken = String(process.env.PORTAL_AGENT_ACTION_TOKEN || '').trim();
+    
+    if (!expectedToken || token !== expectedToken) {
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+    
+    const campaignId = Number(req.params.campaignId || 0);
+    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
+    
+    const [rows] = await pool.execute(
+      `SELECT voicemail_audio_blob, voicemail_audio_filename, voicemail_audio_mime
+       FROM dialer_campaigns
+       WHERE id = ? AND status <> 'deleted'
+       LIMIT 1`,
+      [campaignId]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    
+    if (!row || !row.voicemail_audio_blob) {
+      return res.status(404).json({ success: false, message: 'No voicemail audio found' });
+    }
+    
+    const mime = row.voicemail_audio_mime || 'audio/wav';
+    const blob = row.voicemail_audio_blob;
+    
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Content-Length', blob.length);
+    return res.send(blob);
+  } catch (e) {
+    if (DEBUG) console.error('[ai.agent.campaigns.voicemail-audio] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to stream voicemail audio' });
+  }
+});
+
 // Debug endpoint: manually update call status for testing
 app.post('/api/me/dialer/debug/update-call-status', requireAuth, async (req, res) => {
   try {
@@ -9459,21 +9715,27 @@ async function startDialerLeadCall({ campaign, lead }) {
   const campaignId = Number(campaign.id);
   const userId = Number(campaign.user_id);
   const leadId = Number(lead.id);
-  const agentId = Number(campaign.ai_agent_id);
+  const agentId = Number(campaign.ai_agent_id) || 0;
+  const voicemailMode = String(campaign.voicemail_mode || 'dialout').toLowerCase();
 
+  // For audio mode, agent is optional (we'll play pre-recorded voicemail audio)
+  // For dialout mode, agent is required
   let agent = null;
-  try {
-    const [rows] = await pool.execute(
-      'SELECT id, display_name, pipecat_agent_name, pipecat_region FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1',
-      [agentId, userId]
-    );
-    agent = rows && rows[0] ? rows[0] : null;
-  } catch (e) {
-    if (DEBUG) console.warn('[dialer.worker] Failed to lookup AI agent:', e?.message || e);
-    agent = null;
+  if (agentId) {
+    try {
+      const [rows] = await pool.execute(
+        'SELECT id, display_name, pipecat_agent_name, pipecat_region FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1',
+        [agentId, userId]
+      );
+      agent = rows && rows[0] ? rows[0] : null;
+    } catch (e) {
+      if (DEBUG) console.warn('[dialer.worker] Failed to lookup AI agent:', e?.message || e);
+      agent = null;
+    }
   }
 
-  if (!agent || !agent.pipecat_agent_name) {
+  // Require agent for dialout mode
+  if (voicemailMode === 'dialout' && (!agent || !agent.pipecat_agent_name)) {
     try {
       await pool.execute(
         'UPDATE dialer_leads SET status = ? WHERE id = ? AND user_id = ? LIMIT 1',
@@ -9489,6 +9751,24 @@ async function startDialerLeadCall({ campaign, lead }) {
     return false;
   }
 
+  // For audio mode without agent, we still need a valid Pipecat setup
+  // (the bot will handle voicemail audio playback without needing agent config)
+  if (voicemailMode === 'audio' && !agent) {
+    try {
+      await pool.execute(
+        'UPDATE dialer_leads SET status = ? WHERE id = ? AND user_id = ? LIMIT 1',
+        ['failed', leadId, userId]
+      );
+      await pool.execute(
+        `UPDATE dialer_call_logs
+         SET status = 'error', result = 'failed', notes = COALESCE(NULLIF(notes,''), ?)
+         WHERE lead_id = ? ORDER BY id DESC LIMIT 1`,
+        ['Audio mode requires Pipecat agent for voicemail detection', leadId]
+      );
+    } catch {}
+    return false;
+  }
+
   const callerId = await resolveDialerCallerId({ userId, agentId });
   const { callId, callDomain } = buildDialerCallIdentifiers({ campaignId, leadId });
   const dialoutSettings = {
@@ -9496,13 +9776,24 @@ async function startDialerLeadCall({ campaign, lead }) {
   };
   if (callerId) dialoutSettings.callerId = String(callerId);
 
+  // Build voicemail audio URL if mode is audio
+  let voicemailAudioUrl = '';
+  if (voicemailMode === 'audio') {
+    const portalBase = String(process.env.PUBLIC_BASE_URL || process.env.PORTAL_BASE_URL || '').trim();
+    if (portalBase) {
+      voicemailAudioUrl = `${portalBase}/api/ai/agent/campaigns/${campaignId}/voicemail-audio`;
+    }
+  }
+
   const metadata = {
     campaign_id: campaignId,
     lead_id: leadId,
     phone_number: lead.phone_number,
     call_id: callId,
     call_domain: callDomain,
-    dialout_settings: dialoutSettings
+    dialout_settings: dialoutSettings,
+    voicemail_mode: voicemailMode,
+    voicemail_audio_url: voicemailAudioUrl || null
   };
 
   try {
@@ -9538,7 +9829,10 @@ async function startDialerLeadCall({ campaign, lead }) {
       dialer: {
         campaign_id: campaignId,
         lead_id: leadId
-      }
+      },
+      voicemail_detection_enabled: true,
+      voicemail_mode: voicemailMode,
+      voicemail_audio_url: voicemailAudioUrl || null
     }
   };
 
@@ -9595,7 +9889,8 @@ async function runDialerWorkerTick() {
   dialerWorkerRunning = true;
   try {
     const [campaigns] = await pool.query(
-      `SELECT id, user_id, name, ai_agent_id, ai_agent_name, sip_account_id, sip_account_label, concurrency_limit
+      `SELECT id, user_id, name, ai_agent_id, ai_agent_name, sip_account_id, sip_account_label, concurrency_limit,
+              voicemail_mode
        FROM dialer_campaigns
        WHERE status = 'running'
        ORDER BY updated_at DESC, id DESC
@@ -12813,7 +13108,11 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
       background_audio_gain,
       backgroundAudioGain,
       transfer_to_number,
-      transferToNumber
+      transferToNumber,
+      inbound_transfer_enabled,
+      inboundTransferEnabled,
+      inbound_transfer_number,
+      inboundTransferNumber
     } = req.body || {};
 
     const [rows] = await pool.execute('SELECT * FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1', [agentId, userId]);
@@ -12916,9 +13215,61 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
       }
     }
 
+    // Optional: inbound direct transfer settings
+    const inboundTransferEnabledRaw = (inbound_transfer_enabled !== undefined) ? inbound_transfer_enabled : inboundTransferEnabled;
+    let nextInboundTransferEnabled = agent.inbound_transfer_enabled != null ? Number(agent.inbound_transfer_enabled) : 0;
+    if (inboundTransferEnabledRaw !== undefined) {
+      nextInboundTransferEnabled = inboundTransferEnabledRaw ? 1 : 0;
+    }
+
+    const inboundTransferNumberRaw = (inbound_transfer_number !== undefined) ? inbound_transfer_number : inboundTransferNumber;
+    let nextInboundTransferNumber = agent.inbound_transfer_number || '';
+    if (inboundTransferNumberRaw !== undefined) {
+      const norm = normalizeAiTransferDestination(inboundTransferNumberRaw);
+      if (norm && !isValidAiTransferDestination(norm)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid inbound transfer number. Use E.164 phone format like +18005551234 or a SIP URI like sip:agent@domain.'
+        });
+      }
+      if (norm && norm.length > 32) {
+        return res.status(400).json({ success: false, message: 'Inbound transfer number is too long (max 32 chars)' });
+      }
+      nextInboundTransferNumber = norm;
+    }
+
+    // If inbound transfer is enabled, require a number
+    if (nextInboundTransferEnabled && !nextInboundTransferNumber) {
+      return res.status(400).json({ success: false, message: 'inbound_transfer_number is required when inbound transfer is enabled' });
+    }
+
     await pool.execute(
-      'UPDATE ai_agents SET display_name = ?, greeting = ?, prompt = ?, cartesia_voice_id = ?, background_audio_url = ?, background_audio_gain = ?, transfer_to_number = ?, default_doc_template_id = ? WHERE id = ? AND user_id = ?',
-      [nextName, nextGreeting, nextPrompt, nextVoiceIdClean || null, nextBgUrl || null, nextBgGain, nextTransfer ? String(nextTransfer) : null, nextDefaultTpl, agentId, userId]
+      `UPDATE ai_agents SET
+         display_name = ?,
+         greeting = ?,
+         prompt = ?,
+         cartesia_voice_id = ?,
+         background_audio_url = ?,
+         background_audio_gain = ?,
+         transfer_to_number = ?,
+         default_doc_template_id = ?,
+         inbound_transfer_enabled = ?,
+         inbound_transfer_number = ?
+       WHERE id = ? AND user_id = ?`,
+      [
+        nextName,
+        nextGreeting,
+        nextPrompt,
+        nextVoiceIdClean || null,
+        nextBgUrl || null,
+        nextBgGain,
+        nextTransfer ? String(nextTransfer) : null,
+        nextDefaultTpl,
+        nextInboundTransferEnabled,
+        nextInboundTransferNumber || null,
+        agentId,
+        userId
+      ]
     );
 
     // Update secret set + redeploy
@@ -17471,6 +17822,26 @@ app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
         });
       }
 
+      // Fetch agent's inbound transfer settings
+      let agentConfig = null;
+      if (pool && agentRow) {
+        try {
+          const [agentRows] = await pool.execute(
+            'SELECT inbound_transfer_enabled, inbound_transfer_number FROM ai_agents WHERE id = ? LIMIT 1',
+            [agentRow.id]
+          );
+          const agentData = agentRows && agentRows[0] ? agentRows[0] : null;
+          if (agentData) {
+            agentConfig = {
+              inbound_transfer_enabled: Boolean(agentData.inbound_transfer_enabled),
+              inbound_transfer_number: agentData.inbound_transfer_number || null
+            };
+          }
+        } catch (e) {
+          if (DEBUG) console.warn('[daily.dialin] Failed to fetch agent config:', e?.message || e);
+        }
+      }
+
       const startBody = {
         createDailyRoom: true,
         dailyRoomProperties: {
@@ -17487,7 +17858,8 @@ app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
             call_id: callId,
             call_domain: callDomain
           },
-          ...(callerMemory ? { caller_memory: callerMemory } : {})
+          ...(callerMemory ? { caller_memory: callerMemory } : {}),
+          ...(agentConfig ? { agent_config: agentConfig } : {})
         }
       };
 

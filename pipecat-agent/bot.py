@@ -129,6 +129,84 @@ async def _load_background_pcm16_mono(*, url: str, target_sample_rate: int) -> b
     return pcm
 
 
+class VoicemailDetectionProcessor(FrameProcessor):
+    """Handles voicemail detection and plays pre-recorded audio when voicemail is detected.
+    
+    NOTE: This is a placeholder implementation. Pipecat voicemail detection is not yet available.
+    When Pipecat adds voicemail detection, this processor should be updated to:
+    1. Listen for voicemail detection events/frames
+    2. Play the pre-recorded audio file when voicemail is detected
+    3. End the call after audio playback completes
+    """
+
+    def __init__(self, *, voicemail_audio_url: str, portal_token: str, sample_rate: int = 16000):
+        super().__init__()
+        self._voicemail_audio_url = str(voicemail_audio_url or "").strip()
+        self._portal_token = str(portal_token or "").strip()
+        self._sample_rate = int(sample_rate)
+        self._voicemail_detected = False
+        self._audio_played = False
+
+    async def _fetch_and_play_voicemail_audio(self):
+        """Fetch the voicemail WAV from the portal and inject it into the pipeline."""
+        if not self._voicemail_audio_url or not self._portal_token:
+            logger.warning("Voicemail audio URL or token missing, cannot play voicemail")
+            return
+
+        try:
+            logger.info(f"Fetching voicemail audio from: {self._voicemail_audio_url}")
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                headers = {"Authorization": f"Bearer {self._portal_token}"}
+                resp = await client.get(self._voicemail_audio_url, headers=headers)
+                resp.raise_for_status()
+                wav_bytes = resp.content
+
+            if not wav_bytes:
+                logger.warning("Voicemail audio is empty")
+                return
+
+            # Convert WAV to PCM16 mono at target sample rate
+            pcm = _wav_to_pcm16_mono(wav_bytes=wav_bytes, target_sample_rate=self._sample_rate)
+            if not pcm:
+                logger.warning("Voicemail audio conversion resulted in no audio")
+                return
+
+            # Inject audio frames into the pipeline
+            # Split into chunks for smooth playback (20ms chunks = 640 bytes at 16kHz mono PCM16)
+            chunk_size = int(self._sample_rate * 0.02 * 2)  # 20ms
+            for i in range(0, len(pcm), chunk_size):
+                chunk = pcm[i : i + chunk_size]
+                if chunk:
+                    frame = TTSAudioRawFrame(
+                        audio=chunk,
+                        sample_rate=self._sample_rate,
+                        num_channels=1,
+                    )
+                    await self.push_frame(frame, FrameDirection.DOWNSTREAM)
+
+            logger.info("Voicemail audio playback complete")
+            self._audio_played = True
+
+            # Send EndFrame to terminate the call after voicemail is played
+            await self.push_frame(EndFrame(), FrameDirection.DOWNSTREAM)
+
+        except Exception as e:
+            logger.error(f"Failed to fetch/play voicemail audio: {e}")
+
+    async def process_frame(self, frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        # TODO: When Pipecat adds voicemail detection, listen for voicemail detection frames here.
+        # For now, this is a placeholder that will be triggered by future Pipecat voicemail events.
+        # Example pseudocode:
+        # if isinstance(frame, VoicemailDetectedFrame) and not self._voicemail_detected:
+        #     self._voicemail_detected = True
+        #     await self._fetch_and_play_voicemail_audio()
+        #     return
+
+        await self.push_frame(frame, direction)
+
+
 class BackgroundTTSMixer(FrameProcessor):
     """Mixes a looped background track into TTSAudioRawFrame while the bot speaks."""
 
@@ -750,6 +828,45 @@ async def bot(session_args: Any):
             caller_memory = body.get("caller_memory") or body.get("callerMemory")
     except Exception:
         caller_memory = None
+
+    # Extract voicemail detection settings (for outbound dialer campaigns)
+    voicemail_detection_enabled = False
+    voicemail_mode = "dialout"  # dialout | audio
+    voicemail_audio_url = ""
+    try:
+        if isinstance(body, dict):
+            voicemail_detection_enabled = bool(
+                body.get("voicemail_detection_enabled") or body.get("voicemailDetectionEnabled")
+            )
+            voicemail_mode = str(
+                body.get("voicemail_mode") or body.get("voicemailMode") or "dialout"
+            ).strip().lower()
+            if voicemail_mode not in ("dialout", "audio"):
+                voicemail_mode = "dialout"
+            voicemail_audio_url = str(
+                body.get("voicemail_audio_url") or body.get("voicemailAudioUrl") or ""
+            ).strip()
+    except Exception:
+        pass
+
+    # Extract agent inbound transfer settings (for direct transfer on call start)
+    agent_inbound_transfer_enabled = False
+    agent_inbound_transfer_number = ""
+    try:
+        if isinstance(body, dict):
+            agent_config = body.get("agent_config") or body.get("agentConfig") or {}
+            if isinstance(agent_config, dict):
+                agent_inbound_transfer_enabled = bool(
+                    agent_config.get("inbound_transfer_enabled")
+                    or agent_config.get("inboundTransferEnabled")
+                )
+                agent_inbound_transfer_number = str(
+                    agent_config.get("inbound_transfer_number")
+                    or agent_config.get("inboundTransferNumber")
+                    or ""
+                ).strip()
+    except Exception:
+        pass
 
     session_mode = _extract_session_mode(body)
     is_video_meeting = session_mode == "video_meeting"
@@ -2804,6 +2921,16 @@ async def bot(session_args: Any):
             vision_state=vision_state,
         )
 
+    # Voicemail detection processor (for outbound dialer in audio mode)
+    voicemail_processor = None
+    if voicemail_detection_enabled and voicemail_mode == "audio" and voicemail_audio_url and portal_token:
+        voicemail_processor = VoicemailDetectionProcessor(
+            voicemail_audio_url=voicemail_audio_url,
+            portal_token=portal_token,
+            sample_rate=sample_rate,
+        )
+        logger.info(f"Voicemail detection enabled (mode=audio): {voicemail_audio_url}")
+
     steps = [
         transport.input(),
     ]
@@ -2816,6 +2943,8 @@ async def bot(session_args: Any):
     ])
     if tts:
         steps.append(tts)
+    if voicemail_processor:
+        steps.append(voicemail_processor)
     if bg_mixer:
         steps.append(bg_mixer)
     if heygen_service:
@@ -3098,6 +3227,50 @@ async def bot(session_args: Any):
     call_start_time = asyncio.get_event_loop().time()
     call_result = "completed"  # Default result; updated by call outcome
     call_transferred = False
+
+    # Handle inbound direct transfer (transfer immediately on call start if enabled)
+    if dialin_settings and agent_inbound_transfer_enabled and agent_inbound_transfer_number:
+        logger.info(f"Inbound direct transfer enabled, transferring to {agent_inbound_transfer_number}")
+        call_transferred = True
+        call_result = "transferred"
+        try:
+            # Try SIP REFER first, then fall back to call transfer
+            session_id = ""
+            try:
+                client = getattr(transport, "_client", None)
+                if client is not None:
+                    session_id = str(getattr(client, "_dial_in_session_id", "") or "").strip()
+            except Exception:
+                session_id = ""
+
+            refer_settings = {"toEndPoint": agent_inbound_transfer_number}
+            if session_id:
+                refer_settings["sessionId"] = session_id
+
+            error = None
+            if session_id:
+                error = await transport.sip_refer(refer_settings)
+            else:
+                error = "Missing sessionId for SIP REFER"
+
+            if error:
+                logger.warning(f"sip_refer failed for inbound transfer, falling back to sip_call_transfer: {error}")
+                error = await transport.sip_call_transfer({"toEndPoint": agent_inbound_transfer_number})
+
+            if error:
+                logger.error(f"Inbound direct transfer failed: {error}")
+            else:
+                logger.info("Inbound direct transfer initiated successfully")
+
+            # Leave the call immediately after transfer
+            try:
+                await transport.leave()
+            except Exception:
+                pass
+            return
+        except Exception as e:
+            logger.error(f"Inbound direct transfer error: {e}")
+            # Continue with normal flow if transfer fails
 
     runner = PipelineRunner()
     try:
