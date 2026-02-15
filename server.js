@@ -8977,6 +8977,7 @@ async function hydrateDialerCampaignRows(userId, rows) {
 function serializeDialerCampaign(row) {
   if (!row) return null;
   const stats = row.stats || buildDialerStatsSeed();
+  const hasCampaignAudio = Boolean(row.campaign_audio_blob && row.campaign_audio_size);
   return {
     id: Number(row.id),
     name: row.name,
@@ -8986,6 +8987,9 @@ function serializeDialerCampaign(row) {
     sip_account_id: row.sip_account_id,
     sip_account_label: row.sip_account_label || '',
     concurrency_limit: Number(row.concurrency_limit || 1),
+    has_campaign_audio: hasCampaignAudio,
+    campaign_audio_filename: hasCampaignAudio ? (row.campaign_audio_filename || null) : null,
+    campaign_audio_size: hasCampaignAudio ? Number(row.campaign_audio_size || 0) : null,
     last_started_at: row.last_started_at ? new Date(row.last_started_at).toISOString() : null,
     last_paused_at: row.last_paused_at ? new Date(row.last_paused_at).toISOString() : null,
     created_at: row.created_at ? new Date(row.created_at).toISOString() : null,
@@ -9036,9 +9040,7 @@ app.post('/api/me/dialer/campaigns', requireAuth, async (req, res) => {
     const concurrencyRaw = parseInt(req.body?.concurrency_limit ?? req.body?.concurrencyLimit ?? 1, 10);
     
     if (!name) return res.status(400).json({ success: false, message: 'Campaign name is required' });
-    if (!aiAgentId) {
-      return res.status(400).json({ success: false, message: 'AI agent is required' });
-    }
+    // AI agent is optional now - if not provided, campaign must use audio-only mode
 
     const concurrency = Math.min(
       DIALER_MAX_CONCURRENCY,
@@ -9405,6 +9407,178 @@ app.get('/api/me/dialer/campaigns/:campaignId/leads-by-status', requireAuth, asy
   }
 });
 
+// Upload campaign audio (WAV)
+const campaignAudioUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    const mime = String(file.mimetype || '').toLowerCase();
+    if (mime === 'audio/wav' || mime === 'audio/x-wav' || mime === 'audio/wave') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only WAV audio files are supported'));
+    }
+  }
+});
+
+app.post('/api/me/dialer/campaigns/:campaignId/audio', requireAuth, campaignAudioUpload.single('audio'), async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const campaignId = Number(req.params.campaignId || 0);
+    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
+    
+    const campaign = await fetchDialerCampaignById({ userId, campaignId });
+    if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
+    
+    const file = req.file;
+    if (!file || !file.buffer) {
+      return res.status(400).json({ success: false, message: 'Missing audio file (field name: audio)' });
+    }
+    
+    const filename = String(file.originalname || 'campaign.wav').slice(0, 255);
+    const mime = String(file.mimetype || 'audio/wav').slice(0, 128);
+    const size = file.buffer.length;
+    
+    // Simple WAV validation: check for RIFF header
+    if (file.buffer.length < 44) {
+      return res.status(400).json({ success: false, message: 'Invalid WAV file: file too small' });
+    }
+    const header = file.buffer.toString('ascii', 0, 4);
+    if (header !== 'RIFF') {
+      return res.status(400).json({ success: false, message: 'Invalid WAV file: missing RIFF header' });
+    }
+    
+    await pool.execute(
+      `UPDATE dialer_campaigns
+       SET campaign_audio_blob = ?,
+           campaign_audio_filename = ?,
+           campaign_audio_mime = ?,
+           campaign_audio_size = ?,
+           updated_at = NOW()
+       WHERE id = ? AND user_id = ?`,
+      [file.buffer, filename, mime, size, campaignId, userId]
+    );
+    
+    return res.json({
+      success: true,
+      data: {
+        filename,
+        size,
+        mime
+      }
+    });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.campaign-audio.upload] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: e?.message || 'Failed to upload campaign audio' });
+  }
+});
+
+// Download campaign audio (user endpoint)
+app.get('/api/me/dialer/campaigns/:campaignId/audio', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const campaignId = Number(req.params.campaignId || 0);
+    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
+    
+    const [rows] = await pool.execute(
+      `SELECT campaign_audio_blob, campaign_audio_filename, campaign_audio_mime
+       FROM dialer_campaigns
+       WHERE id = ? AND user_id = ? AND status <> 'deleted'
+       LIMIT 1`,
+      [campaignId, userId]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    
+    if (!row || !row.campaign_audio_blob) {
+      return res.status(404).json({ success: false, message: 'No campaign audio found' });
+    }
+    
+    const filename = row.campaign_audio_filename || 'campaign.wav';
+    const mime = row.campaign_audio_mime || 'audio/wav';
+    const blob = row.campaign_audio_blob;
+    
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', blob.length);
+    return res.send(blob);
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.campaign-audio.download] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to download campaign audio' });
+  }
+});
+
+// Delete campaign audio
+app.delete('/api/me/dialer/campaigns/:campaignId/audio', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const campaignId = Number(req.params.campaignId || 0);
+    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
+    
+    const campaign = await fetchDialerCampaignById({ userId, campaignId });
+    if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
+    
+    await pool.execute(
+      `UPDATE dialer_campaigns
+       SET campaign_audio_blob = NULL,
+           campaign_audio_filename = NULL,
+           campaign_audio_mime = NULL,
+           campaign_audio_size = NULL,
+           updated_at = NOW()
+       WHERE id = ? AND user_id = ?`,
+      [campaignId, userId]
+    );
+    
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.campaign-audio.delete] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to delete campaign audio' });
+  }
+});
+
+// Bot endpoint: stream campaign audio (authenticated by PORTAL_AGENT_ACTION_TOKEN)
+app.get('/api/ai/agent/campaigns/:campaignId/audio', async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    
+    // Authenticate using PORTAL_AGENT_ACTION_TOKEN
+    const authHeader = String(req.headers.authorization || '');
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+    const expectedToken = String(process.env.PORTAL_AGENT_ACTION_TOKEN || '').trim();
+    
+    if (!expectedToken || token !== expectedToken) {
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+    
+    const campaignId = Number(req.params.campaignId || 0);
+    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
+    
+    const [rows] = await pool.execute(
+      `SELECT campaign_audio_blob, campaign_audio_filename, campaign_audio_mime
+       FROM dialer_campaigns
+       WHERE id = ? AND status <> 'deleted'
+       LIMIT 1`,
+      [campaignId]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    
+    if (!row || !row.campaign_audio_blob) {
+      return res.status(404).json({ success: false, message: 'No campaign audio found' });
+    }
+    
+    const mime = row.campaign_audio_mime || 'audio/wav';
+    const blob = row.campaign_audio_blob;
+    
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Content-Length', blob.length);
+    return res.send(blob);
+  } catch (e) {
+    if (DEBUG) console.error('[ai.agent.campaigns.audio] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to stream campaign audio' });
+  }
+});
 
 // Debug endpoint: manually update call status for testing
 app.post('/api/me/dialer/debug/update-call-status', requireAuth, async (req, res) => {
