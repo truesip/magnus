@@ -9688,8 +9688,10 @@ async function startDialerLeadCall({ campaign, lead }) {
   const agentId = Number(campaign.ai_agent_id) || 0;
 
   // Check if campaign has audio (audio-only mode)
+  // Note: Even audio-only campaigns require an AI agent for the Pipecat endpoint
+  // The agent won't be used for AI - bot.py will play audio instead
   const hasCampaignAudio = Boolean(campaign.campaign_audio_blob || campaign.campaign_audio_size);
-  const audioOnlyMode = hasCampaignAudio && !agentId;
+  const audioOnlyMode = hasCampaignAudio;  // Audio-only mode when campaign has audio
 
   let agent = null;
   if (agentId) {
