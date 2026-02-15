@@ -2849,28 +2849,36 @@ async def bot(session_args: Any):
             vision_state=vision_state,
         )
 
-    steps = [
-        transport.input(),
-    ]
-    if vision_bridge:
-        steps.append(vision_bridge)
-    steps.extend([
-        stt,
-        ctx_user,
-        llm,
-    ])
-    if tts:
-        steps.append(tts)
-    if bg_mixer:
-        steps.append(bg_mixer)
-    if heygen_service:
-        steps.append(heygen_service)
-    if akool_service:
-        steps.append(akool_service)
-    steps.extend([
-        ctx_assistant,
-        transport.output(),
-    ])
+    # Audio-only mode: build minimal pipeline (just transport in/out)
+    if audio_only_mode:
+        steps = [
+            transport.input(),
+            transport.output(),
+        ]
+    else:
+        # Normal AI mode: full pipeline with STT/LLM/TTS
+        steps = [
+            transport.input(),
+        ]
+        if vision_bridge:
+            steps.append(vision_bridge)
+        steps.extend([
+            stt,
+            ctx_user,
+            llm,
+        ])
+        if tts:
+            steps.append(tts)
+        if bg_mixer:
+            steps.append(bg_mixer)
+        if heygen_service:
+            steps.append(heygen_service)
+        if akool_service:
+            steps.append(akool_service)
+        steps.extend([
+            ctx_assistant,
+            transport.output(),
+        ])
 
     pipeline = Pipeline(steps)
 
