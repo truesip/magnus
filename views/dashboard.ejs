@@ -1684,8 +1684,14 @@
             <input id="dialerCampaignNameInput" type="text" placeholder="e.g. January Renewals" required>
           </label>
           <label style="display:flex;flex-direction:column;gap:4px">
-            <span>AI Agent *</span>
+            <span>AI Agent</span>
             <select id="dialerAgentSelect"><option value="">Loading agents…</option></select>
+            <div class="muted" style="font-size:11px;margin-top:2px">AI agent is optional. Leave empty to use audio-only mode.</div>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px">
+            <span>Campaign Audio (Optional)</span>
+            <input id="dialerCampaignAudioInput" type="file" accept=".wav,audio/wav" style="font-size:12px">
+            <div class="muted" style="font-size:11px;margin-top:2px">Upload a WAV file (max 10MB) to play instead of AI agent. If you upload audio without selecting an agent, the campaign will use audio-only mode.</div>
           </label>
           <label style="display:flex;flex-direction:column;gap:4px">
             <span>Concurrent Calls</span>
@@ -2430,7 +2436,8 @@
       for (const c of dialerCampaigns){
         const stats = c.stats || {};
         const updatedAt = c.updated_at ? new Date(c.updated_at).toLocaleString() : '—';
-        const aiName = c.ai_agent_name || `Agent ${c.ai_agent_id || ''}`;
+        const hasAudio = c.has_campaign_audio || false;
+        const aiName = c.ai_agent_name ? escapeHtml(c.ai_agent_name) : (c.ai_agent_id ? `Agent ${c.ai_agent_id}` : (hasAudio ? '🔊 Audio Only' : '—'));
         const leadsSummary = `${dialerNumber(stats.completed)} / ${dialerNumber(stats.totalLeads)} completed`;
         const actions = [];
         actions.push(`<button class="btn--muted" data-dialer-action="upload" data-id="${escapeHtml(String(c.id))}">Upload CSV</button>`);
@@ -2502,15 +2509,18 @@
       if (!sel) return;
       const prev = sel.value;
       sel.innerHTML = '';
+      
+      // Always allow empty selection for audio-only mode
+      sel.disabled = false;
+      sel.appendChild(new Option('(None - Audio Only)', ''));
+      
       if (!Array.isArray(aiAgentsData) || !aiAgentsData.length){
-        const opt = new Option('Create an AI agent first', '');
+        const opt = new Option('— No AI agents yet —', '');
         opt.disabled = true;
         sel.appendChild(opt);
-        sel.disabled = true;
         return;
       }
-      sel.disabled = false;
-      sel.appendChild(new Option('Select AI agent…', ''));
+      
       for (const a of aiAgentsData){
         const id = a && a.id != null ? String(a.id) : '';
         if (!id) continue;
@@ -2525,6 +2535,7 @@
       const modal = $('#dialerCreateModal');
       if (!modal) return;
       $('#dialerCampaignNameInput').value = '';
+      $('#dialerCampaignAudioInput').value = '';
       $('#dialerConcurrencyInput').value = '1';
       $('#dialerConcurrencyValue').textContent = '1';
       const errorEl = $('#dialerCreateError');
@@ -2548,10 +2559,20 @@
       const name = ($('#dialerCampaignNameInput').value || '').trim();
       const agentId = ($('#dialerAgentSelect').value || '').trim();
       const concurrency = parseInt($('#dialerConcurrencyInput').value || '1', 10) || 1;
+      const audioFile = $('#dialerCampaignAudioInput').files ? $('#dialerCampaignAudioInput').files[0] : null;
       const errorEl = $('#dialerCreateError');
-      if (!name || !agentId){
+      
+      if (!name){
         if (errorEl){
-          errorEl.textContent = 'Name and AI agent are required.';
+          errorEl.textContent = 'Campaign name is required.';
+          errorEl.style.display = 'block';
+        }
+        return;
+      }
+      
+      if (!agentId && !audioFile){
+        if (errorEl){
+          errorEl.textContent = 'Either AI agent or campaign audio is required.';
           errorEl.style.display = 'block';
         }
         return;
@@ -2567,9 +2588,13 @@
       try {
         const payload = {
           name,
-          ai_agent_id: agentId,
           concurrency_limit: concurrency
         };
+        // Only include ai_agent_id if provided
+        if (agentId) {
+          payload.ai_agent_id = agentId;
+        }
+        
         const r = await fetch('/api/me/dialer/campaigns', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2579,10 +2604,34 @@
         if (!r.ok || !j || j.success === false){
           throw new Error(j?.message || 'Failed to create campaign');
         }
-        showToast('Campaign created.');
+        
+        const newId = j && j.data && j.data.id != null ? String(j.data.id) : '';
+        
+        // Upload audio if provided
+        if (audioFile && newId) {
+          if (btn) btn.textContent = 'Uploading audio...';
+          try {
+            const fd = new FormData();
+            fd.append('file', audioFile);
+            const audioR = await fetch(`/api/me/dialer/campaigns/${encodeURIComponent(newId)}/audio`, {
+              method: 'POST',
+              body: fd
+            });
+            const audioJ = await audioR.json();
+            if (!audioR.ok || !audioJ || audioJ.success === false){
+              throw new Error(audioJ?.message || 'Failed to upload audio');
+            }
+            showToast('Campaign created with audio.');
+          } catch (audioErr) {
+            console.error('[dialer.audio]', audioErr);
+            showToast(`Campaign created but audio upload failed: ${audioErr?.message || 'Unknown error'}`, 'error');
+          }
+        } else {
+          showToast('Campaign created.');
+        }
+        
         closeDialerCreateModal();
         await loadDialerCampaigns();
-        const newId = j && j.data && j.data.id != null ? String(j.data.id) : '';
         if (newId){
           openDialerUploadModal(newId);
         }

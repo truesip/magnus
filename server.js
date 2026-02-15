@@ -9687,6 +9687,10 @@ async function startDialerLeadCall({ campaign, lead }) {
   const leadId = Number(lead.id);
   const agentId = Number(campaign.ai_agent_id) || 0;
 
+  // Check if campaign has audio (audio-only mode)
+  const hasCampaignAudio = Boolean(campaign.campaign_audio_blob || campaign.campaign_audio_size);
+  const audioOnlyMode = hasCampaignAudio && !agentId;
+
   let agent = null;
   if (agentId) {
     try {
@@ -9701,7 +9705,9 @@ async function startDialerLeadCall({ campaign, lead }) {
     }
   }
 
-  if (!agent || !agent.pipecat_agent_name) {
+  // For audio-only campaigns, we use a default agent name but pass audio_only_mode flag
+  // For AI campaigns, require valid agent
+  if (!audioOnlyMode && (!agent || !agent.pipecat_agent_name)) {
     try {
       await pool.execute(
         'UPDATE dialer_leads SET status = ? WHERE id = ? AND user_id = ? LIMIT 1',
@@ -9717,6 +9723,22 @@ async function startDialerLeadCall({ campaign, lead }) {
     return false;
   }
 
+  if (audioOnlyMode && !hasCampaignAudio) {
+    try {
+      await pool.execute(
+        'UPDATE dialer_leads SET status = ? WHERE id = ? AND user_id = ? LIMIT 1',
+        ['failed', leadId, userId]
+      );
+      await pool.execute(
+        `UPDATE dialer_call_logs
+         SET status = 'error', result = 'failed', notes = COALESCE(NULLIF(notes,''), ?)
+         WHERE lead_id = ? ORDER BY id DESC LIMIT 1`,
+        ['Audio-only campaign requires audio file', leadId]
+      );
+    } catch {}
+    return false;
+  }
+
   const callerId = await resolveDialerCallerId({ userId, agentId });
   const { callId, callDomain } = buildDialerCallIdentifiers({ campaignId, leadId });
   const dialoutSettings = {
@@ -9724,13 +9746,24 @@ async function startDialerLeadCall({ campaign, lead }) {
   };
   if (callerId) dialoutSettings.callerId = String(callerId);
 
+  // Build campaign audio URL if in audio-only mode
+  let campaignAudioUrl = '';
+  if (audioOnlyMode) {
+    const portalBase = String(process.env.PUBLIC_BASE_URL || process.env.PORTAL_BASE_URL || '').trim();
+    if (portalBase) {
+      campaignAudioUrl = `${portalBase}/api/ai/agent/campaigns/${campaignId}/audio`;
+    }
+  }
+
   const metadata = {
     campaign_id: campaignId,
     lead_id: leadId,
     phone_number: lead.phone_number,
     call_id: callId,
     call_domain: callDomain,
-    dialout_settings: dialoutSettings
+    dialout_settings: dialoutSettings,
+    audio_only_mode: audioOnlyMode,
+    campaign_audio_url: campaignAudioUrl || null
   };
 
   try {
@@ -9766,14 +9799,21 @@ async function startDialerLeadCall({ campaign, lead }) {
       dialer: {
         campaign_id: campaignId,
         lead_id: leadId
-      }
+      },
+      audio_only_mode: audioOnlyMode,
+      campaign_audio_url: campaignAudioUrl || null
     }
   };
+
+  // For audio-only mode, use first available agent or create a minimal agent name
+  const agentNameForStart = audioOnlyMode 
+    ? (agent?.pipecat_agent_name || 'audio-dialer')
+    : agent.pipecat_agent_name;
 
   try {
     await pipecatApiCall({
       method: 'POST',
-      path: `/public/${encodeURIComponent(agent.pipecat_agent_name)}/start`,
+      path: `/public/${encodeURIComponent(agentNameForStart)}/start`,
       body: startBody
     });
 
@@ -9823,7 +9863,8 @@ async function runDialerWorkerTick() {
   dialerWorkerRunning = true;
   try {
     const [campaigns] = await pool.query(
-      `SELECT id, user_id, name, ai_agent_id, ai_agent_name, sip_account_id, sip_account_label, concurrency_limit
+      `SELECT id, user_id, name, ai_agent_id, ai_agent_name, sip_account_id, sip_account_label, concurrency_limit,
+              campaign_audio_blob, campaign_audio_size
        FROM dialer_campaigns
        WHERE status = 'running'
        ORDER BY updated_at DESC, id DESC
