@@ -9705,9 +9705,9 @@ async function startDialerLeadCall({ campaign, lead }) {
     }
   }
 
-  // For audio-only campaigns, we use a default agent name but pass audio_only_mode flag
-  // For AI campaigns, require valid agent
-  if (!audioOnlyMode && (!agent || !agent.pipecat_agent_name)) {
+  // Even for audio-only campaigns, we need a valid Pipecat agent endpoint
+  // The agent won't be used for AI, but we need the service to exist
+  if (!agent || !agent.pipecat_agent_name) {
     try {
       await pool.execute(
         'UPDATE dialer_leads SET status = ? WHERE id = ? AND user_id = ? LIMIT 1',
@@ -9717,7 +9717,7 @@ async function startDialerLeadCall({ campaign, lead }) {
         `UPDATE dialer_call_logs
          SET status = 'error', result = 'failed', notes = COALESCE(NULLIF(notes,''), ?)
          WHERE lead_id = ? ORDER BY id DESC LIMIT 1`,
-        ['Missing Pipecat agent configuration', leadId]
+        ['Missing Pipecat agent configuration - please select an AI agent (required for Pipecat endpoint)', leadId]
       );
     } catch {}
     return false;
@@ -9775,7 +9775,7 @@ async function startDialerLeadCall({ campaign, lead }) {
         campaignId,
         leadId,
         userId,
-        agentId,
+        agentId || null,  // Allow NULL for audio-only campaigns
         campaign.sip_account_id || null,
         callId,
         'queued',
@@ -9805,10 +9805,9 @@ async function startDialerLeadCall({ campaign, lead }) {
     }
   };
 
-  // For audio-only mode, use first available agent or create a minimal agent name
-  const agentNameForStart = audioOnlyMode 
-    ? (agent?.pipecat_agent_name || 'audio-dialer')
-    : agent.pipecat_agent_name;
+  // Use the agent's Pipecat service name
+  // For audio-only mode, the agent endpoint exists but bot.py will play audio instead of using AI
+  const agentNameForStart = agent.pipecat_agent_name;
 
   try {
     await pipecatApiCall({
