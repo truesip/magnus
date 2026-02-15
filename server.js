@@ -5535,14 +5535,15 @@ app.get('/api/me/ai/payment-requests', requireAuth, async (req, res) => {
     );
     const total = countRows && countRows[0] ? Number(countRows[0].total) : 0;
 
-    const [rows] = await pool.execute(
+    // Use query() instead of execute() to avoid MySQL prepared statement issues with LIMIT/OFFSET
+    const [rows] = await pool.query(
       `SELECT id, provider, amount_cents, currency, description, customer_email, customer_phone,
               payment_url, status, call_id, call_domain, paid_at, created_at
        FROM user_payment_requests
        WHERE ${whereClause}
        ORDER BY created_at DESC
-       LIMIT ? OFFSET ?`,
-      [...params, limit, offset]
+       LIMIT ${parseInt(limit, 10)} OFFSET ${parseInt(offset, 10)}`,
+      params
     );
 
     // Get payment stats for charts
