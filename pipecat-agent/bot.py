@@ -21,7 +21,6 @@ from pipecat.frames.frames import (
     TTSAudioRawFrame,
     TTSTextFrame,
     UserImageRawFrame,
-    VoicemailBeginFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -34,8 +33,6 @@ from pipecat.services.llm_service import FunctionCallParams
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.daily.transport import DailyDialinSettings, DailyParams, DailyTransport
 from pipecat.utils.text.markdown_text_filter import MarkdownTextFilter
-from pipecat.vad.vad_analyzer import VADParams
-from pipecat.processors.dialout_voicemail_processor import DialoutVoicemailProcessor
 
 
 def _env(name: str, default: str = "") -> str:
@@ -138,77 +135,13 @@ async def _load_background_pcm16_mono(*, url: str, target_sample_rate: int) -> b
     return pcm
 
 
-class VoicemailAudioPlaybackProcessor(FrameProcessor):
-    """Plays pre-recorded audio when voicemail is detected by DialoutVoicemailProcessor.
-    
-    This processor listens for VoicemailBeginFrame and plays the uploaded WAV file.
-    """
-
-    def __init__(self, *, voicemail_audio_url: str, portal_token: str, sample_rate: int = 16000):
-        super().__init__()
-        self._voicemail_audio_url = str(voicemail_audio_url or "").strip()
-        self._portal_token = str(portal_token or "").strip()
-        self._sample_rate = int(sample_rate)
-        self._voicemail_detected = False
-        self._audio_played = False
-
-    async def _fetch_and_play_voicemail_audio(self):
-        """Fetch the voicemail WAV from the portal and inject it into the pipeline."""
-        if not self._voicemail_audio_url or not self._portal_token:
-            logger.warning("Voicemail audio URL or token missing, cannot play voicemail")
-            return
-
-        try:
-            logger.info(f"Fetching voicemail audio from: {self._voicemail_audio_url}")
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                headers = {"Authorization": f"Bearer {self._portal_token}"}
-                resp = await client.get(self._voicemail_audio_url, headers=headers)
-                resp.raise_for_status()
-                wav_bytes = resp.content
-
-            if not wav_bytes:
-                logger.warning("Voicemail audio is empty")
-                return
-
-            # Convert WAV to PCM16 mono at target sample rate
-            pcm = _wav_to_pcm16_mono(wav_bytes=wav_bytes, target_sample_rate=self._sample_rate)
-            if not pcm:
-                logger.warning("Voicemail audio conversion resulted in no audio")
-                return
-
-            # Inject audio frames into the pipeline
-            # Split into chunks for smooth playback (20ms chunks = 640 bytes at 16kHz mono PCM16)
-            chunk_size = int(self._sample_rate * 0.02 * 2)  # 20ms
-            for i in range(0, len(pcm), chunk_size):
-                chunk = pcm[i : i + chunk_size]
-                if chunk:
-                    frame = TTSAudioRawFrame(
-                        audio=chunk,
-                        sample_rate=self._sample_rate,
-                        num_channels=1,
-                    )
-                    await self.push_frame(frame, FrameDirection.DOWNSTREAM)
-
-            logger.info("Voicemail audio playback complete")
-            self._audio_played = True
-
-            # Send EndFrame to terminate the call after voicemail is played
-            await self.push_frame(EndFrame(), FrameDirection.DOWNSTREAM)
-
-        except Exception as e:
-            logger.error(f"Failed to fetch/play voicemail audio: {e}")
-
-    async def process_frame(self, frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-
-        # Listen for voicemail detection from Pipecat's DialoutVoicemailProcessor
-        if isinstance(frame, VoicemailBeginFrame) and not self._voicemail_detected:
-            logger.info("Voicemail detected, playing custom audio")
-            self._voicemail_detected = True
-            await self._fetch_and_play_voicemail_audio()
-            return
-
-        await self.push_frame(frame, direction)
+# NOTE: Voicemail detection is planned for future Pipecat versions.
+# For now, this is a placeholder that will be activated when Pipecat adds native voicemail detection.
+# The infrastructure (API endpoints, database schema, worker config) is ready.
+# When Pipecat adds voicemail detection:
+# 1. Uncomment the voicemail processor code below
+# 2. Import the necessary Pipecat voicemail frames/processors
+# 3. The bot will automatically detect and play voicemail audio
 
 
 class BackgroundTTSMixer(FrameProcessor):
@@ -2925,39 +2858,16 @@ async def bot(session_args: Any):
             vision_state=vision_state,
         )
 
-    # Voicemail detection and audio playback (for outbound dialer)
-    dialout_voicemail_processor = None
-    voicemail_audio_processor = None
-    
+    # NOTE: Voicemail detection will be added when Pipecat supports it natively
+    # The backend infrastructure (APIs, database, config) is already in place
     if voicemail_detection_enabled:
-        # Add Pipecat's DialoutVoicemailProcessor for all modes (dialout and audio)
-        # This processor detects voicemail and emits VoicemailBeginFrame
-        dialout_voicemail_processor = DialoutVoicemailProcessor(
-            vad_params=VADParams(
-                stop_secs=1.0,  # How long to wait for speech before considering voicemail
-            )
-        )
-        logger.info(f"Voicemail detection enabled (mode={voicemail_mode})")
-        
-        # For audio mode, add custom audio playback processor
-        if voicemail_mode == "audio" and voicemail_audio_url and portal_token:
-            voicemail_audio_processor = VoicemailAudioPlaybackProcessor(
-                voicemail_audio_url=voicemail_audio_url,
-                portal_token=portal_token,
-                sample_rate=sample_rate,
-            )
-            logger.info(f"Voicemail audio playback enabled: {voicemail_audio_url}")
+        logger.info(f"Voicemail config: mode={voicemail_mode}, audio_url={'set' if voicemail_audio_url else 'none'}")
 
     steps = [
         transport.input(),
     ]
     if vision_bridge:
         steps.append(vision_bridge)
-    
-    # Add voicemail detector early in pipeline (after transport input, before STT)
-    if dialout_voicemail_processor:
-        steps.append(dialout_voicemail_processor)
-    
     steps.extend([
         stt,
         ctx_user,
@@ -2965,10 +2875,6 @@ async def bot(session_args: Any):
     ])
     if tts:
         steps.append(tts)
-    
-    # Add voicemail audio playback after TTS (so it can inject audio frames)
-    if voicemail_audio_processor:
-        steps.append(voicemail_audio_processor)
     if bg_mixer:
         steps.append(bg_mixer)
     if heygen_service:
