@@ -3058,15 +3058,16 @@ async def bot(session_args: Any):
     video_capture_started = False
     dialout_started = False
     dialout_starting = False
+    dialout_answered = False
 
-    @transport.event_handler("on_first_participant_joined")
-    async def on_first_participant_joined(_transport, _participant):
-        nonlocal greeted
-        nonlocal video_capture_started
-
-        # Audio-only mode: play campaign audio then hang up
-        if audio_only_mode and audio_only_pcm:
-            logger.info("Participant joined, playing campaign audio...")
+    @transport.event_handler("on_dialout_answered")
+    async def on_dialout_answered(_transport, data):
+        nonlocal dialout_answered
+        
+        # Audio-only mode: play campaign audio after call is answered
+        if audio_only_mode and audio_only_pcm and not dialout_answered:
+            dialout_answered = True
+            logger.info("Dialout answered, playing campaign audio...")
             try:
                 # Wait a moment for audio to stabilize
                 await asyncio.sleep(0.5)
@@ -3091,6 +3092,13 @@ async def bot(session_args: Any):
                 except Exception:
                     pass
             return
+
+    @transport.event_handler("on_first_participant_joined")
+    async def on_first_participant_joined(_transport, _participant):
+        nonlocal greeted
+        nonlocal video_capture_started
+
+        # Skip audio playback in audio-only mode - wait for dialout_answered instead
 
         # Optional greeting
         if greeting and not greeted:
