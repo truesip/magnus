@@ -2612,7 +2612,7 @@
           if (btn) btn.textContent = 'Uploading audio...';
           try {
             const fd = new FormData();
-            fd.append('file', audioFile);
+            fd.append('audio', audioFile);
             const audioR = await fetch(`/api/me/dialer/campaigns/${encodeURIComponent(newId)}/audio`, {
               method: 'POST',
               body: fd
