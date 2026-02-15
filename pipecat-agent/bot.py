@@ -3059,6 +3059,7 @@ async def bot(session_args: Any):
     dialout_started = False
     dialout_starting = False
     dialout_answered = False
+    inbound_transfer_attempted = False
 
     @transport.event_handler("on_dialout_answered")
     async def on_dialout_answered(_transport, data):
@@ -3097,6 +3098,57 @@ async def bot(session_args: Any):
     async def on_first_participant_joined(_transport, _participant):
         nonlocal greeted
         nonlocal video_capture_started
+        nonlocal inbound_transfer_attempted
+        nonlocal call_transferred
+        nonlocal call_result
+
+        # Handle inbound direct transfer (transfer immediately after participant joins)
+        if dialin_settings and agent_inbound_transfer_enabled and agent_inbound_transfer_number and not inbound_transfer_attempted:
+            inbound_transfer_attempted = True
+            logger.info(f"Inbound direct transfer enabled, transferring to {agent_inbound_transfer_number}")
+            call_transferred = True
+            call_result = "transferred"
+            try:
+                # Wait a moment for the session to stabilize
+                await asyncio.sleep(0.5)
+                
+                # Try SIP REFER first, then fall back to call transfer
+                session_id = ""
+                try:
+                    client = getattr(transport, "_client", None)
+                    if client is not None:
+                        session_id = str(getattr(client, "_dial_in_session_id", "") or "").strip()
+                except Exception:
+                    session_id = ""
+
+                refer_settings = {"toEndPoint": agent_inbound_transfer_number}
+                if session_id:
+                    refer_settings["sessionId"] = session_id
+
+                error = None
+                if session_id:
+                    error = await transport.sip_refer(refer_settings)
+                else:
+                    error = "Missing sessionId for SIP REFER"
+
+                if error:
+                    logger.warning(f"sip_refer failed for inbound transfer, falling back to sip_call_transfer: {error}")
+                    error = await transport.sip_call_transfer({"toEndPoint": agent_inbound_transfer_number})
+
+                if error:
+                    logger.error(f"Inbound direct transfer failed: {error}")
+                else:
+                    logger.info("Inbound direct transfer initiated successfully")
+
+                # Leave the call immediately after transfer
+                try:
+                    await transport.leave()
+                except Exception:
+                    pass
+                return
+            except Exception as e:
+                logger.error(f"Inbound direct transfer error: {e}")
+                # Continue with normal flow if transfer fails
 
         # Skip audio playback in audio-only mode - wait for dialout_answered instead
 
@@ -3187,50 +3239,6 @@ async def bot(session_args: Any):
     call_start_time = asyncio.get_event_loop().time()
     call_result = "completed"  # Default result; updated by call outcome
     call_transferred = False
-
-    # Handle inbound direct transfer (transfer immediately on call start if enabled)
-    if dialin_settings and agent_inbound_transfer_enabled and agent_inbound_transfer_number:
-        logger.info(f"Inbound direct transfer enabled, transferring to {agent_inbound_transfer_number}")
-        call_transferred = True
-        call_result = "transferred"
-        try:
-            # Try SIP REFER first, then fall back to call transfer
-            session_id = ""
-            try:
-                client = getattr(transport, "_client", None)
-                if client is not None:
-                    session_id = str(getattr(client, "_dial_in_session_id", "") or "").strip()
-            except Exception:
-                session_id = ""
-
-            refer_settings = {"toEndPoint": agent_inbound_transfer_number}
-            if session_id:
-                refer_settings["sessionId"] = session_id
-
-            error = None
-            if session_id:
-                error = await transport.sip_refer(refer_settings)
-            else:
-                error = "Missing sessionId for SIP REFER"
-
-            if error:
-                logger.warning(f"sip_refer failed for inbound transfer, falling back to sip_call_transfer: {error}")
-                error = await transport.sip_call_transfer({"toEndPoint": agent_inbound_transfer_number})
-
-            if error:
-                logger.error(f"Inbound direct transfer failed: {error}")
-            else:
-                logger.info("Inbound direct transfer initiated successfully")
-
-            # Leave the call immediately after transfer
-            try:
-                await transport.leave()
-            except Exception:
-                pass
-            return
-        except Exception as e:
-            logger.error(f"Inbound direct transfer error: {e}")
-            # Continue with normal flow if transfer fails
 
     # Audio-only mode: fetch audio first, then play after call establishes
     audio_only_pcm = None
