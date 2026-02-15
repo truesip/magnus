@@ -3222,9 +3222,20 @@ async def bot(session_args: Any):
         logger.info(f"Audio-only mode enabled, fetching campaign audio from {campaign_audio_url}")
         try:
             # Fetch and convert audio before starting the call
-            audio_data = await _download_bytes_limited(campaign_audio_url, max_bytes=10 * 1024 * 1024)
+            headers = {}
+            if portal_token:
+                headers["Authorization"] = f"Bearer {portal_token}"
+            
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                resp = await client.get(campaign_audio_url, headers=headers)
+                resp.raise_for_status()
+                audio_data = resp.content
+                
+                if len(audio_data) > 10 * 1024 * 1024:
+                    raise RuntimeError("Campaign audio file is too large (>10MB)")
+            
             audio_only_pcm = _wav_to_pcm16_mono(wav_bytes=audio_data, target_sample_rate=sample_rate)
-            logger.info(f"Campaign audio loaded: {len(audio_only_pcm)} bytes")
+            logger.info(f"Campaign audio loaded: {len(audio_only_pcm)} bytes PCM")
         except Exception as e:
             logger.error(f"Failed to load campaign audio: {e}")
             # Continue without audio - will just end the call
