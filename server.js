@@ -12093,6 +12093,7 @@ app.get('/api/me/ai/agents', requireAuth, async (req, res) => {
     const [rows] = await pool.execute(
       `SELECT a.id, a.display_name, a.greeting, a.prompt, a.cartesia_voice_id,
               a.background_audio_url, a.background_audio_gain, a.transfer_to_number,
+              a.inbound_transfer_enabled, a.inbound_transfer_number,
               CASE WHEN ba.agent_id IS NULL THEN 0 ELSE 1 END AS background_audio_uploaded,
               ba.original_filename AS background_audio_upload_filename,
               ba.size_bytes AS background_audio_upload_size_bytes,
