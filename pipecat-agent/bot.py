@@ -3233,6 +3233,9 @@ async def bot(session_args: Any):
             headers = {}
             if portal_token:
                 headers["Authorization"] = f"Bearer {portal_token}"
+                logger.debug(f"Using portal token for audio fetch (length={len(portal_token)})")
+            else:
+                logger.warning("No portal token available for audio fetch - authentication may fail")
             
             async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
                 resp = await client.get(campaign_audio_url, headers=headers)
@@ -3244,6 +3247,10 @@ async def bot(session_args: Any):
             
             audio_only_pcm = _wav_to_pcm16_mono(wav_bytes=audio_data, target_sample_rate=sample_rate)
             logger.info(f"Campaign audio loaded: {len(audio_only_pcm)} bytes PCM")
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to fetch campaign audio (HTTP {e.response.status_code}): {e}")
+            logger.error(f"Response body: {e.response.text[:500] if e.response.text else '(empty)'}")
+            # Continue without audio - will just end the call
         except Exception as e:
             logger.error(f"Failed to load campaign audio: {e}")
             # Continue without audio - will just end the call
